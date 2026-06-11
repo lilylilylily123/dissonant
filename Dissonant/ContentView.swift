@@ -44,10 +44,11 @@ struct ContentView: View {
             Theme.surface.ignoresSafeArea()
             HStack(spacing: 0) {
                 TrackSidebarView(
-                    tracks: $document.model.tracks,
+                    tracks: document.model.tracks,
                     selectedTrackID: selID,
                     onAdd: addTrack,
                     onSelect: { selectedTrackID = $0 },
+                    onRename: renameTrack,
                     onDelete: deleteTrack
                 )
                 VStack(alignment: .leading, spacing: 14) {
@@ -121,6 +122,11 @@ struct ContentView: View {
         guard document.model.tracks.count > 1 else { return }
         document.model.tracks.removeAll { $0.id == id }
         if selID == id { selectedTrackID = document.model.tracks.first?.id }
+    }
+
+    private func renameTrack(_ id: UUID, _ name: String) {
+        guard let i = document.model.tracks.firstIndex(where: { $0.id == id }) else { return }
+        document.model.tracks[i].name = name
     }
 
     // MARK: - Voice
