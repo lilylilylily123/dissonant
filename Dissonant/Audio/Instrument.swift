@@ -1,12 +1,18 @@
 import AudioKit
 
-/// A playable instrument voice — an AudioKit `Node` plus note on/off. Concrete voices:
-/// `SynthInstrument` (preset synths), `SamplerInstrument` (SF2), and AU-hosted instruments.
+/// Anything the sequencer can play MIDI notes into — synth voices, samplers, or hosted
+/// Audio Units. Decoupled from the audio graph so a hosted AU (not an AudioKit `Node`) can
+/// still be a melody voice.
 @MainActor
-protocol Instrument: AnyObject {
-    var node: Node { get }
+protocol MidiPlayable: AnyObject {
     func noteOn(_ pitch: UInt8, velocity: UInt8)
     func noteOff(_ pitch: UInt8)
+}
+
+/// A playable voice that lives in the AudioKit mixer graph (exposes a `Node`).
+@MainActor
+protocol Instrument: MidiPlayable {
+    var node: Node { get }
 }
 
 /// SF2 sampler voice. `init?` fails when the named soundfont isn't bundled, letting the

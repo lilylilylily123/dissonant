@@ -3,7 +3,7 @@ import DissonantCore
 
 /// The main window: the guidance experience. The chord progression drives the live tier
 /// highlighting; by default you don't *hear* the chords. The melody plays through a
-/// selectable voice. All content (chords, notes, key) lives in the document (U11).
+/// selectable voice — a built-in synth or any installed Audio Unit instrument.
 struct ContentView: View {
     @Binding var document: ProjectDocument
 
@@ -14,8 +14,14 @@ struct ContentView: View {
 
     @State private var hearChords = false
     @State private var showLandscape = false
-    @State private var melodyVoice: VoiceKind = .keys
 
+    // Melody voice: a synth preset, or a hosted Audio Unit (overrides the synth when set).
+    @State private var melodyVoice: VoiceKind = .keys
+    @State private var melodyAU: AUHostInstrument?
+    @State private var auName: String?
+    @State private var showAUBrowser = false
+
+    private var currentMelody: MidiPlayable { melodyAU ?? audio.instrument(for: melodyVoice) }
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { document.model.chordTrack.chord(atBeat: playhead)?.name ?? "—" }
 
@@ -31,7 +37,7 @@ struct ContentView: View {
                     chordTrack: document.model.chordTrack,
                     key: document.model.key,
                     playheadBeat: playhead,
-                    onAudition: { pitch in audio.audition(UInt8(clamping: pitch), voice: melodyVoice) },
+                    onAudition: { pitch in audio.audition(UInt8(clamping: pitch), on: currentMelody) },
                     showLandscape: showLandscape
                 )
                 PlayableNowView(chordTrack: document.model.chordTrack, key: document.model.key, playheadBeat: playhead)
@@ -40,10 +46,13 @@ struct ContentView: View {
             .padding(18)
         }
         .frame(minWidth: 880, minHeight: 740)
+        .sheet(isPresented: $showAUBrowser) {
+            AUBrowserView(onSelect: { selectAU($0) }, onClose: { showAUBrowser = false })
+        }
         .onAppear {
             audio.start()
             playback = ChordPlayback(instrument: audio.chordInstrument)
-            notePlayback = NotePlayback(instrument: audio.instrument(for: melodyVoice))
+            notePlayback = NotePlayback(instrument: currentMelody)
             transport.tempo = Tempo(bpm: document.model.tempo)
             if document.model.chordTrack.isEmpty {
                 document.model.chordTrack = ProjectModel.starter.chordTrack
@@ -55,9 +64,26 @@ struct ContentView: View {
             if hearChords { playback?.update(forBeat: beat, in: document.model.chordTrack) }
         }
         .onChange(of: hearChords) { _, on in if !on { playback?.releaseAll() } }
-        .onChange(of: melodyVoice) { _, voice in
+    }
+
+    // MARK: - Voice selection
+
+    private func selectSynth(_ voice: VoiceKind) {
+        melodyVoice = voice
+        melodyAU = nil
+        auName = nil
+        notePlayback?.releaseAll()
+        notePlayback?.instrument = audio.instrument(for: voice)
+    }
+
+    private func selectAU(_ info: AUInstrumentInfo) {
+        showAUBrowser = false
+        audio.loadAudioUnit(info) { host in
+            guard let host else { return }
+            melodyAU = host
+            auName = info.name
             notePlayback?.releaseAll()
-            notePlayback?.instrument = audio.instrument(for: voice)
+            notePlayback?.instrument = host
         }
     }
 
@@ -72,6 +98,8 @@ struct ContentView: View {
     private func rewind() {
         transport.rewind(); playback?.releaseAll(); notePlayback?.releaseAll()
     }
+
+    // MARK: - Chrome
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
@@ -101,7 +129,7 @@ struct ContentView: View {
             ctrlButton(hearChords ? "♪ chords on" : "♪ chords off") { hearChords.toggle() }
                 .foregroundStyle(hearChords ? Theme.brand : Theme.faded)
             ctrlButton("clear") { document.model.noteEvents.removeAll() }
-            ctrlButton("test tone") { audio.audition(60, voice: melodyVoice) }
+            ctrlButton("test tone") { audio.audition(60, on: currentMelody) }
         }
     }
 
@@ -110,16 +138,22 @@ struct ContentView: View {
             Text("voice")
                 .font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
             ForEach(VoiceKind.allCases) { voice in
-                let selected = voice == melodyVoice
-                Button(voice.label) { melodyVoice = voice }
-                    .buttonStyle(.plain)
-                    .font(.custom(Theme.mono, size: 11))
-                    .foregroundStyle(selected ? Theme.surface : Theme.ink)
-                    .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(selected ? Theme.brand : Theme.panel)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                let selected = melodyAU == nil && voice == melodyVoice
+                voiceChip(voice.label, selected: selected) { selectSynth(voice) }
             }
+            Divider().frame(height: 16).overlay(Theme.gridLine)
+            voiceChip(auName ?? "AU…", selected: melodyAU != nil) { showAUBrowser = true }
         }
+    }
+
+    private func voiceChip(_ label: String, selected: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(label, action: action)
+            .buttonStyle(.plain)
+            .font(.custom(Theme.mono, size: 11))
+            .foregroundStyle(selected ? Theme.surface : Theme.ink)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(selected ? Theme.brand : Theme.panel)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 
     private func ctrlButton(_ label: String, _ action: @escaping () -> Void) -> some View {

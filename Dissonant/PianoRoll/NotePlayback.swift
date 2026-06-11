@@ -8,10 +8,10 @@ import DissonantCore
 @MainActor
 final class NotePlayback {
     /// The melody voice. Swap it (after `releaseAll`) when the user picks a different voice.
-    var instrument: Instrument
+    var instrument: MidiPlayable
     private var soundingPitch: [UUID: UInt8] = [:]
 
-    init(instrument: Instrument) {
+    init(instrument: MidiPlayable) {
         self.instrument = instrument
     }
 

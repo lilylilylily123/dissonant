@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import AudioKit
 
 /// Owns the AudioKit engine and a bank of voices, all wired into one mixer. The melody is
@@ -41,12 +42,25 @@ final class AudioEngineController {
         engine.stop()
     }
 
-    /// Play a note briefly through a voice — used for placement audition and the test tone.
-    func audition(_ pitch: UInt8, voice: VoiceKind) {
-        let inst = instrument(for: voice)
-        inst.noteOn(pitch, velocity: 100)
+    /// Play a note briefly through any voice — used for placement audition and the test tone.
+    func audition(_ pitch: UInt8, on playable: MidiPlayable) {
+        playable.noteOn(pitch, velocity: 100)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            inst.noteOff(pitch)
+            playable.noteOff(pitch)
+        }
+    }
+
+    /// Instantiate an installed AU instrument and wire it into the mixer. The completion
+    /// returns a playable handle (or nil on failure) on the main thread.
+    func loadAudioUnit(_ info: AUInstrumentInfo, completion: @escaping (AUHostInstrument?) -> Void) {
+        AVAudioUnit.instantiate(with: info.componentDescription, options: []) { [weak self] unit, _ in
+            DispatchQueue.main.async {
+                guard let self, let unit else { completion(nil); return }
+                let av = self.engine.avEngine
+                av.attach(unit)
+                av.connect(unit, to: self.mixer.avAudioNode, format: nil)
+                completion(AUHostInstrument(avAudioUnit: unit))
+            }
         }
     }
 }

@@ -6,14 +6,14 @@ import DissonantCore
 /// root-position in one octave — richer voicing is a later refinement.
 @MainActor
 final class ChordPlayback {
-    private let instrument: Instrument
+    private let instrument: MidiPlayable
     private var currentChordID: UUID?
     private var soundingPitches: [UInt8] = []
 
     /// MIDI octave base for the bed (C4 = 60).
     private let octaveBase: Int = 60
 
-    init(instrument: Instrument) {
+    init(instrument: MidiPlayable) {
         self.instrument = instrument
     }
 
