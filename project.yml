@@ -1,0 +1,68 @@
+name: InKey
+options:
+  bundleIdPrefix: com.crackerjack.inkey
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  InKeyCore:
+    path: InKeyCore
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Local dev builds without a signing identity.
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  InKey:
+    type: application
+    platform: macOS
+    sources:
+      - InKey
+    dependencies:
+      - package: InKeyCore
+        product: InKeyCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.crackerjack.inkey.app
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: InKey/Info.plist
+        ENABLE_HARDENED_RUNTIME: "YES"
+    info:
+      path: InKey/Info.plist
+      properties:
+        CFBundleDisplayName: in key
+        CFBundleName: in key
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: ""
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: in key project
+            LSHandlerRank: Owner
+            CFBundleTypeRole: Editor
+            LSItemContentTypes:
+              - com.crackerjack.inkey.project
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.crackerjack.inkey.project
+            UTTypeDescription: in key project
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - inkey
+
+  InKeyTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - InKeyTests
+    dependencies:
+      - target: InKey
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: com.crackerjack.inkey.tests
