@@ -16,8 +16,9 @@ struct PianoRollView: View {
     var showLandscape: Bool = false
 
     // Geometry
-    private let lowMIDI = 48          // C3
-    private let highMIDI = 72         // C5
+    private let lowMIDI = 24          // C1 (bass)
+    private let highMIDI = 84         // C6
+    private let visibleHeight: CGFloat = 380
     private let beats = 16
     private let rowHeight: CGFloat = 16
     private let beatWidth: CGFloat = 44
@@ -39,10 +40,16 @@ struct PianoRollView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            keyboardGutter
-            grid
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                HStack(spacing: 0) {
+                    keyboardGutter
+                    grid
+                }
+            }
+            .onAppear { proxy.scrollTo(60, anchor: .center) }
         }
+        .frame(height: visibleHeight)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
@@ -66,6 +73,7 @@ struct PianoRollView: View {
                 .padding(.horizontal, 5)
                 .frame(width: gutter, height: rowHeight)
                 .background(isBlackKey(pitch) ? Theme.surface : Theme.panel)
+                .id(pitch)
             }
         }
     }

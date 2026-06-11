@@ -2,8 +2,8 @@ import SwiftUI
 import DissonantCore
 
 /// The main window: the guidance experience. The chord progression drives the live tier
-/// highlighting; by default you don't *hear* the chords — you see which notes fit. Play
-/// sweeps the playhead and recolors the roll per chord. Notes you place are audible.
+/// highlighting; by default you don't *hear* the chords — you see which notes fit. All
+/// content (chords, notes, key) lives in the document, so it saves and reopens (U11).
 struct ContentView: View {
     @Binding var document: ProjectDocument
 
@@ -12,58 +12,44 @@ struct ContentView: View {
     @State private var playback: ChordPlayback?
     @State private var notePlayback: NotePlayback?
 
-    @State private var chordTrack = ChordTrackModel(chords: [
-        ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
-        ChordEvent(startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F"),
-        ChordEvent(startBeat: 8, lengthBeats: 4, pitchClasses: [7, 11, 2], name: "G"),
-        ChordEvent(startBeat: 12, lengthBeats: 4, pitchClasses: [9, 0, 4], name: "Am")
-    ])
-
-    // Key inference wiring lands in U10; cold-start neutral for now.
-    @State private var key: KeyState = .none
-    // The chord progression is guidance context — off by default, opt-in to hear it.
     @State private var hearChords = false
-    // Show the whole-progression harmonic map (dissonant sections across the timeline).
     @State private var showLandscape = false
 
     private var playhead: Double { transport.state.positionBeats }
-    private var currentChordName: String { chordTrack.chord(atBeat: playhead)?.name ?? "—" }
+    private var currentChordName: String { document.model.chordTrack.chord(atBeat: playhead)?.name ?? "—" }
 
     var body: some View {
         ZStack {
             Theme.surface.ignoresSafeArea()
             VStack(alignment: .leading, spacing: 14) {
                 header
-                ChordLaneView(chordTrack: $chordTrack, playheadBeat: playhead)
+                ChordLaneView(chordTrack: $document.model.chordTrack, playheadBeat: playhead)
                 PianoRollView(
                     notes: $document.model.noteEvents,
-                    chordTrack: chordTrack,
-                    key: key,
+                    chordTrack: document.model.chordTrack,
+                    key: document.model.key,
                     playheadBeat: playhead,
                     onAudition: { pitch in audio.playTestNote(UInt8(clamping: pitch)) },
                     showLandscape: showLandscape
                 )
-                PlayableNowView(chordTrack: chordTrack, key: key, playheadBeat: playhead)
+                PlayableNowView(chordTrack: document.model.chordTrack, key: document.model.key, playheadBeat: playhead)
                 Spacer(minLength: 0)
             }
             .padding(18)
         }
-        .frame(minWidth: 860, minHeight: 680)
+        .frame(minWidth: 880, minHeight: 720)
         .onAppear {
             audio.start()
             playback = ChordPlayback(instrument: audio.instrument)
             notePlayback = NotePlayback(instrument: audio.instrument)
+            transport.tempo = Tempo(bpm: document.model.tempo)
         }
         .onChange(of: transport.state.positionBeats) { _, beat in
             guard transport.state.isPlaying else { return }
             notePlayback?.update(forBeat: beat, notes: document.model.noteEvents)
-            if hearChords {
-                playback?.update(forBeat: beat, in: chordTrack)
-            }
+            if hearChords { playback?.update(forBeat: beat, in: document.model.chordTrack) }
         }
-        .onChange(of: hearChords) { _, on in
-            if !on { playback?.releaseAll() }
-        }
+        .onChange(of: hearChords) { _, on in if !on { playback?.releaseAll() } }
     }
 
     private func togglePlay() {
@@ -90,7 +76,6 @@ struct ContentView: View {
 
             Spacer()
 
-            // transport
             ctrlButton("⏮") { rewind() }
                 .keyboardShortcut("r", modifiers: [])
             Button(transport.state.isPlaying ? "⏹ stop" : "▶ play") { togglePlay() }
@@ -102,7 +87,6 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 5))
                 .keyboardShortcut(.space, modifiers: [])
 
-            // utilities
             ctrlButton(showLandscape ? "◆ map on" : "◆ map") { showLandscape.toggle() }
                 .foregroundStyle(showLandscape ? Theme.brand : Theme.faded)
             ctrlButton(hearChords ? "♪ chords on" : "♪ chords off") { hearChords.toggle() }

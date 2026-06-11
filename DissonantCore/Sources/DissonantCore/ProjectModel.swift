@@ -67,20 +67,20 @@ public struct NoteEvent: Codable, Equatable, Identifiable, Sendable {
 public struct ProjectModel: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var tempo: Double
-    public var chordEvents: [ChordEvent]
+    public var chordTrack: ChordTrackModel
     public var noteEvents: [NoteEvent]
     public var key: KeyState
 
     public init(
         schemaVersion: Int = ProjectModel.currentSchemaVersion,
         tempo: Double = 120,
-        chordEvents: [ChordEvent] = [],
+        chordTrack: ChordTrackModel = ChordTrackModel(),
         noteEvents: [NoteEvent] = [],
         key: KeyState = .none
     ) {
         self.schemaVersion = schemaVersion
         self.tempo = tempo
-        self.chordEvents = chordEvents
+        self.chordTrack = chordTrack
         self.noteEvents = noteEvents
         self.key = key
     }
@@ -90,8 +90,17 @@ public struct ProjectModel: Codable, Equatable, Sendable {
     /// A brand-new, empty project: no key, no chords, no notes, default tempo.
     public static let empty = ProjectModel()
 
+    /// A new project pre-seeded with a I–IV–V–vi progression so there's guidance to play with
+    /// immediately. The user can clear or change it.
+    public static let starter = ProjectModel(chordTrack: ChordTrackModel(chords: [
+        ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
+        ChordEvent(startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F"),
+        ChordEvent(startBeat: 8, lengthBeats: 4, pitchClasses: [7, 11, 2], name: "G"),
+        ChordEvent(startBeat: 12, lengthBeats: 4, pitchClasses: [9, 0, 4], name: "Am")
+    ]))
+
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, tempo, chordEvents, noteEvents, key
+        case schemaVersion, tempo, chordTrack, noteEvents, key
     }
 
     // Custom decode so a file missing any key falls back to a default rather than throwing.
@@ -100,7 +109,7 @@ public struct ProjectModel: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? ProjectModel.currentSchemaVersion
         tempo = try c.decodeIfPresent(Double.self, forKey: .tempo) ?? 120
-        chordEvents = try c.decodeIfPresent([ChordEvent].self, forKey: .chordEvents) ?? []
+        chordTrack = try c.decodeIfPresent(ChordTrackModel.self, forKey: .chordTrack) ?? ChordTrackModel()
         noteEvents = try c.decodeIfPresent([NoteEvent].self, forKey: .noteEvents) ?? []
         key = try c.decodeIfPresent(KeyState.self, forKey: .key) ?? .none
     }

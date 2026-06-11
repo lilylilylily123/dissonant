@@ -7,10 +7,10 @@ final class ProjectPersistenceTests: XCTestCase {
     func testRoundTripPreservesAllState() throws {
         let original = ProjectModel(
             tempo: 96,
-            chordEvents: [
+            chordTrack: ChordTrackModel(chords: [
                 ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
                 ChordEvent(startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F")
-            ],
+            ]),
             noteEvents: [
                 NoteEvent(startBeat: 0, lengthBeats: 1, pitch: 60),
                 NoteEvent(startBeat: 1, lengthBeats: 1, pitch: 64)
@@ -29,7 +29,7 @@ final class ProjectPersistenceTests: XCTestCase {
         let empty = ProjectModel.empty
         XCTAssertNil(empty.key.rootPitchClass)
         XCTAssertFalse(empty.key.isLocked)
-        XCTAssertTrue(empty.chordEvents.isEmpty)
+        XCTAssertTrue(empty.chordTrack.isEmpty)
         XCTAssertTrue(empty.noteEvents.isEmpty)
         XCTAssertEqual(empty.tempo, 120)
     }
@@ -44,7 +44,7 @@ final class ProjectPersistenceTests: XCTestCase {
 
         XCTAssertEqual(decoded.tempo, 140)
         XCTAssertEqual(decoded.schemaVersion, ProjectModel.currentSchemaVersion)
-        XCTAssertTrue(decoded.chordEvents.isEmpty)
+        XCTAssertTrue(decoded.chordTrack.isEmpty)
         XCTAssertTrue(decoded.noteEvents.isEmpty)
         XCTAssertEqual(decoded.key, .none)
     }

@@ -33,4 +33,16 @@ final class HarmonyTests: XCTestCase {
         XCTAssertEqual(Harmony.noteName(6), "F#")
         XCTAssertEqual(Harmony.noteName(13), "C#") // normalizes
     }
+
+    func testChordNameRecognizesTriads() {
+        XCTAssertEqual(Harmony.chordName(forPitchClasses: [0, 4, 7]), "C")
+        XCTAssertEqual(Harmony.chordName(forPitchClasses: [9, 0, 4]), "Am")
+        XCTAssertEqual(Harmony.chordName(forPitchClasses: [11, 2, 5]), "Bdim")
+    }
+
+    func testChordNameFallsBackToNotes() {
+        XCTAssertEqual(Harmony.chordName(forPitchClasses: []), "—")
+        XCTAssertEqual(Harmony.chordName(forPitchClasses: [0, 7]), "C·G")
+        XCTAssertEqual(Harmony.chordName(forPitchClasses: [0, 4, 7, 11]), "C·E·G·B")
+    }
 }

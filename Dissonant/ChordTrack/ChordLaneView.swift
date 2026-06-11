@@ -1,14 +1,15 @@
 import SwiftUI
 import DissonantCore
 
-/// The guided chord lane (basic U6): pick a known-good progression starter, then tap any
-/// chord to swap it for the next in-key chord and hear the difference. The chord under the
-/// playhead is highlighted. Theory names are shown but never required to use it (R9).
+/// The guided chord lane: pick a known-good progression starter, then click any chord to open
+/// the free-build editor and alter it (U6 + U7). The chord under the playhead is highlighted.
+/// Theory names are shown but never required (R9).
 struct ChordLaneView: View {
     @Binding var chordTrack: ChordTrackModel
     let playheadBeat: Double
 
-    // Suggestions are drawn from the project key (default C major for v1).
+    @State private var editingID: UUID?
+
     private let keyRoot = 0
     private let keyScale: ScaleType = .major
 
@@ -17,7 +18,6 @@ struct ChordLaneView: View {
     private let gutter: CGFloat = 56
 
     private var diatonic: [ChordSuggestion] { Harmony.diatonicChords(root: keyRoot, scale: keyScale) }
-
     private var currentChordID: UUID? { chordTrack.chord(atBeat: playheadBeat)?.id }
 
     var body: some View {
@@ -34,17 +34,17 @@ struct ChordLaneView: View {
 
             HStack(spacing: 8) {
                 Text("starters")
-                    .font(.custom(Theme.mono, size: 10))
-                    .foregroundStyle(Theme.faded)
+                    .font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
                 ForEach(starters, id: \.name) { starter in
                     Button(starter.name) { chordTrack = ChordTrackModel(chords: starter.build()) }
                         .buttonStyle(.plain)
                         .font(.custom(Theme.mono, size: 11))
                         .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Theme.panel)
-                        .foregroundStyle(Theme.ink)
+                        .background(Theme.panel).foregroundStyle(Theme.ink)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
+                Text("· click a chord to edit")
+                    .font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
             }
         }
     }
@@ -52,7 +52,7 @@ struct ChordLaneView: View {
     private func chordBlock(_ chord: ChordEvent) -> some View {
         let isCurrent = chord.id == currentChordID
         return Button {
-            swap(chord)
+            editingID = chord.id
         } label: {
             Text(chord.name ?? "?")
                 .font(.custom(Theme.mono, size: 13)).bold()
@@ -64,17 +64,12 @@ struct ChordLaneView: View {
         .buttonStyle(.plain)
         .frame(width: CGFloat(chord.lengthBeats) * beatWidth - 3, height: 34)
         .offset(x: CGFloat(chord.startBeat) * beatWidth, y: 0)
-    }
-
-    /// Swap a chord for the next diatonic chord, keeping its position — a taste of guided swap.
-    private func swap(_ chord: ChordEvent) {
-        let chords = diatonic
-        let idx = chords.firstIndex { $0.name == chord.name } ?? -1
-        let next = chords[(idx + 1 + chords.count) % chords.count]
-        var updated = chord
-        updated.pitchClasses = next.pitchClasses
-        updated.name = next.name
-        chordTrack.update(updated)
+        .popover(isPresented: Binding(
+            get: { editingID == chord.id },
+            set: { if !$0 { editingID = nil } }
+        )) {
+            ChordEditorView(chordTrack: $chordTrack, chordID: chord.id)
+        }
     }
 
     // MARK: - Starters

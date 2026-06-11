@@ -92,4 +92,26 @@ public enum Harmony {
         default: return .other
         }
     }
+
+    /// Best-effort name for an arbitrary set of pitch classes (the free-build editor, U7).
+    /// Recognizes triads by trying each note as the root; otherwise lists the note names.
+    public static func chordName(forPitchClasses pitchClasses: [Int]) -> String {
+        let pcs = Array(Set(pitchClasses.map { TierClassifier.normalize($0) })).sorted()
+        guard !pcs.isEmpty else { return "—" }
+        if pcs.count == 3 {
+            for root in pcs {
+                let intervals = pcs.map { TierClassifier.normalize($0 - root) }.sorted()
+                let quality: TriadQuality
+                switch (intervals[1], intervals[2]) {
+                case (4, 7): quality = .major
+                case (3, 7): quality = .minor
+                case (3, 6): quality = .diminished
+                case (4, 8): quality = .augmented
+                default: continue
+                }
+                return noteName(root) + quality.nameSuffix
+            }
+        }
+        return pcs.map(noteName).joined(separator: "·")
+    }
 }
