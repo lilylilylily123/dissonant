@@ -50,23 +50,38 @@ private struct TrackRow: View {
     var onRename: (String) -> Void
     var onDelete: () -> Void
 
-    @State private var name: String = ""
+    @State private var editing = false
+    @State private var draft = ""
     @FocusState private var focused: Bool
+
+    private var ink: Color { selected ? Theme.surface : Theme.ink }
+    private var faded: Color { selected ? Theme.surface.opacity(0.8) : Theme.faded }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                TextField("name", text: $name)
-                    .textFieldStyle(.plain)
-                    .focused($focused)
-                    .font(.custom(Theme.mono, size: 12))
-                    .foregroundStyle(selected ? Theme.surface : Theme.ink)
-                    .onSubmit { commit() }
-                if canDelete {
-                    Button("×") { onDelete() }
-                        .buttonStyle(.plain)
-                        .font(.custom(Theme.mono, size: 12))
-                        .foregroundStyle(selected ? Theme.surface.opacity(0.8) : Theme.faded)
+            if editing {
+                HStack(spacing: 4) {
+                    TextField("name", text: $draft)
+                        .textFieldStyle(.plain)
+                        .focused($focused)
+                        .font(.custom(Theme.mono, size: 12)).foregroundStyle(ink)
+                        .onSubmit { finish() }
+                        .onExitCommand { editing = false }   // Esc cancels
+                        .onAppear { draft = track.name; focused = true }
+                    Button("✓") { finish() }
+                        .buttonStyle(.plain).font(.custom(Theme.mono, size: 12)).foregroundStyle(ink)
+                }
+            } else {
+                HStack(spacing: 4) {
+                    Text(track.name.isEmpty ? "untitled" : track.name)
+                        .font(.custom(Theme.mono, size: 12)).foregroundStyle(ink)
+                    Spacer(minLength: 4)
+                    Button("✎") { startEditing() }
+                        .buttonStyle(.plain).font(.custom(Theme.mono, size: 11)).foregroundStyle(faded)
+                    if canDelete {
+                        Button("×") { onDelete() }
+                            .buttonStyle(.plain).font(.custom(Theme.mono, size: 12)).foregroundStyle(faded)
+                    }
                 }
             }
             Text(track.voice)
@@ -78,13 +93,17 @@ private struct TrackRow: View {
         .background(selected ? Theme.brand : Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture().onEnded { onSelect() })
-        .onAppear { name = track.name }
-        .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
-        .onChange(of: track.name) { _, newValue in if !focused { name = newValue } }
+        .onTapGesture { if !editing { onSelect() } }
     }
 
-    private func commit() {
-        if name != track.name { onRename(name) }
+    private func startEditing() {
+        onSelect()
+        draft = track.name
+        editing = true
+    }
+
+    private func finish() {
+        if draft != track.name { onRename(draft) }
+        editing = false
     }
 }
