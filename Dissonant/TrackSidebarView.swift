@@ -13,6 +13,7 @@ struct TrackSidebarView: View {
     var onDelete: (UUID) -> Void
     var onToggleMute: (UUID) -> Void
     var onToggleSolo: (UUID) -> Void
+    var onMove: (UUID, Bool) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -38,7 +39,9 @@ struct TrackSidebarView: View {
                     onRename: { onRename(track.id, $0) },
                     onDelete: { onDelete(track.id) },
                     onToggleMute: { onToggleMute(track.id) },
-                    onToggleSolo: { onToggleSolo(track.id) }
+                    onToggleSolo: { onToggleSolo(track.id) },
+                    onMoveUp: { onMove(track.id, true) },
+                    onMoveDown: { onMove(track.id, false) }
                 )
             }
             Spacer()
@@ -58,6 +61,8 @@ private struct TrackRow: View {
     var onDelete: () -> Void
     var onToggleMute: () -> Void
     var onToggleSolo: () -> Void
+    var onMoveUp: () -> Void
+    var onMoveDown: () -> Void
 
     @State private var editing = false
     @State private var draft = ""
@@ -84,6 +89,10 @@ private struct TrackRow: View {
                     Text(track.name.isEmpty ? "untitled" : track.name)
                         .font(.custom(Theme.mono, size: 13)).foregroundStyle(ink)
                     Spacer(minLength: 4)
+                    Button("▲") { onMoveUp() }
+                        .buttonStyle(.plain).font(.custom(Theme.mono, size: 9)).foregroundStyle(faded)
+                    Button("▼") { onMoveDown() }
+                        .buttonStyle(.plain).font(.custom(Theme.mono, size: 9)).foregroundStyle(faded)
                     Button("✎") { startEditing() }
                         .buttonStyle(.plain).font(.custom(Theme.mono, size: 12)).foregroundStyle(faded)
                     if canDelete {

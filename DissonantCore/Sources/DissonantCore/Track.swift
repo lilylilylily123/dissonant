@@ -15,6 +15,7 @@ public struct Track: Codable, Equatable, Identifiable, Sendable {
     public var volume: Double
     public var reverbSend: Double
     public var tone: Double
+    public var pan: Double   // -1 (left) … 1 (right)
 
     public init(
         id: UUID = UUID(),
@@ -25,7 +26,8 @@ public struct Track: Codable, Equatable, Identifiable, Sendable {
         isDrum: Bool = false,
         volume: Double = 1.0,
         reverbSend: Double = 0.0,
-        tone: Double = 18_000
+        tone: Double = 18_000,
+        pan: Double = 0.0
     ) {
         self.id = id
         self.name = name
@@ -36,10 +38,11 @@ public struct Track: Codable, Equatable, Identifiable, Sendable {
         self.volume = volume
         self.reverbSend = reverbSend
         self.tone = tone
+        self.pan = pan
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, voice, muted, soloed, isDrum, volume, reverbSend, tone
+        case id, name, voice, muted, soloed, isDrum, volume, reverbSend, tone, pan
     }
 
     // Tolerant decode so older files (missing newer fields) still open.
@@ -54,5 +57,6 @@ public struct Track: Codable, Equatable, Identifiable, Sendable {
         volume = try c.decodeIfPresent(Double.self, forKey: .volume) ?? 1.0
         reverbSend = try c.decodeIfPresent(Double.self, forKey: .reverbSend) ?? 0.0
         tone = try c.decodeIfPresent(Double.self, forKey: .tone) ?? 18_000
+        pan = try c.decodeIfPresent(Double.self, forKey: .pan) ?? 0.0
     }
 }

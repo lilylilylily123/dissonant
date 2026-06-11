@@ -107,7 +107,8 @@ struct ContentView: View {
                     onRename: renameTrack,
                     onDelete: deleteTrack,
                     onToggleMute: toggleMute,
-                    onToggleSolo: toggleSolo
+                    onToggleSolo: toggleSolo,
+                    onMove: moveTrack
                 )
                 VStack(alignment: .leading, spacing: 14) {
                     header
@@ -270,6 +271,13 @@ struct ContentView: View {
     }
     private func toggleSolo(_ id: UUID) {
         if let i = document.model.tracks.firstIndex(where: { $0.id == id }) { document.model.tracks[i].soloed.toggle() }
+    }
+
+    private func moveTrack(_ id: UUID, _ up: Bool) {
+        guard let i = document.model.tracks.firstIndex(where: { $0.id == id }) else { return }
+        let j = up ? i - 1 : i + 1
+        guard document.model.tracks.indices.contains(j) else { return }
+        document.model.tracks.swapAt(i, j)
     }
 
     // MARK: - Patterns
