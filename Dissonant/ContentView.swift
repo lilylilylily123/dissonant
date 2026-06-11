@@ -27,10 +27,17 @@ struct ContentView: View {
     @State private var bpmText: String = "120"
     @FocusState private var bpmFocused: Bool
 
+    @State private var renamingPattern = false
+    @State private var patternDraft = ""
+    @FocusState private var patternRenameFocused: Bool
+
     @State private var masterGain: Double = 1.0
     @State private var reverbWet: Double = 0.0
     @State private var lowCutHz: Double = 20
     @State private var highCutHz: Double = 18_000
+    @State private var lowEQ: Double = 1.0
+    @State private var midEQ: Double = 1.0
+    @State private var highEQ: Double = 1.0
 
     // Cached flattened song (stable note ids) so song-mode playback doesn't recompute per frame.
     @State private var songNotes: [UUID: [NoteEvent]] = [:]
@@ -211,6 +218,9 @@ struct ContentView: View {
         audio.setReverb(Float(reverbWet))
         audio.setLowCut(Float(lowCutHz))
         audio.setHighCut(Float(highCutHz))
+        audio.setLowEQ(Float(lowEQ))
+        audio.setMidEQ(Float(midEQ))
+        audio.setHighEQ(Float(highEQ))
         updateLength()
     }
 
@@ -267,6 +277,36 @@ struct ContentView: View {
         document.model.patterns.append(pattern)
         selectedPatternID = pattern.id
         if mode == .pattern { updateLength() }
+    }
+
+    private func duplicatePattern() {
+        let src = selectedPattern
+        let copy = SongPattern(name: src.name + " copy", lengthBeats: src.lengthBeats, chords: src.chords, notesByTrack: src.notesByTrack)
+        document.model.patterns.insert(copy, at: min(patternIndex + 1, document.model.patterns.count))
+        selectedPatternID = copy.id
+    }
+
+    private func deletePattern() {
+        guard document.model.patterns.count > 1 else { return }
+        let id = selPatternID
+        document.model.patterns.removeAll { $0.id == id }
+        document.model.arrangement.removeAll { $0 == id }
+        selectedPatternID = document.model.patterns.first?.id
+        recomputeSong()
+        updateLength()
+    }
+
+    private func startRenamePattern() {
+        patternDraft = selectedPattern.name
+        renamingPattern = true
+        patternRenameFocused = true
+    }
+
+    private func commitPatternRename() {
+        if !patternDraft.isEmpty, let i = document.model.patterns.firstIndex(where: { $0.id == selPatternID }) {
+            document.model.patterns[i].name = patternDraft
+        }
+        renamingPattern = false
     }
 
     // MARK: - Voice
@@ -391,11 +431,28 @@ struct ContentView: View {
                     .background(selected ? Theme.brand : Theme.panel)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             }
-            Button("+ pattern") { addPattern() }
-                .buttonStyle(.plain)
-                .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.brand)
-                .padding(.horizontal, 8).padding(.vertical, 5)
+            Divider().frame(height: 14).overlay(Theme.gridLine)
+            patBtn("+ new") { addPattern() }
+            patBtn("⧉ dup") { duplicatePattern() }
+            patBtn("✎ rename") { startRenamePattern() }
+            if document.model.patterns.count > 1 { patBtn("× del") { deletePattern() } }
+            if renamingPattern {
+                TextField("", text: $patternDraft)
+                    .textFieldStyle(.plain).frame(width: 120)
+                    .focused($patternRenameFocused)
+                    .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.ink)
+                    .onSubmit { commitPatternRename() }
+                patBtn("✓") { commitPatternRename() }
+            }
+            Spacer()
         }
+    }
+
+    private func patBtn(_ label: String, _ action: @escaping () -> Void) -> some View {
+        Button(label, action: action)
+            .buttonStyle(.plain)
+            .font(.custom(Theme.mono, size: 11)).foregroundStyle(Theme.brand)
+            .padding(.horizontal, 6).padding(.vertical, 4)
     }
 
     private var voicePicker: some View {
@@ -440,6 +497,13 @@ struct ContentView: View {
                 fxSlider("reverb", value: $reverbWet, range: 0...1) { audio.setReverb(Float($0)) }
                 fxSlider("low cut", value: $lowCutHz, range: 20...1000) { audio.setLowCut(Float($0)) }
                 fxSlider("tone", value: $highCutHz, range: 800...18_000) { audio.setHighCut(Float($0)) }
+                Spacer()
+            }
+            HStack(spacing: 16) {
+                Text("eq").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+                fxSlider("low", value: $lowEQ, range: 0...2) { audio.setLowEQ(Float($0)) }
+                fxSlider("mid", value: $midEQ, range: 0...2) { audio.setMidEQ(Float($0)) }
+                fxSlider("high", value: $highEQ, range: 0...2) { audio.setHighEQ(Float($0)) }
                 Spacer()
             }
         }

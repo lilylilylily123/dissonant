@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import AudioKit
 import AudioKitEX
+import SoundpipeAudioKit
 
 /// Owns the AudioKit engine and the master FX chain. Each track is wired through its own FX
 /// bus (built in `TrackVoices`) into `masterMixer`; the chord bed goes straight to master.
@@ -10,8 +11,11 @@ final class AudioEngineController {
     let engine = AudioEngine()
     let masterMixer = Mixer()
 
-    // Master FX chain: masterMixer → low-cut → high-cut (tone) → reverb → gain → output.
+    // Master FX chain: masterMixer → low-cut → 3-band EQ → high-cut (tone) → reverb → gain → out.
     private let lowCut: HighPassFilter
+    private let eqLow: LowShelfParametricEqualizerFilter
+    private let eqMid: PeakingParametricEqualizerFilter
+    private let eqHigh: HighShelfParametricEqualizerFilter
     private let highCut: LowPassFilter
     private let reverb: Reverb
     private let masterFader: Fader
@@ -26,7 +30,10 @@ final class AudioEngineController {
         masterMixer.addInput(chordInstrument.node)
 
         lowCut = HighPassFilter(masterMixer, cutoffFrequency: 20)
-        highCut = LowPassFilter(lowCut, cutoffFrequency: 18_000)
+        eqLow = LowShelfParametricEqualizerFilter(lowCut, cornerFrequency: 120, gain: 1.0, q: 0.7)
+        eqMid = PeakingParametricEqualizerFilter(eqLow, centerFrequency: 1_000, gain: 1.0, q: 0.7)
+        eqHigh = HighShelfParametricEqualizerFilter(eqMid, centerFrequency: 6_000, gain: 1.0, q: 0.7)
+        highCut = LowPassFilter(eqHigh, cutoffFrequency: 18_000)
         reverb = Reverb(highCut)
         reverb.dryWetMix = 0          // fully dry by default
         masterFader = Fader(reverb, gain: 1)
@@ -39,6 +46,10 @@ final class AudioEngineController {
     func setReverb(_ wet: Float) { reverb.dryWetMix = AUValue(min(max(wet, 0), 1)) }
     func setLowCut(_ hz: Float) { lowCut.cutoffFrequency = AUValue(hz) }
     func setHighCut(_ hz: Float) { highCut.cutoffFrequency = AUValue(hz) }
+    /// 3-band EQ gains (linear, 1.0 = flat).
+    func setLowEQ(_ gain: Float) { eqLow.gain = AUValue(gain) }
+    func setMidEQ(_ gain: Float) { eqMid.gain = AUValue(gain) }
+    func setHighEQ(_ gain: Float) { eqHigh.gain = AUValue(gain) }
 
     // MARK: - Voice factories (not connected — TrackVoices wires them into a per-track bus)
 
