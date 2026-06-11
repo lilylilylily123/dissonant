@@ -17,7 +17,7 @@ finished, fleshed-out tracks, learning as they go.
 
 ## Product Purpose
 
-"in key" is a native macOS DAW that surfaces the harmonic landscape directly in the
+"dissonant" is a native macOS DAW that surfaces the harmonic landscape directly in the
 interface instead of hiding it behind theory. Its core is a familiar piano roll whose notes
 re-tier in real time — solid chord tones, spicy-but-good tensions, flagged dissonance —
 against a guided chord track the player builds. It makes creating *and* learning happen at

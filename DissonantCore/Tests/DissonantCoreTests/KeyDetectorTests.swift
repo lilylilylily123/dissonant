@@ -1,5 +1,5 @@
 import XCTest
-@testable import InKeyCore
+@testable import DissonantCore
 
 final class KeyDetectorTests: XCTestCase {
 

@@ -5,19 +5,19 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>in key</string>
+	<string>dissonant</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>in key project</string>
+			<string>dissonant project</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.crackerjack.inkey.project</string>
+				<string>com.crackerjack.dissonant.project</string>
 			</array>
 		</dict>
 	</array>
@@ -28,7 +28,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>in key</string>
+	<string>dissonant</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -47,14 +47,14 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>in key project</string>
+			<string>dissonant project</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.crackerjack.inkey.project</string>
+			<string>com.crackerjack.dissonant.project</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>inkey</string>
+					<string>dissonant</string>
 				</array>
 			</dict>
 		</dict>

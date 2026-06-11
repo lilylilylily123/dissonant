@@ -1,13 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
-import InKeyCore
+import DissonantCore
 
 extension UTType {
-    /// The "in key" project document type, declared in Info.plist (UTExportedTypeDeclarations).
-    static let inKeyProject = UTType(exportedAs: "com.crackerjack.inkey.project")
+    /// The "dissonant" project document type, declared in Info.plist (UTExportedTypeDeclarations).
+    static let dissonantProject = UTType(exportedAs: "com.crackerjack.dissonant.project")
 }
 
-/// Wraps `ProjectModel` (from InKeyCore) as a SwiftUI document. Persistence is plain JSON
+/// Wraps `ProjectModel` (from DissonantCore) as a SwiftUI document. Persistence is plain JSON
 /// via Codable — deliberately not SwiftData, whose document store has known corruption issues.
 struct ProjectDocument: FileDocument {
     var model: ProjectModel
@@ -16,7 +16,7 @@ struct ProjectDocument: FileDocument {
         self.model = model
     }
 
-    static var readableContentTypes: [UTType] { [.inKeyProject] }
+    static var readableContentTypes: [UTType] { [.dissonantProject] }
 
     init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents else {

@@ -1,10 +1,10 @@
 <!-- SEED: re-run /impeccable document once there's code to capture the actual tokens and components. -->
 ---
-name: in key
+name: dissonant
 description: A native macOS DAW that shows you which notes sound good — dark, mono-forward, raw by design.
 ---
 
-# Design System: in key
+# Design System: dissonant
 
 ## 1. Overview
 

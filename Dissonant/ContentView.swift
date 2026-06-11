@@ -1,5 +1,5 @@
 import SwiftUI
-import InKeyCore
+import DissonantCore
 
 /// Placeholder shell. U2 adds an audio smoke-test (test tone) and transport play/stop so
 /// the audio path is verifiable by ear. The piano roll, chord track, and guidance UI land
@@ -12,7 +12,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("in key")
+            Text("dissonant")
                 .font(.system(size: 48, weight: .heavy, design: .monospaced))
 
             Text("tempo \(Int(document.model.tempo)) bpm  ·  playhead \(transport.state.positionBeats, specifier: "%.2f")")

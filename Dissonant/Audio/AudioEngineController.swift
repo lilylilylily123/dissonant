@@ -25,7 +25,7 @@ final class AudioEngineController {
         do {
             try engine.start()
         } catch {
-            print("in key: audio engine failed to start — \(error)")
+            print("dissonant: audio engine failed to start — \(error)")
         }
     }
 

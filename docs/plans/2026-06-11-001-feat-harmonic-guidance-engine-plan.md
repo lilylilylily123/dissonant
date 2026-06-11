@@ -10,7 +10,7 @@ origin: docs/brainstorms/2026-06-11-harmonic-guidance-engine-requirements.md
 
 ## Summary
 
-Build the v1 Harmonic Guidance Engine for "in key" as a native macOS SwiftUI app:
+Build the v1 Harmonic Guidance Engine for "dissonant" as a native macOS SwiftUI app:
 a familiar piano roll whose notes re-tier in real time — solid chord tones, spicy-but-good
 tensions, flagged dissonance — against a guided chord track the player builds, with
 infer-and-lock key detection and a lighter cold-start mode before a chord track exists.
@@ -217,9 +217,9 @@ Greenfield layout (the per-unit **Files** lists are authoritative; this tree is 
 expected shape):
 
 ```
-InKey.xcodeproj
-InKey/
-  InKeyApp.swift                      # @main, DocumentGroup
+Dissonant.xcodeproj
+Dissonant/
+  DissonantApp.swift                      # @main, DocumentGroup
   Project/
     ProjectDocument.swift             # FileDocument
     ProjectModel.swift                # Codable: ChordEvent, NoteEvent, KeyState, tempo
@@ -245,7 +245,7 @@ InKey/
     KeyInferenceController.swift      # infer-and-lock UX glue
   Resources/
     GeneralUserGS.sf2                 # bundled soundfont
-InKeyTests/
+DissonantTests/
   HarmonyTests.swift
   TierClassifierTests.swift
   KeyDetectorTests.swift
@@ -270,9 +270,9 @@ depends on it.
   near-empty) project file.
 - **Requirements:** R14
 - **Dependencies:** none
-- **Files:** `InKey.xcodeproj`, `InKey/InKeyApp.swift`, `InKey/Project/ProjectDocument.swift`,
-  `InKey/Project/ProjectModel.swift`, `InKey/Project/AppState.swift`,
-  `InKeyTests/ProjectPersistenceTests.swift` (initial round-trip only)
+- **Files:** `Dissonant.xcodeproj`, `Dissonant/DissonantApp.swift`, `Dissonant/Project/ProjectDocument.swift`,
+  `Dissonant/Project/ProjectModel.swift`, `Dissonant/Project/AppState.swift`,
+  `DissonantTests/ProjectPersistenceTests.swift` (initial round-trip only)
 - **Approach:** Create a SwiftUI macOS app using `DocumentGroup(newDocument:)`. Add SPM
   dependencies: AudioKit, AudioKitEX, SoundpipeAudioKit (if needed), Tonic, and AudioKit
   `PianoRoll`. Define `ProjectModel` as a `Codable` struct (tempo, `[ChordEvent]`,
@@ -296,8 +296,8 @@ depends on it.
 - **Goal:** Sound comes out, and a transport drives a beat position the UI can read.
 - **Requirements:** R15, R16
 - **Dependencies:** U1
-- **Files:** `InKey/Audio/AudioEngine.swift`, `InKey/Audio/Instrument.swift`,
-  `InKey/Audio/Transport.swift`, `InKey/Resources/GeneralUserGS.sf2`
+- **Files:** `Dissonant/Audio/AudioEngine.swift`, `Dissonant/Audio/Instrument.swift`,
+  `Dissonant/Audio/Transport.swift`, `Dissonant/Resources/GeneralUserGS.sf2`
 - **Approach:** Bootstrap the AudioKit engine; load the bundled SF2 into an
   `AVAudioUnitSampler` (`Instrument`). `Transport` wraps `AppleSequencer`: play/stop, tempo,
   loop region, and a main-thread-safe `currentPosition` (beats). Expose `playheadBeat` as a
@@ -325,8 +325,8 @@ depends on it.
   dissonance — the engine's differentiator.
 - **Requirements:** R10, R11
 - **Dependencies:** U1 (types only; no UI/audio)
-- **Files:** `InKey/Theory/Harmony.swift`, `InKey/Theory/TierClassifier.swift`,
-  `InKeyTests/HarmonyTests.swift`, `InKeyTests/TierClassifierTests.swift`
+- **Files:** `Dissonant/Theory/Harmony.swift`, `Dissonant/Theory/TierClassifier.swift`,
+  `DissonantTests/HarmonyTests.swift`, `DissonantTests/TierClassifierTests.swift`
 - **Approach:** `Harmony` wraps Tonic for scale membership, diatonic chords of a key, and a
   curated set of progression starters (data for U6). `TierClassifier` is a pure function over
   Tonic `Chord`/`Key`/`Pitch`.
@@ -358,7 +358,7 @@ depends on it.
 - **Goal:** Infer ranked key candidates with confidence from a sparse set of placed notes.
 - **Requirements:** R2, R4
 - **Dependencies:** U1 (types only)
-- **Files:** `InKey/Theory/KeyDetector.swift`, `InKeyTests/KeyDetectorTests.swift`
+- **Files:** `Dissonant/Theory/KeyDetector.swift`, `DissonantTests/KeyDetectorTests.swift`
 - **Approach:** Build a 12-bin pitch-class histogram (count- or duration-weighted), Pearson-
   correlate against 24 major/minor profiles, return ranked `(Key, score)` with a confidence
   gap between #1 and #2. Expose a `minNotesForConfidence` threshold (~10–12) below which the
@@ -382,8 +382,8 @@ depends on it.
   plays back as audible backing.
 - **Requirements:** R5, R4
 - **Dependencies:** U2, U3
-- **Files:** `InKey/ChordTrack/ChordTrackModel.swift`, `InKey/ChordTrack/ChordPlayback.swift`,
-  `InKeyTests/ChordTrackModelTests.swift`
+- **Files:** `Dissonant/ChordTrack/ChordTrackModel.swift`, `Dissonant/ChordTrack/ChordPlayback.swift`,
+  `DissonantTests/ChordTrackModelTests.swift`
 - **Approach:** `ChordTrackModel` stores ordered `ChordEvent`s (chord, start beat, length)
   with a `chord(atBeat:)` lookup — the function the highlight engine and tier classifier
   consume. `ChordPlayback` schedules each chord's notes into the sampler via the sequencer as
@@ -402,7 +402,7 @@ depends on it.
 - **Goal:** A no-theory player assembles a good-sounding progression fast.
 - **Requirements:** R6, R7, R9
 - **Dependencies:** U5
-- **Files:** `InKey/ChordTrack/ChordTrackView.swift`
+- **Files:** `Dissonant/ChordTrack/ChordTrackView.swift`
 - **Approach:** Present progression starters (curated, from `Harmony`). Selecting a chord
   offers in-key swap suggestions ordered by common-next likelihood; each is auditionable
   before commit. Chord/theory names are shown but optional (R9). Writes through to
@@ -422,7 +422,7 @@ depends on it.
 - **Goal:** Let the player build/alter any chord, including deliberately weird ones.
 - **Requirements:** R8
 - **Dependencies:** U6, U3
-- **Files:** `InKey/ChordTrack/ChordEditorView.swift`
+- **Files:** `Dissonant/ChordTrack/ChordEditorView.swift`
 - **Approach:** An expandable editor to add/remove notes of a chord freely. As notes are
   stacked, reuse `TierClassifier`/interval logic to show consonant vs spicy vs harsh
   feedback. Out-of-suggestion chords are allowed and write back to `ChordTrackModel`; the
@@ -444,7 +444,7 @@ depends on it.
 - **Goal:** An editable piano roll where placed notes play and align to the transport.
 - **Requirements:** R1, R11
 - **Dependencies:** U2
-- **Files:** `InKey/PianoRoll/PianoRollView.swift`
+- **Files:** `Dissonant/PianoRoll/PianoRollView.swift`
 - **Approach:** Integrate AudioKit `PianoRoll` bound to the project's `[NoteEvent]`. Map the
   component's abstract pitch axis to MIDI note numbers. Notes are placeable/draggable and
   audition through the sampler. Roll is usable with no key and no chord track (R1).
@@ -462,7 +462,7 @@ depends on it.
   playhead, degrading gracefully when there's no chord track.
 - **Requirements:** R10, R11, R12, R13
 - **Dependencies:** U3, U5, U8, U2
-- **Files:** `InKey/PianoRoll/HighlightEngine.swift`, `InKey/PianoRoll/PlayableNowView.swift`
+- **Files:** `Dissonant/PianoRoll/HighlightEngine.swift`, `Dissonant/PianoRoll/PlayableNowView.swift`
 - **Approach:** `HighlightEngine` computes, for the chord at `playheadBeat` (from
   `ChordTrackModel.chord(atBeat:)`), a per-pitch tier via `TierClassifier`, and feeds the
   `PianoRoll` `noteContent`/`rowBackgroundColor` closures plus the `PlayableNowView`. Cold-
@@ -499,7 +499,7 @@ depends on it.
 - **Goal:** Wire detection into a quiet, dismissable, overridable suggestion.
 - **Requirements:** R2, R3, R4, R12
 - **Dependencies:** U4, U8, U9
-- **Files:** `InKey/KeyInference/KeyInferenceController.swift`
+- **Files:** `Dissonant/KeyInference/KeyInferenceController.swift`
 - **Approach:** On note edits (debounced), run `KeyDetector` over placed notes. When
   confidence clears the threshold, surface a dismissable "looks like X — lock it?" chip; do
   nothing on its own (R2). Accepting locks the key (feeds cold-start highlighting); the player
@@ -523,8 +523,8 @@ depends on it.
 - **Goal:** Everything the player built survives close/reopen.
 - **Requirements:** R14, R5
 - **Dependencies:** U5, U8, U10
-- **Files:** `InKey/Project/ProjectModel.swift` (extend), `InKey/Project/ProjectDocument.swift`
-  (extend), `InKeyTests/ProjectPersistenceTests.swift` (extend)
+- **Files:** `Dissonant/Project/ProjectModel.swift` (extend), `Dissonant/Project/ProjectDocument.swift`
+  (extend), `DissonantTests/ProjectPersistenceTests.swift` (extend)
 - **Approach:** Ensure `ProjectModel` captures tempo, chord track, notes, and key state
   (locked vs inferred). Confirm the `FileDocument` round-trip preserves all of it. Version the
   schema with a format field for forward migration.
