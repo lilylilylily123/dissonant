@@ -19,10 +19,11 @@ struct PianoRollView: View {
     var noteLength: Double = 1
 
     // Geometry
+    var beats: Int = 16
+
     private let lowMIDI = 24          // C1 (bass)
     private let highMIDI = 84         // C6
     private let visibleHeight: CGFloat = 540
-    private let beats = 16
     private let rowHeight: CGFloat = 18
     private let beatWidth: CGFloat = 52
     private let gutter: CGFloat = 56

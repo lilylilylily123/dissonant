@@ -13,7 +13,7 @@ struct ChordLaneView: View {
     private let keyRoot = 0
     private let keyScale: ScaleType = .major
 
-    private let beats = 16
+    var beats: Int = 16
     private let beatWidth: CGFloat = 44
     private let gutter: CGFloat = 56
 

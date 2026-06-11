@@ -113,7 +113,7 @@ struct ContentView: View {
                     header
                     patternBar
                     if mode == .pattern {
-                        ChordLaneView(chordTrack: chordsBinding, playheadBeat: playhead)
+                        ChordLaneView(chordTrack: chordsBinding, playheadBeat: playhead, beats: Int(selectedPattern.lengthBeats))
                         if isDrumSelected {
                             DrumGridView(
                                 notes: notesBinding,
@@ -130,7 +130,8 @@ struct ContentView: View {
                                 playheadBeat: playhead,
                                 onAudition: auditionNote,
                                 showLandscape: showLandscape,
-                                noteLength: noteLength
+                                noteLength: noteLength,
+                                beats: Int(selectedPattern.lengthBeats)
                             )
                             PlayableNowView(chordTrack: selectedPattern.chords, key: document.model.key, playheadBeat: playhead)
                         }
@@ -298,6 +299,13 @@ struct ContentView: View {
         updateLength()
     }
 
+    private func setPatternLength(_ bars: Int) {
+        guard document.model.patterns.indices.contains(patternIndex) else { return }
+        document.model.patterns[patternIndex].lengthBeats = Double(bars * 4)
+        updateLength()
+        recomputeSong()
+    }
+
     private func startRenamePattern() {
         patternDraft = selectedPattern.name
         renamingPattern = true
@@ -461,6 +469,17 @@ struct ContentView: View {
             patBtn("⧉ dup") { duplicatePattern() }
             patBtn("✎ rename") { startRenamePattern() }
             if document.model.patterns.count > 1 { patBtn("× del") { deletePattern() } }
+            Divider().frame(height: 14).overlay(Theme.gridLine)
+            Text("bars").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+            ForEach([2, 4, 8], id: \.self) { b in
+                let sel = Int(selectedPattern.lengthBeats) == b * 4
+                Button("\(b)") { setPatternLength(b) }
+                    .buttonStyle(.plain).font(.custom(Theme.mono, size: 11))
+                    .foregroundStyle(sel ? Theme.surface : Theme.ink)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(sel ? Theme.brand : Theme.panel)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
             if renamingPattern {
                 TextField("", text: $patternDraft)
                     .textFieldStyle(.plain).frame(width: 120)
