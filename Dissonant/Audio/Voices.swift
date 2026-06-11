@@ -88,8 +88,14 @@ final class WaveformSynthInstrument: Instrument {
 
     func noteOn(_ pitch: UInt8, velocity: UInt8) {
         let frequency = AUValue(440.0 * pow(2.0, (Double(pitch) - 69.0) / 12.0))
-        let amplitude = AUValue(Double(velocity) / 127.0 * 0.3)
-        let voice = voices.first { $0.pitch == nil } ?? voices.min { $0.startedAt < $1.startedAt }!
+        let amplitude = AUValue(Double(velocity) / 127.0 * 0.25)
+        let voice: Voice
+        if let free = voices.first(where: { $0.pitch == nil }) {
+            voice = free
+        } else {
+            voice = voices.min { $0.startedAt < $1.startedAt }!
+            voice.off()   // release the stolen note cleanly before reusing it
+        }
         counter += 1
         voice.startedAt = counter
         voice.on(pitch: pitch, frequency: frequency, amplitude: amplitude)

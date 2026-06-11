@@ -27,6 +27,11 @@ struct ContentView: View {
     @State private var bpmText: String = "120"
     @FocusState private var bpmFocused: Bool
 
+    @State private var masterGain: Double = 1.0
+    @State private var reverbWet: Double = 0.0
+    @State private var lowCutHz: Double = 20
+    @State private var highCutHz: Double = 18_000
+
     private let lengthOptions: [(String, Double)] = [("1/16", 0.25), ("1/8", 0.5), ("1/4", 1.0), ("1/2", 2.0), ("1", 4.0)]
 
     // MARK: - Derived
@@ -125,6 +130,7 @@ struct ContentView: View {
                         )
                         .onChange(of: document.model.arrangement) { _, _ in updateLength() }
                     }
+                    fxBar
                     Spacer(minLength: 0)
                 }
                 .padding(18)
@@ -188,6 +194,10 @@ struct ContentView: View {
         bpm = Int(document.model.tempo)
         bpmText = String(bpm)
         transport.tempo = Tempo(bpm: document.model.tempo)
+        audio.setGain(Float(masterGain))
+        audio.setReverb(Float(reverbWet))
+        audio.setLowCut(Float(lowCutHz))
+        audio.setHighCut(Float(highCutHz))
         updateLength()
     }
 
@@ -396,6 +406,25 @@ struct ContentView: View {
             .padding(.horizontal, 11).padding(.vertical, 6)
             .background(selected ? Theme.brand : Theme.panel)
             .clipShape(RoundedRectangle(cornerRadius: 5))
+    }
+
+    private var fxBar: some View {
+        HStack(spacing: 16) {
+            Text("master").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+            fxSlider("gain", value: $masterGain, range: 0...1.5) { audio.setGain(Float($0)) }
+            fxSlider("reverb", value: $reverbWet, range: 0...1) { audio.setReverb(Float($0)) }
+            fxSlider("low cut", value: $lowCutHz, range: 20...1000) { audio.setLowCut(Float($0)) }
+            fxSlider("tone", value: $highCutHz, range: 800...18_000) { audio.setHighCut(Float($0)) }
+            Spacer()
+        }
+    }
+
+    private func fxSlider(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, apply: @escaping (Double) -> Void) -> some View {
+        HStack(spacing: 5) {
+            Text(label).font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+            Slider(value: Binding(get: { value.wrappedValue }, set: { value.wrappedValue = $0; apply($0) }), in: range)
+                .controlSize(.small).frame(width: 104).tint(Theme.brand)
+        }
     }
 
     private func ctrlButton(_ label: String, _ action: @escaping () -> Void) -> some View {

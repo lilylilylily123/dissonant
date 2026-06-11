@@ -63,9 +63,11 @@ final class DrumInstrument: MidiPlayable {
                 let freq = 110.0 * exp(-t * 28) + 45      // pitch drop into a thud
                 s = sin(2 * .pi * freq * t) * exp(-t * 8)
             case "snare":
-                let tone = sin(2 * .pi * 185 * t) * 0.4
-                let noise = Double.random(in: -1...1)
-                s = (tone + noise * 0.9) * exp(-t * 20)
+                // tonal body (two modes) + bright noise tail + a fast attack transient
+                let body = (sin(2 * .pi * 175 * t) + 0.5 * sin(2 * .pi * 280 * t)) * 0.5 * exp(-t * 32)
+                let noise = Double.random(in: -1...1) * exp(-t * 16)
+                let snap = t < 0.004 ? Double.random(in: -1...1) * 0.7 : 0
+                s = body + noise * 0.85 + snap
             case "clap":
                 // a couple of fast noise bursts then a tail
                 let burst = (sin(2 * .pi * 50 * t) > 0 || t > 0.03) ? 1.0 : 0.4

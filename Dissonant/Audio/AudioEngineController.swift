@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AudioKit
+import AudioKitEX
 
 /// Owns the AudioKit engine and a bank of voices, all wired into one mixer. The melody is
 /// routed through whichever voice is selected; the chord bed has its own (pad) voice.
@@ -10,14 +11,35 @@ final class AudioEngineController {
     let engine = AudioEngine()
     private let mixer = Mixer()
 
+    // Master FX chain: mixer → low-cut → high-cut (tone) → reverb → gain → output.
+    private let lowCut: HighPassFilter
+    private let highCut: LowPassFilter
+    private let reverb: Reverb
+    private let masterFader: Fader
+
     /// Dedicated voice for the (optional) chord bed.
     let chordInstrument: Instrument
 
     init() {
         chordInstrument = WaveformSynthInstrument(table: VoiceKind.pad.table, preset: VoiceKind.pad.preset)
         mixer.addInput(chordInstrument.node)
-        engine.output = mixer
+
+        lowCut = HighPassFilter(mixer, cutoffFrequency: 20)
+        highCut = LowPassFilter(lowCut, cutoffFrequency: 18_000)
+        reverb = Reverb(highCut)
+        reverb.dryWetMix = 0          // fully dry by default
+        masterFader = Fader(reverb, gain: 1)
+        engine.output = masterFader
     }
+
+    /// Master output gain (0…~1.5).
+    func setGain(_ gain: Float) { masterFader.gain = AUValue(gain) }
+    /// Reverb wet amount (0 = dry … 1 = wet).
+    func setReverb(_ wet: Float) { reverb.dryWetMix = AUValue(min(max(wet, 0), 1)) }
+    /// Low-cut (high-pass) cutoff in Hz — rolls off rumble.
+    func setLowCut(_ hz: Float) { lowCut.cutoffFrequency = AUValue(hz) }
+    /// High-cut (low-pass) cutoff in Hz — tone/brightness.
+    func setHighCut(_ hz: Float) { highCut.cutoffFrequency = AUValue(hz) }
 
     /// Create a fresh synth voice instance and add it to the mixer. Each track needs its own
     /// instance so simultaneous notes on different tracks don't collide.
