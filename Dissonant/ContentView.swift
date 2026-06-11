@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 import DissonantCore
 
 /// The main window. Left: track sidebar (voices). Right: a pattern bar + either **pattern
@@ -332,6 +334,28 @@ struct ContentView: View {
     }
     private func rewind() { transport.rewind(); playback?.releaseAll(); trackVoices?.releaseAll() }
 
+    /// Real-time bounce of the full song arrangement to a WAV file.
+    private func exportSong() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.wav]
+        panel.nameFieldStringValue = "song.wav"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        mode = .song
+        recomputeSong()
+        let total = max(Arrangement.totalLength(patterns: document.model.patterns, arrangement: document.model.arrangement), selectedPattern.lengthBeats)
+        transport.setLength(total)
+        let seconds = transport.tempo.seconds(forBeats: total) + 1.0
+
+        do { try audio.startRecording(to: url) } catch { return }
+        transport.rewind()
+        if !transport.state.isPlaying { transport.play() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            transport.stop(); playback?.releaseAll(); trackVoices?.releaseAll()
+            audio.stopRecording()
+        }
+    }
+
     private func setBPM(_ value: Int) { bpm = min(240, max(40, value)); bpmText = String(bpm) }
     private func commitBPM() {
         if let v = Int(bpmText.trimmingCharacters(in: .whitespaces)) { setBPM(v) } else { bpmText = String(bpm) }
@@ -383,6 +407,7 @@ struct ContentView: View {
             if mode == .pattern {
                 ctrlButton("clear") { notesBinding.wrappedValue.removeAll() }
             }
+            ctrlButton("⤓ export") { exportSong() }
         }
     }
 

@@ -75,6 +75,24 @@ final class AudioEngineController {
 
     func stop() { engine.stop() }
 
+    // MARK: - Recording (real-time bounce to a file)
+
+    private var recordFile: AVAudioFile?
+
+    func startRecording(to url: URL) throws {
+        let node = masterFader.avAudioNode
+        let format = node.outputFormat(forBus: 0)
+        recordFile = try AVAudioFile(forWriting: url, settings: format.settings)
+        node.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            try? self?.recordFile?.write(from: buffer)
+        }
+    }
+
+    func stopRecording() {
+        masterFader.avAudioNode.removeTap(onBus: 0)
+        recordFile = nil
+    }
+
     /// Play a note briefly through any voice — used for placement audition and the test tone.
     func audition(_ pitch: UInt8, on playable: MidiPlayable) {
         playable.noteOn(pitch, velocity: 100)
