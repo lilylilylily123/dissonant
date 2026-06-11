@@ -10,30 +10,19 @@ final class AudioEngineController {
     let engine = AudioEngine()
     private let mixer = Mixer()
 
-    private var voices: [VoiceKind: Instrument] = [:]
     /// Dedicated voice for the (optional) chord bed.
     let chordInstrument: Instrument
 
     init() {
-        for kind in VoiceKind.allCases {
-            let inst = SynthInstrument(preset: kind.preset)
-            voices[kind] = inst
-            mixer.addInput(inst.node)
-        }
-        let chords = SynthInstrument(preset: .pad)
-        chordInstrument = chords
-        mixer.addInput(chords.node)
+        chordInstrument = WaveformSynthInstrument(table: VoiceKind.pad.table, preset: VoiceKind.pad.preset)
+        mixer.addInput(chordInstrument.node)
         engine.output = mixer
-    }
-
-    func instrument(for kind: VoiceKind) -> Instrument {
-        voices[kind] ?? chordInstrument
     }
 
     /// Create a fresh synth voice instance and add it to the mixer. Each track needs its own
     /// instance so simultaneous notes on different tracks don't collide.
     func makeSynthVoice(_ kind: VoiceKind) -> Instrument {
-        let inst = SynthInstrument(preset: kind.preset)
+        let inst = WaveformSynthInstrument(table: kind.table, preset: kind.preset)
         mixer.addInput(inst.node)
         return inst
     }
@@ -71,8 +60,4 @@ final class AudioEngineController {
             }
         }
     }
-}
-
-private extension SynthPreset {
-    static let pad = VoiceKind.pad.preset
 }

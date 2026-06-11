@@ -20,6 +20,8 @@ struct ContentView: View {
     @State private var showAUBrowser = false
     @State private var noteLength: Double = 1
     @State private var bpm: Int = 120
+    @State private var bpmText: String = "120"
+    @FocusState private var bpmFocused: Bool
 
     private let lengthOptions: [(String, Double)] = [("1/16", 0.25), ("1/8", 0.5), ("1/4", 1.0), ("1/2", 2.0), ("1", 4.0)]
 
@@ -27,7 +29,7 @@ struct ContentView: View {
 
     private var selID: UUID { selectedTrackID ?? document.model.tracks.first?.id ?? UUID() }
     private var selectedIndex: Int { document.model.tracks.firstIndex { $0.id == selID } ?? 0 }
-    private var selectedVoice: VoiceKind { VoiceKind(rawValue: document.model.tracks[safe: selectedIndex]?.voice ?? "keys") ?? .keys }
+    private var selectedVoice: VoiceKind { VoiceKind(rawValue: document.model.tracks[safe: selectedIndex]?.voice ?? "saw") ?? .saw }
 
     private var notesBinding: Binding<[NoteEvent]> {
         Binding(
@@ -49,7 +51,9 @@ struct ContentView: View {
                     onAdd: addTrack,
                     onSelect: { selectedTrackID = $0 },
                     onRename: renameTrack,
-                    onDelete: deleteTrack
+                    onDelete: deleteTrack,
+                    onToggleMute: toggleMute,
+                    onToggleSolo: toggleSolo
                 )
                 VStack(alignment: .leading, spacing: 14) {
                     header
@@ -100,7 +104,18 @@ struct ContentView: View {
         trackVoices = voices
         selectedTrackID = document.model.tracks.first?.id
         bpm = Int(document.model.tempo)
+        bpmText = String(bpm)
         transport.tempo = Tempo(bpm: document.model.tempo)
+    }
+
+    private func setBPM(_ value: Int) {
+        bpm = min(240, max(40, value))
+        bpmText = String(bpm)
+    }
+
+    private func commitBPM() {
+        if let v = Int(bpmText.trimmingCharacters(in: .whitespaces)) { setBPM(v) }
+        else { bpmText = String(bpm) }
     }
 
     private func auditionNote(_ pitch: Int) {
@@ -127,6 +142,16 @@ struct ContentView: View {
     private func renameTrack(_ id: UUID, _ name: String) {
         guard let i = document.model.tracks.firstIndex(where: { $0.id == id }) else { return }
         document.model.tracks[i].name = name
+    }
+
+    private func toggleMute(_ id: UUID) {
+        guard let i = document.model.tracks.firstIndex(where: { $0.id == id }) else { return }
+        document.model.tracks[i].muted.toggle()
+    }
+
+    private func toggleSolo(_ id: UUID) {
+        guard let i = document.model.tracks.firstIndex(where: { $0.id == id }) else { return }
+        document.model.tracks[i].soloed.toggle()
     }
 
     // MARK: - Voice
@@ -167,14 +192,16 @@ struct ContentView: View {
             Text("dissonant")
                 .font(.custom(Theme.mono, size: 26)).bold()
                 .foregroundStyle(Theme.ink)
-            HStack(spacing: 4) {
-                ctrlButton("−") { bpm = max(40, bpm - 1) }
-                TextField("", value: $bpm, format: .number)
-                    .textFieldStyle(.plain).frame(width: 30)
-                    .multilineTextAlignment(.center)
-                    .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.ink)
-                Text("bpm").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
-                ctrlButton("+") { bpm = min(240, bpm + 1) }
+            HStack(spacing: 5) {
+                ctrlButton("−") { setBPM(bpm - 1) }
+                TextField("", text: $bpmText)
+                    .textFieldStyle(.plain).frame(width: 36).multilineTextAlignment(.center)
+                    .focused($bpmFocused)
+                    .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.ink)
+                    .onSubmit { commitBPM() }
+                    .onChange(of: bpmFocused) { _, focused in if !focused { commitBPM() } }
+                Text("bpm").font(.custom(Theme.mono, size: 11)).foregroundStyle(Theme.faded)
+                ctrlButton("+") { setBPM(bpm + 1) }
             }
             Text("chord \(currentChordName)")
                 .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.brand)
@@ -223,21 +250,21 @@ struct ContentView: View {
     private func voiceChip(_ label: String, selected: Bool, _ action: @escaping () -> Void) -> some View {
         Button(label, action: action)
             .buttonStyle(.plain)
-            .font(.custom(Theme.mono, size: 11))
+            .font(.custom(Theme.mono, size: 13))
             .foregroundStyle(selected ? Theme.surface : Theme.ink)
-            .padding(.horizontal, 9).padding(.vertical, 4)
+            .padding(.horizontal, 11).padding(.vertical, 6)
             .background(selected ? Theme.brand : Theme.panel)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 
     private func ctrlButton(_ label: String, _ action: @escaping () -> Void) -> some View {
         Button(label, action: action)
             .buttonStyle(.plain)
-            .font(.custom(Theme.mono, size: 12))
+            .font(.custom(Theme.mono, size: 13))
             .foregroundStyle(Theme.faded)
-            .padding(.horizontal, 8).padding(.vertical, 5)
+            .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Theme.panel)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 }
 

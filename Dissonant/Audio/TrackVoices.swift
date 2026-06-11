@@ -25,7 +25,7 @@ final class TrackVoices {
     /// Ensure every track has a voice (creating synth voices for new tracks).
     func sync(tracks: [Track]) {
         for track in tracks where entries[track.id] == nil {
-            let inst = audio.makeSynthVoice(VoiceKind(rawValue: track.voice) ?? .keys)
+            let inst = audio.makeSynthVoice(VoiceKind(rawValue: track.voice) ?? .saw)
             entries[track.id] = Entry(instrument: inst)
         }
     }
@@ -45,10 +45,18 @@ final class TrackVoices {
         entry.playback.instrument = instrument
     }
 
-    /// Advance every track's playback for the current beat.
+    /// Advance every audible track's playback for the current beat. Honors mute and solo:
+    /// if any track is soloed, only soloed tracks sound; otherwise all non-muted tracks do.
+    /// Inaudible tracks are released so held notes don't hang.
     func update(forBeat beat: Double, tracks: [Track]) {
+        let anySolo = tracks.contains { $0.soloed }
         for track in tracks {
-            entries[track.id]?.playback.update(forBeat: beat, notes: track.noteEvents)
+            let audible = anySolo ? track.soloed : !track.muted
+            if audible {
+                entries[track.id]?.playback.update(forBeat: beat, notes: track.noteEvents)
+            } else {
+                entries[track.id]?.playback.releaseAll()
+            }
         }
     }
 

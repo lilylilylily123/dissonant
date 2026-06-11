@@ -17,6 +17,9 @@ packages:
   DunneAudioKit:
     url: https://github.com/AudioKit/DunneAudioKit.git
     from: "5.6.0"
+  SoundpipeAudioKit:
+    url: https://github.com/AudioKit/SoundpipeAudioKit.git
+    from: "5.6.0"
 
 settings:
   base:
@@ -42,6 +45,8 @@ targets:
         product: AudioKitEX
       - package: DunneAudioKit
         product: DunneAudioKit
+      - package: SoundpipeAudioKit
+        product: SoundpipeAudioKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.crackerjack.dissonant.app
