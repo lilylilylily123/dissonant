@@ -286,6 +286,9 @@ struct ContentView: View {
                     .onChange(of: bpmFocused) { _, f in if !f { commitBPM() } }
                 Text("bpm").font(.custom(Theme.mono, size: 11)).foregroundStyle(Theme.faded)
                 ctrlButton("+") { setBPM(bpm + 1) }
+                if bpmFocused {
+                    ctrlButton("✓") { commitBPM(); bpmFocused = false }
+                }
             }
 
             // mode toggle
