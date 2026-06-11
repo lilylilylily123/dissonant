@@ -63,6 +63,19 @@ struct ContentView: View {
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { selectedPattern.chords.chord(atBeat: playhead)?.name ?? "—" }
 
+    // Key inference from the melodic notes in the selected pattern (drums excluded).
+    private var keyResult: KeyDetectionResult {
+        let drumIDs = Set(document.model.tracks.filter { $0.isDrum }.map { $0.id })
+        let pcs = selectedPattern.notesByTrack
+            .filter { !drumIDs.contains($0.key) }
+            .flatMap { $0.value }
+            .map { $0.pitch }
+        return KeyDetector().detect(pitchClasses: pcs)
+    }
+    private func keyName(_ root: Int, _ scale: ScaleType) -> String {
+        Harmony.noteName(root) + (scale == .major ? " maj" : " min")
+    }
+
     var body: some View {
         ZStack {
             Theme.surface.ignoresSafeArea()
@@ -282,6 +295,8 @@ struct ContentView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 5))
 
+            keyChip
+
             Spacer()
 
             ctrlButton("⏮") { rewind() }.keyboardShortcut("r", modifiers: [])
@@ -298,6 +313,28 @@ struct ContentView: View {
             if mode == .pattern {
                 ctrlButton("clear") { notesBinding.wrappedValue.removeAll() }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var keyChip: some View {
+        if document.model.key.isLocked, let root = document.model.key.rootPitchClass {
+            HStack(spacing: 4) {
+                Text("key \(keyName(root, document.model.key.scale))")
+                    .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.brand)
+                Button("×") { document.model.key = .none }
+                    .buttonStyle(.plain).font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.faded)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Theme.panel).clipShape(RoundedRectangle(cornerRadius: 4))
+        } else if keyResult.isConfident, let top = keyResult.top {
+            Button("looks like \(keyName(top.rootPitchClass, top.scale)) — lock?") {
+                document.model.key = KeyState(rootPitchClass: top.rootPitchClass, scale: top.scale, isLocked: true)
+            }
+            .buttonStyle(.plain)
+            .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.ink)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Theme.panel).clipShape(RoundedRectangle(cornerRadius: 4))
         }
     }
 
