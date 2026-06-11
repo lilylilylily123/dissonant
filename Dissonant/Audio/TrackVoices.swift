@@ -41,7 +41,15 @@ final class TrackVoices {
     }
 
     private func makeEntry(for track: Track) -> Entry {
+        // Build the FX chain into the master first, so the bus is in the engine graph before
+        // we connect the instrument into it.
         let bus = Mixer()
+        let tone = LowPassFilter(bus, cutoffFrequency: AUValue(track.tone))
+        let reverb = Reverb(tone)
+        reverb.dryWetMix = AUValue(min(max(track.reverbSend, 0), 1))
+        let fader = Fader(reverb, gain: AUValue(track.volume))
+        audio.masterMixer.addInput(fader)
+
         let instrument: MidiPlayable
         if track.isDrum {
             let drum = audio.makeDrumVoice()
@@ -53,11 +61,6 @@ final class TrackVoices {
             bus.addInput(synth.node)
             instrument = synth
         }
-        let tone = LowPassFilter(bus, cutoffFrequency: AUValue(track.tone))
-        let reverb = Reverb(tone)
-        reverb.dryWetMix = AUValue(min(max(track.reverbSend, 0), 1))
-        let fader = Fader(reverb, gain: AUValue(track.volume))
-        audio.masterMixer.addInput(fader)
         return Entry(bus: bus, tone: tone, reverb: reverb, fader: fader, instrument: instrument)
     }
 

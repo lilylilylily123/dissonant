@@ -197,11 +197,11 @@ struct ContentView: View {
     // MARK: - Lifecycle
 
     private func setup() {
-        audio.start()
         playback = ChordPlayback(instrument: audio.chordInstrument)
         let voices = TrackVoices(audio: audio)
-        voices.sync(tracks: document.model.tracks)
+        voices.sync(tracks: document.model.tracks)   // build the per-track FX graph BEFORE start
         trackVoices = voices
+        audio.start()
         selectedTrackID = document.model.tracks.first?.id
         selectedPatternID = document.model.patterns.first?.id
         bpm = Int(document.model.tempo)
@@ -224,15 +224,22 @@ struct ContentView: View {
     private func addTrack() {
         let track = Track(name: "track \(document.model.tracks.count + 1)")
         document.model.tracks.append(track)
-        trackVoices?.sync(tracks: document.model.tracks)
+        rebuildVoices()
         selectedTrackID = track.id
     }
 
     private func addDrumTrack() {
         let track = Track(name: "drums", isDrum: true)
         document.model.tracks.append(track)
-        trackVoices?.sync(tracks: document.model.tracks)
+        rebuildVoices()
         selectedTrackID = track.id
+    }
+
+    /// Adding a track creates new FX nodes; AVAudioEngine wants the engine stopped for that.
+    private func rebuildVoices() {
+        audio.stop()
+        trackVoices?.sync(tracks: document.model.tracks)
+        audio.start()
     }
 
     private func deleteTrack(_ id: UUID) {
