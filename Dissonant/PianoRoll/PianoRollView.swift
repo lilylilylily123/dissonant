@@ -106,11 +106,13 @@ struct PianoRollView: View {
             playhead
         }
         .frame(width: gridWidth, height: gridHeight)
-        .contentShape(Rectangle())
-        .gesture(
-            SpatialTapGesture().onEnded { value in
-                toggleNote(at: value.location)
-            }
+        .overlay(
+            RollMouseHandler(
+                onLeftDown: { place(at: $0) },
+                onLeftDrag: { place(at: $0) },     // left-drag paints
+                onRightDown: { delete(at: $0) },
+                onRightDrag: { delete(at: $0) }    // right-drag erases
+            )
         )
     }
 
@@ -153,16 +155,70 @@ struct PianoRollView: View {
 
     // MARK: - Interaction
 
-    private func toggleNote(at point: CGPoint) {
+    private func cell(at point: CGPoint) -> (beat: Int, pitch: Int)? {
         let beat = Int(point.x / beatWidth)
         let p = pitch(forY: point.y)
-        guard beat >= 0, beat < beats, p >= lowMIDI, p <= highMIDI else { return }
+        guard beat >= 0, beat < beats, p >= lowMIDI, p <= highMIDI else { return nil }
+        return (beat, p)
+    }
 
-        if let idx = notes.firstIndex(where: { $0.pitch == p && Int($0.startBeat) == beat }) {
-            notes.remove(at: idx)
-        } else {
-            notes.append(NoteEvent(startBeat: Double(beat), lengthBeats: 1, pitch: p))
-            onAudition?(p)
+    /// Place a note at the cell (left-click / paint). No-op if one already exists there, so
+    /// dragging across a cell doesn't stack duplicates or re-audition.
+    private func place(at point: CGPoint) {
+        guard let (beat, p) = cell(at: point) else { return }
+        guard !notes.contains(where: { $0.pitch == p && Int($0.startBeat) == beat }) else { return }
+        notes.append(NoteEvent(startBeat: Double(beat), lengthBeats: 1, pitch: p))
+        onAudition?(p)
+    }
+
+    /// Remove the note at the cell (right-click / erase).
+    private func delete(at point: CGPoint) {
+        guard let (beat, p) = cell(at: point) else { return }
+        notes.removeAll { $0.pitch == p && Int($0.startBeat) == beat }
+    }
+}
+
+/// Thin AppKit bridge so the roll gets FL-style mouse behaviour SwiftUI can't express:
+/// place on mouse-DOWN (snappy, not on release), left-drag to paint, right-click/drag to
+/// erase — all with the cursor location SwiftUI's tap gestures don't hand back.
+struct RollMouseHandler: NSViewRepresentable {
+    var onLeftDown: (CGPoint) -> Void
+    var onLeftDrag: (CGPoint) -> Void
+    var onRightDown: (CGPoint) -> Void
+    var onRightDrag: (CGPoint) -> Void
+
+    func makeNSView(context: Context) -> MouseView {
+        let v = MouseView()
+        v.onLeftDown = onLeftDown
+        v.onLeftDrag = onLeftDrag
+        v.onRightDown = onRightDown
+        v.onRightDrag = onRightDrag
+        return v
+    }
+
+    func updateNSView(_ nsView: MouseView, context: Context) {
+        nsView.onLeftDown = onLeftDown
+        nsView.onLeftDrag = onLeftDrag
+        nsView.onRightDown = onRightDown
+        nsView.onRightDrag = onRightDrag
+    }
+
+    final class MouseView: NSView {
+        var onLeftDown: ((CGPoint) -> Void)?
+        var onLeftDrag: ((CGPoint) -> Void)?
+        var onRightDown: ((CGPoint) -> Void)?
+        var onRightDrag: ((CGPoint) -> Void)?
+
+        // Match SwiftUI's top-left origin.
+        override var isFlipped: Bool { true }
+
+        private func loc(_ event: NSEvent) -> CGPoint {
+            convert(event.locationInWindow, from: nil)
         }
+
+        override func mouseDown(with event: NSEvent) { onLeftDown?(loc(event)) }
+        override func mouseDragged(with event: NSEvent) { onLeftDrag?(loc(event)) }
+        override func rightMouseDown(with event: NSEvent) { onRightDown?(loc(event)) }
+        override func rightMouseDragged(with event: NSEvent) { onRightDrag?(loc(event)) }
     }
 }
