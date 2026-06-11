@@ -99,8 +99,10 @@ struct PianoRollView: View {
                 }
             }
             .frame(width: gridWidth, height: gridHeight)
+            .allowsHitTesting(false)
 
             notesLayer
+                .allowsHitTesting(false)
             playhead
         }
         .frame(width: gridWidth, height: gridHeight)

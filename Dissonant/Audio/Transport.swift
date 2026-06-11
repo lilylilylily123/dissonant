@@ -41,6 +41,13 @@ final class Transport: ObservableObject {
         lastTick = nil
     }
 
+    /// Return the playhead to the start. Keeps playing if it was playing.
+    func rewind() {
+        sequencer.rewind()
+        state.seek(toBeat: 0)
+        if state.isPlaying { lastTick = Date() }
+    }
+
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in

@@ -1,9 +1,9 @@
 import SwiftUI
 import DissonantCore
 
-/// The main window: the guidance experience. A guided chord lane drives the live tier
-/// highlighting on a piano roll; the playable-now readout mirrors it. Play sweeps the
-/// playhead, recoloring the roll per chord and sounding the backing bed.
+/// The main window: the guidance experience. The chord progression drives the live tier
+/// highlighting; by default you don't *hear* the chords — you see which notes fit. Play
+/// sweeps the playhead and recolors the roll per chord. Notes you place are audible.
 struct ContentView: View {
     @Binding var document: ProjectDocument
 
@@ -20,6 +20,8 @@ struct ContentView: View {
 
     // Key inference wiring lands in U10; cold-start neutral for now.
     @State private var key: KeyState = .none
+    // The chord progression is guidance context — off by default, opt-in to hear it.
+    @State private var hearChords = false
 
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { chordTrack.chord(atBeat: playhead)?.name ?? "—" }
@@ -42,47 +44,72 @@ struct ContentView: View {
             }
             .padding(18)
         }
-        .frame(minWidth: 860, minHeight: 660)
+        .frame(minWidth: 860, minHeight: 680)
         .onAppear {
             audio.start()
             playback = ChordPlayback(instrument: audio.instrument)
         }
         .onChange(of: transport.state.positionBeats) { _, beat in
-            if transport.state.isPlaying { playback?.update(forBeat: beat, in: chordTrack) }
+            if transport.state.isPlaying && hearChords {
+                playback?.update(forBeat: beat, in: chordTrack)
+            }
+        }
+        .onChange(of: hearChords) { _, on in
+            if !on { playback?.releaseAll() }
         }
     }
 
+    private func togglePlay() {
+        if transport.state.isPlaying {
+            transport.stop(); playback?.releaseAll()
+        } else {
+            transport.play()
+        }
+    }
+
+    private func rewind() {
+        transport.rewind(); playback?.releaseAll()
+    }
+
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 18) {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text("dissonant")
                 .font(.custom(Theme.mono, size: 26)).bold()
                 .foregroundStyle(Theme.ink)
-
             Text("\(Int(transport.tempo.bpm)) bpm")
                 .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.faded)
-
             Text("chord \(currentChordName)")
                 .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.brand)
 
             Spacer()
 
-            Button("test tone") { audio.playTestNote() }
+            // transport
+            ctrlButton("⏮") { rewind() }
+                .keyboardShortcut("r", modifiers: [])
+            Button(transport.state.isPlaying ? "⏹ stop" : "▶ play") { togglePlay() }
                 .buttonStyle(.plain)
-                .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.faded)
+                .font(.custom(Theme.mono, size: 14)).bold()
+                .foregroundStyle(Theme.surface)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Theme.brand)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .keyboardShortcut(.space, modifiers: [])
 
-            Button(transport.state.isPlaying ? "⏹ stop" : "▶ play") {
-                if transport.state.isPlaying {
-                    transport.stop(); playback?.releaseAll()
-                } else {
-                    transport.play()
-                }
-            }
-            .buttonStyle(.plain)
-            .font(.custom(Theme.mono, size: 14)).bold()
-            .foregroundStyle(Theme.surface)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Theme.brand)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            // utilities
+            ctrlButton(hearChords ? "♪ chords on" : "♪ chords off") { hearChords.toggle() }
+                .foregroundStyle(hearChords ? Theme.brand : Theme.faded)
+            ctrlButton("clear") { document.model.noteEvents.removeAll() }
+            ctrlButton("test tone") { audio.playTestNote() }
         }
+    }
+
+    private func ctrlButton(_ label: String, _ action: @escaping () -> Void) -> some View {
+        Button(label, action: action)
+            .buttonStyle(.plain)
+            .font(.custom(Theme.mono, size: 12))
+            .foregroundStyle(Theme.faded)
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(Theme.panel)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
