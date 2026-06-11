@@ -21,6 +21,11 @@ struct ContentView: View {
     @State private var auName: String?
     @State private var showAUBrowser = false
 
+    @State private var noteLength: Double = 1
+    @State private var bpm: Int = 120
+
+    private let lengthOptions: [(String, Double)] = [("1/16", 0.25), ("1/8", 0.5), ("1/4", 1.0), ("1/2", 2.0), ("1", 4.0)]
+
     private var currentMelody: MidiPlayable { melodyAU ?? audio.instrument(for: melodyVoice) }
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { document.model.chordTrack.chord(atBeat: playhead)?.name ?? "—" }
@@ -38,14 +43,15 @@ struct ContentView: View {
                     key: document.model.key,
                     playheadBeat: playhead,
                     onAudition: { pitch in audio.audition(UInt8(clamping: pitch), on: currentMelody) },
-                    showLandscape: showLandscape
+                    showLandscape: showLandscape,
+                    noteLength: noteLength
                 )
                 PlayableNowView(chordTrack: document.model.chordTrack, key: document.model.key, playheadBeat: playhead)
                 Spacer(minLength: 0)
             }
             .padding(18)
         }
-        .frame(minWidth: 880, minHeight: 740)
+        .frame(minWidth: 940, minHeight: 900)
         .sheet(isPresented: $showAUBrowser) {
             AUBrowserView(onSelect: { selectAU($0) }, onClose: { showAUBrowser = false })
         }
@@ -53,10 +59,15 @@ struct ContentView: View {
             audio.start()
             playback = ChordPlayback(instrument: audio.chordInstrument)
             notePlayback = NotePlayback(instrument: currentMelody)
+            bpm = Int(document.model.tempo)
             transport.tempo = Tempo(bpm: document.model.tempo)
             if document.model.chordTrack.isEmpty {
                 document.model.chordTrack = ProjectModel.starter.chordTrack
             }
+        }
+        .onChange(of: bpm) { _, value in
+            transport.tempo = Tempo(bpm: Double(value))
+            document.model.tempo = Double(value)
         }
         .onChange(of: transport.state.positionBeats) { _, beat in
             guard transport.state.isPlaying else { return }
@@ -106,8 +117,15 @@ struct ContentView: View {
             Text("dissonant")
                 .font(.custom(Theme.mono, size: 26)).bold()
                 .foregroundStyle(Theme.ink)
-            Text("\(Int(transport.tempo.bpm)) bpm")
-                .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.faded)
+            HStack(spacing: 4) {
+                ctrlButton("−") { bpm = max(40, bpm - 1) }
+                TextField("", value: $bpm, format: .number)
+                    .textFieldStyle(.plain).frame(width: 30)
+                    .multilineTextAlignment(.center)
+                    .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.ink)
+                Text("bpm").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+                ctrlButton("+") { bpm = min(240, bpm + 1) }
+            }
             Text("chord \(currentChordName)")
                 .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.brand)
 
@@ -143,6 +161,13 @@ struct ContentView: View {
             }
             Divider().frame(height: 16).overlay(Theme.gridLine)
             voiceChip(auName ?? "AU…", selected: melodyAU != nil) { showAUBrowser = true }
+
+            Spacer()
+
+            Text("len").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+            ForEach(lengthOptions, id: \.0) { option in
+                voiceChip(option.0, selected: noteLength == option.1) { noteLength = option.1 }
+            }
         }
     }
 

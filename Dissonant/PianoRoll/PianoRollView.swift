@@ -14,14 +14,17 @@ struct PianoRollView: View {
     /// When true, paint every cell by its fit against the chord at *that* beat — the whole
     /// progression's harmonic map at once (red = dissonant), not just the playhead column.
     var showLandscape: Bool = false
+    /// Length (in beats) of newly placed notes, and the grid the start snaps to.
+    /// 1 = quarter, 0.5 = eighth, 0.25 = sixteenth, 2 = half, 4 = whole.
+    var noteLength: Double = 1
 
     // Geometry
     private let lowMIDI = 24          // C1 (bass)
     private let highMIDI = 84         // C6
-    private let visibleHeight: CGFloat = 380
+    private let visibleHeight: CGFloat = 540
     private let beats = 16
-    private let rowHeight: CGFloat = 16
-    private let beatWidth: CGFloat = 44
+    private let rowHeight: CGFloat = 18
+    private let beatWidth: CGFloat = 52
     private let gutter: CGFloat = 56
 
     private let engine = HighlightEngine()
@@ -120,6 +123,21 @@ struct PianoRollView: View {
                     }
                 }
 
+                // subdivision gridlines (when the note grid is finer than a beat)
+                if noteLength < 1 {
+                    var t = noteLength
+                    while t < Double(beats) {
+                        if t.truncatingRemainder(dividingBy: 1) != 0 {
+                            let x = CGFloat(t) * beatWidth
+                            var path = Path()
+                            path.move(to: CGPoint(x: x, y: 0))
+                            path.addLine(to: CGPoint(x: x, y: size.height))
+                            ctx.stroke(path, with: .color(Theme.gridLine.opacity(0.18)), lineWidth: 0.5)
+                        }
+                        t += noteLength
+                    }
+                }
+
                 // beat gridlines (heavier every 4)
                 for b in 0...beats {
                     let x = CGFloat(b) * beatWidth
@@ -187,26 +205,29 @@ struct PianoRollView: View {
 
     // MARK: - Interaction
 
-    private func cell(at point: CGPoint) -> (beat: Int, pitch: Int)? {
-        let beat = Int(point.x / beatWidth)
+    private func pitchBeat(at point: CGPoint) -> (pitch: Int, beat: Double)? {
+        let beat = Double(point.x / beatWidth)
         let p = pitch(forY: point.y)
-        guard beat >= 0, beat < beats, p >= lowMIDI, p <= highMIDI else { return nil }
-        return (beat, p)
+        guard beat >= 0, beat < Double(beats), p >= lowMIDI, p <= highMIDI else { return nil }
+        return (p, beat)
     }
 
-    /// Place a note at the cell (left-click / paint). No-op if one already exists there, so
-    /// dragging across a cell doesn't stack duplicates or re-audition.
+    /// Place a note (left-click / paint), snapping the start to the note-length grid and using
+    /// the selected length. No-op if a note already overlaps that slot, so paint-drag and
+    /// re-audition don't stack.
     private func place(at point: CGPoint) {
-        guard let (beat, p) = cell(at: point) else { return }
-        guard !notes.contains(where: { $0.pitch == p && Int($0.startBeat) == beat }) else { return }
-        notes.append(NoteEvent(startBeat: Double(beat), lengthBeats: 1, pitch: p))
+        guard let (p, beat) = pitchBeat(at: point) else { return }
+        let start = (beat / noteLength).rounded(.down) * noteLength
+        let overlaps = notes.contains { $0.pitch == p && $0.startBeat < start + noteLength && start < $0.startBeat + $0.lengthBeats }
+        guard !overlaps else { return }
+        notes.append(NoteEvent(startBeat: start, lengthBeats: noteLength, pitch: p))
         onAudition?(p)
     }
 
-    /// Remove the note at the cell (right-click / erase).
+    /// Remove the note under the cursor (right-click / erase) — any note covering that beat.
     private func delete(at point: CGPoint) {
-        guard let (beat, p) = cell(at: point) else { return }
-        notes.removeAll { $0.pitch == p && Int($0.startBeat) == beat }
+        guard let (p, beat) = pitchBeat(at: point) else { return }
+        notes.removeAll { $0.pitch == p && $0.startBeat <= beat && beat < $0.startBeat + $0.lengthBeats }
     }
 }
 
