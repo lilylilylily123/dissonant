@@ -32,6 +32,10 @@ struct ContentView: View {
     @State private var lowCutHz: Double = 20
     @State private var highCutHz: Double = 18_000
 
+    // Cached flattened song (stable note ids) so song-mode playback doesn't recompute per frame.
+    @State private var songNotes: [UUID: [NoteEvent]] = [:]
+    @State private var songChords = ChordTrackModel()
+
     private let lengthOptions: [(String, Double)] = [("1/16", 0.25), ("1/8", 0.5), ("1/4", 1.0), ("1/2", 2.0), ("1", 4.0)]
 
     // MARK: - Derived
@@ -128,7 +132,7 @@ struct ContentView: View {
                             playheadBeat: playhead,
                             patternLength: selectedPattern.lengthBeats
                         )
-                        .onChange(of: document.model.arrangement) { _, _ in updateLength() }
+                        .onChange(of: document.model.arrangement) { _, _ in recomputeSong(); updateLength() }
                     }
                     fxBar
                     Spacer(minLength: 0)
@@ -143,7 +147,12 @@ struct ContentView: View {
         .onAppear { setup() }
         .onChange(of: transport.state.positionBeats) { _, beat in tick(beat) }
         .onChange(of: hearChords) { _, on in if !on { playback?.releaseAll() } }
-        .onChange(of: mode) { _, _ in updateLength() }
+        .onChange(of: mode) { _, newMode in
+            trackVoices?.releaseAll(); playback?.releaseAll()
+            if newMode == .song { recomputeSong() }
+            updateLength()
+            transport.rewind()
+        }
         .onChange(of: selectedPatternID) { _, _ in if mode == .pattern { updateLength() } }
         .onChange(of: bpm) { _, value in
             transport.tempo = Tempo(bpm: Double(value)); document.model.tempo = Double(value)
@@ -160,15 +169,19 @@ struct ContentView: View {
             trackVoices?.update(forBeat: beat, tracks: tracks) { pattern.notes(for: $0) }
             if hearChords { playback?.update(forBeat: beat, in: pattern.chords) }
         } else {
-            let patterns = document.model.patterns
-            let arrangement = document.model.arrangement
-            trackVoices?.update(forBeat: beat, tracks: tracks) {
-                Arrangement.flattenedNotes(trackID: $0, patterns: patterns, arrangement: arrangement)
-            }
-            if hearChords {
-                playback?.update(forBeat: beat, in: Arrangement.flattenedChords(patterns: patterns, arrangement: arrangement))
-            }
+            trackVoices?.update(forBeat: beat, tracks: tracks) { songNotes[$0] ?? [] }
+            if hearChords { playback?.update(forBeat: beat, in: songChords) }
         }
+    }
+
+    /// Flatten the arrangement once (stable per-occurrence note ids), cached for song playback.
+    private func recomputeSong() {
+        var map: [UUID: [NoteEvent]] = [:]
+        for track in document.model.tracks {
+            map[track.id] = Arrangement.flattenedNotes(trackID: track.id, patterns: document.model.patterns, arrangement: document.model.arrangement)
+        }
+        songNotes = map
+        songChords = Arrangement.flattenedChords(patterns: document.model.patterns, arrangement: document.model.arrangement)
     }
 
     private func updateLength() {

@@ -21,12 +21,12 @@ enum VoiceKind: String, CaseIterable, Identifiable, Sendable {
 
     var preset: SynthPreset {
         switch self {
-        case .saw:      return SynthPreset(attack: 0.01,  decay: 0.10, sustain: 0.70, release: 0.30)
-        case .square:   return SynthPreset(attack: 0.005, decay: 0.15, sustain: 0.50, release: 0.20)
-        case .triangle: return SynthPreset(attack: 0.01,  decay: 0.20, sustain: 0.60, release: 0.40)
-        case .sine:     return SynthPreset(attack: 0.02,  decay: 0.20, sustain: 0.70, release: 0.50)
-        case .pad:      return SynthPreset(attack: 0.50,  decay: 0.40, sustain: 0.85, release: 1.40)
-        case .pluck:    return SynthPreset(attack: 0.001, decay: 0.18, sustain: 0.00, release: 0.22)
+        case .saw:      return SynthPreset(attack: 0.008, decay: 0.10, sustain: 0.65, release: 0.14)
+        case .square:   return SynthPreset(attack: 0.004, decay: 0.12, sustain: 0.45, release: 0.10)
+        case .triangle: return SynthPreset(attack: 0.008, decay: 0.16, sustain: 0.55, release: 0.16)
+        case .sine:     return SynthPreset(attack: 0.015, decay: 0.18, sustain: 0.65, release: 0.20)
+        case .pad:      return SynthPreset(attack: 0.45,  decay: 0.40, sustain: 0.80, release: 0.90)
+        case .pluck:    return SynthPreset(attack: 0.001, decay: 0.16, sustain: 0.00, release: 0.14)
         }
     }
 }
@@ -102,6 +102,6 @@ final class WaveformSynthInstrument: Instrument {
     }
 
     func noteOff(_ pitch: UInt8) {
-        voices.first { $0.pitch == pitch }?.off()
+        for voice in voices where voice.pitch == pitch { voice.off() }
     }
 }
