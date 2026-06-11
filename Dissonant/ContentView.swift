@@ -43,6 +43,10 @@ struct ContentView: View {
             playback = ChordPlayback(instrument: audio.instrument)
             notePlayback = NotePlayback(instrument: audio.instrument)
             transport.tempo = Tempo(bpm: document.model.tempo)
+            // Guidance needs chords — seed a progression for any project that has none.
+            if document.model.chordTrack.isEmpty {
+                document.model.chordTrack = ProjectModel.starter.chordTrack
+            }
         }
         .onChange(of: transport.state.positionBeats) { _, beat in
             guard transport.state.isPlaying else { return }

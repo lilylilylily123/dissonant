@@ -100,14 +100,14 @@ struct PianoRollView: View {
                         for pitch in lowMIDI...highMIDI {
                             guard let tier = map[((pitch % 12) + 12) % 12] else { continue }
                             let cell = CGRect(x: CGFloat(b) * beatWidth, y: y(forPitch: pitch), width: beatWidth, height: rowHeight)
-                            let opacity = tier == .dissonance ? 0.26 : (tier == .tension ? 0.15 : 0.09)
+                            let opacity = tier == .dissonance ? 0.40 : (tier == .tension ? 0.26 : 0.16)
                             ctx.fill(Path(cell), with: .color(Theme.color(for: tier).opacity(opacity)))
                             if tier == .dissonance {
-                                // non-color cue: a faint diagonal stripe marks dissonant cells
+                                // non-color cue: a diagonal stripe marks dissonant cells
                                 var stripe = Path()
                                 stripe.move(to: CGPoint(x: cell.minX, y: cell.maxY))
                                 stripe.addLine(to: CGPoint(x: cell.maxX, y: cell.minY))
-                                ctx.stroke(stripe, with: .color(Theme.dissonance.opacity(0.4)), lineWidth: 0.8)
+                                ctx.stroke(stripe, with: .color(Theme.dissonance.opacity(0.6)), lineWidth: 0.9)
                             }
                         }
                     }
