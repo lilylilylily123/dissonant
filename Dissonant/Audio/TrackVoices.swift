@@ -22,10 +22,12 @@ final class TrackVoices {
         self.audio = audio
     }
 
-    /// Ensure every track has a voice (creating synth voices for new tracks).
+    /// Ensure every track has a voice (drum kit for drum tracks, synth otherwise).
     func sync(tracks: [Track]) {
         for track in tracks where entries[track.id] == nil {
-            let inst = audio.makeSynthVoice(VoiceKind(rawValue: track.voice) ?? .saw)
+            let inst: MidiPlayable = track.isDrum
+                ? audio.makeDrumVoice()
+                : audio.makeSynthVoice(VoiceKind(rawValue: track.voice) ?? .saw)
             entries[track.id] = Entry(instrument: inst)
         }
     }

@@ -38,6 +38,7 @@ struct ContentView: View {
     private var selPatternID: UUID { selectedPatternID ?? document.model.patterns.first?.id ?? UUID() }
     private var patternIndex: Int { document.model.patterns.firstIndex { $0.id == selPatternID } ?? 0 }
     private var selectedPattern: SongPattern { document.model.patterns[safe: patternIndex] ?? SongPattern(name: "—") }
+    private var isDrumSelected: Bool { document.model.tracks[safe: trackIndex]?.isDrum == true }
 
     private var notesBinding: Binding<[NoteEvent]> {
         Binding(
@@ -70,6 +71,7 @@ struct ContentView: View {
                     tracks: document.model.tracks,
                     selectedTrackID: selTrackID,
                     onAdd: addTrack,
+                    onAddDrum: addDrumTrack,
                     onSelect: { selectedTrackID = $0 },
                     onRename: renameTrack,
                     onDelete: deleteTrack,
@@ -81,17 +83,26 @@ struct ContentView: View {
                     patternBar
                     if mode == .pattern {
                         ChordLaneView(chordTrack: chordsBinding, playheadBeat: playhead)
-                        voicePicker
-                        PianoRollView(
-                            notes: notesBinding,
-                            chordTrack: selectedPattern.chords,
-                            key: document.model.key,
-                            playheadBeat: playhead,
-                            onAudition: auditionNote,
-                            showLandscape: showLandscape,
-                            noteLength: noteLength
-                        )
-                        PlayableNowView(chordTrack: selectedPattern.chords, key: document.model.key, playheadBeat: playhead)
+                        if isDrumSelected {
+                            DrumGridView(
+                                notes: notesBinding,
+                                patternLength: selectedPattern.lengthBeats,
+                                playheadBeat: playhead,
+                                onHit: auditionNote
+                            )
+                        } else {
+                            voicePicker
+                            PianoRollView(
+                                notes: notesBinding,
+                                chordTrack: selectedPattern.chords,
+                                key: document.model.key,
+                                playheadBeat: playhead,
+                                onAudition: auditionNote,
+                                showLandscape: showLandscape,
+                                noteLength: noteLength
+                            )
+                            PlayableNowView(chordTrack: selectedPattern.chords, key: document.model.key, playheadBeat: playhead)
+                        }
                     } else {
                         SongView(
                             patterns: document.model.patterns,
@@ -176,6 +187,13 @@ struct ContentView: View {
 
     private func addTrack() {
         let track = Track(name: "track \(document.model.tracks.count + 1)")
+        document.model.tracks.append(track)
+        trackVoices?.sync(tracks: document.model.tracks)
+        selectedTrackID = track.id
+    }
+
+    private func addDrumTrack() {
+        let track = Track(name: "drums", isDrum: true)
         document.model.tracks.append(track)
         trackVoices?.sync(tracks: document.model.tracks)
         selectedTrackID = track.id

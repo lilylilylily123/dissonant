@@ -27,6 +27,14 @@ final class AudioEngineController {
         return inst
     }
 
+    /// Create a procedural drum kit voice and wire its player nodes into the mixer.
+    func makeDrumVoice() -> DrumInstrument {
+        let drum = DrumInstrument()
+        drum.attach(to: engine.avEngine, mixer: mixer.avAudioNode)
+        drum.start()
+        return drum
+    }
+
     func start() {
         do {
             try engine.start()

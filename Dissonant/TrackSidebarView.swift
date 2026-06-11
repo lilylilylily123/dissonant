@@ -7,6 +7,7 @@ struct TrackSidebarView: View {
     let tracks: [Track]
     let selectedTrackID: UUID?
     var onAdd: () -> Void
+    var onAddDrum: () -> Void
     var onSelect: (UUID) -> Void
     var onRename: (UUID, String) -> Void
     var onDelete: (UUID) -> Void
@@ -15,13 +16,16 @@ struct TrackSidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("tracks")
-                    .font(.custom(Theme.mono, size: 13)).bold().foregroundStyle(Theme.ink)
-                Spacer()
-                Button("+ add") { onAdd() }
+            Text("tracks")
+                .font(.custom(Theme.mono, size: 13)).bold().foregroundStyle(Theme.ink)
+            HStack(spacing: 6) {
+                Button("+ inst") { onAdd() }
                     .buttonStyle(.plain)
                     .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.brand)
+                Button("+ drum") { onAddDrum() }
+                    .buttonStyle(.plain)
+                    .font(.custom(Theme.mono, size: 12)).foregroundStyle(Theme.brand)
+                Spacer()
             }
             .padding(.bottom, 2)
 
@@ -90,7 +94,7 @@ private struct TrackRow: View {
             }
 
             HStack(spacing: 5) {
-                Text(track.voice)
+                Text(track.isDrum ? "drums" : track.voice)
                     .font(.custom(Theme.mono, size: 10))
                     .foregroundStyle(selected ? Theme.surface.opacity(0.7) : Theme.faded)
                 Spacer()
