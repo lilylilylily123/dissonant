@@ -45,15 +45,15 @@ final class TrackVoices {
         entry.playback.instrument = instrument
     }
 
-    /// Advance every audible track's playback for the current beat. Honors mute and solo:
-    /// if any track is soloed, only soloed tracks sound; otherwise all non-muted tracks do.
-    /// Inaudible tracks are released so held notes don't hang.
-    func update(forBeat beat: Double, tracks: [Track]) {
+    /// Advance every audible track's playback for the current beat, pulling each track's notes
+    /// from `notesForTrack` (the selected pattern in pattern mode, the flattened arrangement in
+    /// song mode). Honors mute/solo; inaudible tracks are released so notes don't hang.
+    func update(forBeat beat: Double, tracks: [Track], notesForTrack: (UUID) -> [NoteEvent]) {
         let anySolo = tracks.contains { $0.soloed }
         for track in tracks {
             let audible = anySolo ? track.soloed : !track.muted
             if audible {
-                entries[track.id]?.playback.update(forBeat: beat, notes: track.noteEvents)
+                entries[track.id]?.playback.update(forBeat: beat, notes: notesForTrack(track.id))
             } else {
                 entries[track.id]?.playback.releaseAll()
             }

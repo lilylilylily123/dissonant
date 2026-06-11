@@ -67,63 +67,103 @@ public struct NoteEvent: Codable, Equatable, Identifiable, Sendable {
 public struct ProjectModel: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var tempo: Double
-    public var chordTrack: ChordTrackModel
-    public var tracks: [Track]
     public var key: KeyState
+    /// The project's instrument tracks (voices). Notes live in patterns, keyed by track id.
+    public var tracks: [Track]
+    /// Reusable loops. Each pattern has its own chords and per-track notes.
+    public var patterns: [SongPattern]
+    /// The song: an ordered list of pattern ids, played back to back.
+    public var arrangement: [UUID]
 
     public init(
         schemaVersion: Int = ProjectModel.currentSchemaVersion,
         tempo: Double = 120,
-        chordTrack: ChordTrackModel = ChordTrackModel(),
+        key: KeyState = .none,
         tracks: [Track] = [Track(name: "melody")],
-        key: KeyState = .none
+        patterns: [SongPattern] = [SongPattern(name: "pattern 1")],
+        arrangement: [UUID] = []
     ) {
         self.schemaVersion = schemaVersion
         self.tempo = tempo
-        self.chordTrack = chordTrack
-        self.tracks = tracks
         self.key = key
+        self.tracks = tracks
+        self.patterns = patterns
+        self.arrangement = arrangement
     }
 
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
-    /// A brand-new, empty project: no key, no chords, no notes, default tempo.
+    /// A brand-new, empty project: one track, one empty pattern.
     public static let empty = ProjectModel()
 
-    /// A new project pre-seeded with a I–IV–V–vi progression so there's guidance to play with
-    /// immediately. The user can clear or change it.
-    public static let starter = ProjectModel(chordTrack: ChordTrackModel(chords: [
-        ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
-        ChordEvent(startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F"),
-        ChordEvent(startBeat: 8, lengthBeats: 4, pitchClasses: [7, 11, 2], name: "G"),
-        ChordEvent(startBeat: 12, lengthBeats: 4, pitchClasses: [9, 0, 4], name: "Am")
-    ]))
+    /// A new project pre-seeded with a I–IV–V–vi progression in its first pattern.
+    public static let starter: ProjectModel = {
+        let chords = ChordTrackModel(chords: [
+            ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
+            ChordEvent(startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F"),
+            ChordEvent(startBeat: 8, lengthBeats: 4, pitchClasses: [7, 11, 2], name: "G"),
+            ChordEvent(startBeat: 12, lengthBeats: 4, pitchClasses: [9, 0, 4], name: "Am")
+        ])
+        let pattern = SongPattern(name: "pattern 1", chords: chords)
+        return ProjectModel(tracks: [Track(name: "melody")], patterns: [pattern], arrangement: [pattern.id])
+    }()
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, tempo, chordTrack, tracks, key
+        case schemaVersion, tempo, key, tracks, patterns, arrangement
     }
 
-    // Legacy single-track field, read when migrating older files.
+    // Pre-pattern (v1) fields, read when migrating older files into a single pattern.
     private enum LegacyKeys: String, CodingKey {
-        case noteEvents
+        case chordTrack, noteEvents
     }
 
-    // Custom decode so a file missing any key falls back to a default rather than throwing,
-    // and so pre-multitrack files (a flat `noteEvents`) migrate into a single melody track.
-    // (encode(to:) is synthesized and uses CodingKeys, which no longer includes noteEvents.)
+    private struct LegacyTrack: Decodable {
+        var id: UUID
+        var name: String
+        var voice: String?
+        var muted: Bool?
+        var soloed: Bool?
+        var noteEvents: [NoteEvent]?
+    }
+
+    // Tolerant decode + migration: a v1 file (tracks-with-notes + a flat chordTrack, or an
+    // even older flat noteEvents) folds into a single "pattern 1".
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? ProjectModel.currentSchemaVersion
         tempo = try c.decodeIfPresent(Double.self, forKey: .tempo) ?? 120
-        chordTrack = try c.decodeIfPresent(ChordTrackModel.self, forKey: .chordTrack) ?? ChordTrackModel()
         key = try c.decodeIfPresent(KeyState.self, forKey: .key) ?? .none
 
-        if let tracks = try c.decodeIfPresent([Track].self, forKey: .tracks), !tracks.isEmpty {
-            self.tracks = tracks
+        if let patterns = try c.decodeIfPresent([SongPattern].self, forKey: .patterns), !patterns.isEmpty {
+            // v2+ file
+            tracks = try c.decodeIfPresent([Track].self, forKey: .tracks) ?? [Track(name: "melody")]
+            self.patterns = patterns
+            arrangement = try c.decodeIfPresent([UUID].self, forKey: .arrangement) ?? []
         } else {
+            // Migrate v1 → v2
             let legacy = try decoder.container(keyedBy: LegacyKeys.self)
-            let notes = try legacy.decodeIfPresent([NoteEvent].self, forKey: .noteEvents) ?? []
-            self.tracks = [Track(name: "melody", noteEvents: notes)]
+            let legacyTracks = (try c.decodeIfPresent([LegacyTrack].self, forKey: .tracks)) ?? []
+            let chordTrack = try legacy.decodeIfPresent(ChordTrackModel.self, forKey: .chordTrack) ?? ChordTrackModel()
+
+            var notesByTrack: [UUID: [NoteEvent]] = [:]
+            var newTracks: [Track] = []
+            if legacyTracks.isEmpty {
+                // very old: a flat noteEvents on one implicit track
+                let flat = try legacy.decodeIfPresent([NoteEvent].self, forKey: .noteEvents) ?? []
+                let t = Track(name: "melody")
+                newTracks = [t]
+                notesByTrack[t.id] = flat
+            } else {
+                for lt in legacyTracks {
+                    let t = Track(id: lt.id, name: lt.name, voice: lt.voice ?? "saw", muted: lt.muted ?? false, soloed: lt.soloed ?? false)
+                    newTracks.append(t)
+                    notesByTrack[t.id] = lt.noteEvents ?? []
+                }
+            }
+            tracks = newTracks
+            let pattern = SongPattern(name: "pattern 1", chords: chordTrack, notesByTrack: notesByTrack)
+            patterns = [pattern]
+            arrangement = [pattern.id]
         }
     }
 }

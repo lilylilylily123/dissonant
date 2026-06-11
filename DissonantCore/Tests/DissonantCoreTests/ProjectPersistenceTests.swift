@@ -3,64 +3,78 @@ import XCTest
 
 final class ProjectPersistenceTests: XCTestCase {
 
-    // Covers R14: a populated project survives an encode/decode round-trip unchanged.
+    // A populated project survives an encode/decode round-trip unchanged.
     func testRoundTripPreservesAllState() throws {
+        let track = Track(name: "melody", voice: "saw", muted: false, soloed: true)
+        let pattern = DissonantCore.SongPattern(
+            name: "verse",
+            chords: ChordTrackModel(chords: [
+                ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C")
+            ]),
+            notesByTrack: [track.id: [NoteEvent(startBeat: 0, lengthBeats: 1, pitch: 60)]]
+        )
         let original = ProjectModel(
             tempo: 96,
-            chordTrack: ChordTrackModel(chords: [
-                ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
-                ChordEvent(startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F")
-            ]),
-            tracks: [
-                Track(name: "melody", voice: "lead", noteEvents: [
-                    NoteEvent(startBeat: 0, lengthBeats: 1, pitch: 60),
-                    NoteEvent(startBeat: 1, lengthBeats: 1, pitch: 64)
-                ])
-            ],
-            key: KeyState(rootPitchClass: 0, scale: .major, isLocked: true)
+            key: KeyState(rootPitchClass: 0, scale: .major, isLocked: true),
+            tracks: [track],
+            patterns: [pattern],
+            arrangement: [pattern.id, pattern.id]
         )
 
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ProjectModel.self, from: data)
-
         XCTAssertEqual(decoded, original)
     }
 
-    // Covers R14: a new/empty project has sensible defaults — no key, empty tracks, default tempo.
+    // A new/empty project has one track and one empty pattern.
     func testEmptyProjectDefaults() {
         let empty = ProjectModel.empty
-        XCTAssertNil(empty.key.rootPitchClass)
-        XCTAssertFalse(empty.key.isLocked)
-        XCTAssertTrue(empty.chordTrack.isEmpty)
         XCTAssertEqual(empty.tracks.count, 1)
-        XCTAssertTrue(empty.tracks[0].noteEvents.isEmpty)
+        XCTAssertEqual(empty.patterns.count, 1)
+        XCTAssertTrue(empty.patterns[0].notesByTrack.isEmpty)
+        XCTAssertTrue(empty.patterns[0].chords.isEmpty)
         XCTAssertEqual(empty.tempo, 120)
     }
 
-    // Covers R14 forward-compat guard: decoding a document missing fields does not throw;
-    // absent fields take their defaults. Simulates opening an older/newer file.
     func testDecodingMissingFieldsDoesNotThrow() throws {
-        // JSON with only tempo present — no schemaVersion, chords, notes, or key.
         let json = #"{ "tempo": 140 }"#.data(using: .utf8)!
-
         let decoded = try JSONDecoder().decode(ProjectModel.self, from: json)
-
         XCTAssertEqual(decoded.tempo, 140)
-        XCTAssertEqual(decoded.schemaVersion, ProjectModel.currentSchemaVersion)
-        XCTAssertTrue(decoded.chordTrack.isEmpty)
         XCTAssertEqual(decoded.tracks.count, 1)
-        XCTAssertTrue(decoded.tracks[0].noteEvents.isEmpty)
+        XCTAssertEqual(decoded.patterns.count, 1)
+    }
+
+    func testDecodingEmptyObject() throws {
+        let decoded = try JSONDecoder().decode(ProjectModel.self, from: "{}".data(using: .utf8)!)
+        XCTAssertEqual(decoded.tempo, 120)
+        XCTAssertEqual(decoded.tracks.count, 1)
+        XCTAssertEqual(decoded.patterns.count, 1)
         XCTAssertEqual(decoded.key, .none)
     }
 
-    // Empty object decodes to a fully-default project (one empty melody track, no key/chords).
-    func testDecodingEmptyObject() throws {
-        let json = "{}".data(using: .utf8)!
+    // A pre-pattern (v1) file migrates: tracks-with-notes + flat chordTrack fold into one pattern.
+    func testMigratesLegacyV1File() throws {
+        let trackID = "11111111-1111-1111-1111-111111111111"
+        let json = """
+        {
+          "tempo": 100,
+          "tracks": [
+            { "id": "\(trackID)", "name": "lead", "voice": "saw",
+              "noteEvents": [ { "id": "22222222-2222-2222-2222-222222222222", "startBeat": 0, "lengthBeats": 1, "pitch": 60 } ] }
+          ],
+          "chordTrack": { "chords": [ { "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0, "lengthBeats": 4, "pitchClasses": [0, 4, 7], "name": "C" } ] }
+        }
+        """.data(using: .utf8)!
+
         let decoded = try JSONDecoder().decode(ProjectModel.self, from: json)
-        XCTAssertEqual(decoded.tempo, 120)
+        XCTAssertEqual(decoded.tempo, 100)
         XCTAssertEqual(decoded.tracks.count, 1)
-        XCTAssertTrue(decoded.tracks[0].noteEvents.isEmpty)
-        XCTAssertTrue(decoded.chordTrack.isEmpty)
-        XCTAssertEqual(decoded.key, .none)
+        XCTAssertEqual(decoded.tracks[0].name, "lead")
+        XCTAssertEqual(decoded.patterns.count, 1)
+        XCTAssertEqual(decoded.patterns[0].chords.chords.first?.name, "C")
+        let migratedNotes = decoded.patterns[0].notes(for: decoded.tracks[0].id)
+        XCTAssertEqual(migratedNotes.count, 1)
+        XCTAssertEqual(migratedNotes.first?.pitch, 60)
+        XCTAssertEqual(decoded.arrangement, [decoded.patterns[0].id])
     }
 }

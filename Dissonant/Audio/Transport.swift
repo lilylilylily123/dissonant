@@ -48,6 +48,14 @@ final class Transport: ObservableObject {
         if state.isPlaying { lastTick = Date() }
     }
 
+    /// Set the loop length in beats (pattern length in pattern mode, song length in song mode).
+    func setLength(_ beats: Double) {
+        let length = max(1, beats)
+        state.loop = LoopRegion(startBeat: 0, endBeat: length)
+        sequencer.setLength(Duration(beats: length))
+        if state.positionBeats >= length { state.seek(toBeat: 0) }
+    }
+
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
