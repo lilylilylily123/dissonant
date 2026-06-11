@@ -23,6 +23,8 @@ struct ContentView: View {
     @State private var key: KeyState = .none
     // The chord progression is guidance context — off by default, opt-in to hear it.
     @State private var hearChords = false
+    // Show the whole-progression harmonic map (dissonant sections across the timeline).
+    @State private var showLandscape = false
 
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { chordTrack.chord(atBeat: playhead)?.name ?? "—" }
@@ -38,7 +40,8 @@ struct ContentView: View {
                     chordTrack: chordTrack,
                     key: key,
                     playheadBeat: playhead,
-                    onAudition: { pitch in audio.playTestNote(UInt8(clamping: pitch)) }
+                    onAudition: { pitch in audio.playTestNote(UInt8(clamping: pitch)) },
+                    showLandscape: showLandscape
                 )
                 PlayableNowView(chordTrack: chordTrack, key: key, playheadBeat: playhead)
                 Spacer(minLength: 0)
@@ -100,6 +103,8 @@ struct ContentView: View {
                 .keyboardShortcut(.space, modifiers: [])
 
             // utilities
+            ctrlButton(showLandscape ? "◆ map on" : "◆ map") { showLandscape.toggle() }
+                .foregroundStyle(showLandscape ? Theme.brand : Theme.faded)
             ctrlButton(hearChords ? "♪ chords on" : "♪ chords off") { hearChords.toggle() }
                 .foregroundStyle(hearChords ? Theme.brand : Theme.faded)
             ctrlButton("clear") { document.model.noteEvents.removeAll() }

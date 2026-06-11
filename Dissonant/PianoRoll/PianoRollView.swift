@@ -11,6 +11,9 @@ struct PianoRollView: View {
     let playheadBeat: Double
 
     var onAudition: ((Int) -> Void)? = nil
+    /// When true, paint every cell by its fit against the chord at *that* beat — the whole
+    /// progression's harmonic map at once (red = dissonant), not just the playhead column.
+    var showLandscape: Bool = false
 
     // Geometry
     private let lowMIDI = 48          // C3
@@ -76,18 +79,39 @@ struct PianoRollView: View {
     private var grid: some View {
         ZStack(alignment: .topLeading) {
             Canvas { ctx, size in
-                // row tints (live tier at playhead) + black-key shading
+                // base black-key shading
                 for pitch in lowMIDI...highMIDI {
                     let rowRect = CGRect(x: 0, y: y(forPitch: pitch), width: size.width, height: rowHeight)
-                    if isBlackKey(pitch) {
-                        ctx.fill(Path(rowRect), with: .color(Theme.surface))
-                    } else {
-                        ctx.fill(Path(rowRect), with: .color(Theme.panel.opacity(0.35)))
+                    ctx.fill(Path(rowRect), with: .color(isBlackKey(pitch) ? Theme.surface : Theme.panel.opacity(0.35)))
+                }
+
+                if showLandscape {
+                    // whole-progression map: every cell tinted by its fit against the chord at that beat
+                    for b in 0..<beats {
+                        let map = engine.tierMap(atBeat: Double(b) + 0.5, chordTrack: chordTrack, key: key)
+                        for pitch in lowMIDI...highMIDI {
+                            guard let tier = map[((pitch % 12) + 12) % 12] else { continue }
+                            let cell = CGRect(x: CGFloat(b) * beatWidth, y: y(forPitch: pitch), width: beatWidth, height: rowHeight)
+                            let opacity = tier == .dissonance ? 0.26 : (tier == .tension ? 0.15 : 0.09)
+                            ctx.fill(Path(cell), with: .color(Theme.color(for: tier).opacity(opacity)))
+                            if tier == .dissonance {
+                                // non-color cue: a faint diagonal stripe marks dissonant cells
+                                var stripe = Path()
+                                stripe.move(to: CGPoint(x: cell.minX, y: cell.maxY))
+                                stripe.addLine(to: CGPoint(x: cell.maxX, y: cell.minY))
+                                ctx.stroke(stripe, with: .color(Theme.dissonance.opacity(0.4)), lineWidth: 0.8)
+                            }
+                        }
                     }
-                    if let tier = liveTier(pitch) {
+                } else {
+                    // live: tint each row by the chord under the playhead
+                    for pitch in lowMIDI...highMIDI {
+                        guard let tier = liveTier(pitch) else { continue }
+                        let rowRect = CGRect(x: 0, y: y(forPitch: pitch), width: size.width, height: rowHeight)
                         ctx.fill(Path(rowRect), with: .color(Theme.color(for: tier).opacity(0.16)))
                     }
                 }
+
                 // beat gridlines (heavier every 4)
                 for b in 0...beats {
                     let x = CGFloat(b) * beatWidth
