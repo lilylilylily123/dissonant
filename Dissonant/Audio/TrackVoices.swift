@@ -1,8 +1,11 @@
 import Foundation
+import AVFoundation
+import AudioKit
+import AudioKitEX
 import DissonantCore
 
-/// Manages a per-track instrument + note-playback so tracks layer together, each through its
-/// own voice. Tracks are matched by id; switching a track's voice swaps its instrument.
+/// Manages each track's instrument and its own FX bus (tone → reverb → gain → master), so
+/// tracks layer with independent volume/reverb/tone. Tracks are matched by id.
 @MainActor
 final class TrackVoices {
     private let audio: AudioEngineController
@@ -10,9 +13,17 @@ final class TrackVoices {
 
     @MainActor
     private final class Entry {
+        let bus: Mixer
+        let tone: LowPassFilter
+        let reverb: Reverb
+        let fader: Fader
         var instrument: MidiPlayable
         let playback: NotePlayback
-        init(instrument: MidiPlayable) {
+        init(bus: Mixer, tone: LowPassFilter, reverb: Reverb, fader: Fader, instrument: MidiPlayable) {
+            self.bus = bus
+            self.tone = tone
+            self.reverb = reverb
+            self.fader = fader
             self.instrument = instrument
             self.playback = NotePlayback(instrument: instrument)
         }
@@ -22,34 +33,64 @@ final class TrackVoices {
         self.audio = audio
     }
 
-    /// Ensure every track has a voice (drum kit for drum tracks, synth otherwise).
+    /// Ensure every track has a voice + FX bus.
     func sync(tracks: [Track]) {
         for track in tracks where entries[track.id] == nil {
-            let inst: MidiPlayable = track.isDrum
-                ? audio.makeDrumVoice()
-                : audio.makeSynthVoice(VoiceKind(rawValue: track.voice) ?? .saw)
-            entries[track.id] = Entry(instrument: inst)
+            entries[track.id] = makeEntry(for: track)
         }
+    }
+
+    private func makeEntry(for track: Track) -> Entry {
+        let bus = Mixer()
+        let instrument: MidiPlayable
+        if track.isDrum {
+            let drum = audio.makeDrumVoice()
+            drum.attach(to: audio.avEngine, mixer: bus.avAudioNode)
+            drum.start()
+            instrument = drum
+        } else {
+            let synth = audio.makeSynthVoice(VoiceKind(rawValue: track.voice) ?? .saw)
+            bus.addInput(synth.node)
+            instrument = synth
+        }
+        let tone = LowPassFilter(bus, cutoffFrequency: AUValue(track.tone))
+        let reverb = Reverb(tone)
+        reverb.dryWetMix = AUValue(min(max(track.reverbSend, 0), 1))
+        let fader = Fader(reverb, gain: AUValue(track.volume))
+        audio.masterMixer.addInput(fader)
+        return Entry(bus: bus, tone: tone, reverb: reverb, fader: fader, instrument: instrument)
     }
 
     func setSynth(trackID: UUID, voice: VoiceKind) {
         guard let entry = entries[trackID] else { return }
         entry.playback.releaseAll()
-        let inst = audio.makeSynthVoice(voice)
-        entry.instrument = inst
-        entry.playback.instrument = inst
+        let synth = audio.makeSynthVoice(voice)
+        entry.bus.addInput(synth.node)
+        entry.instrument = synth
+        entry.playback.instrument = synth
     }
 
-    func setAU(trackID: UUID, instrument: MidiPlayable) {
+    func loadAU(trackID: UUID, info: AUInstrumentInfo) {
         guard let entry = entries[trackID] else { return }
-        entry.playback.releaseAll()
-        entry.instrument = instrument
-        entry.playback.instrument = instrument
+        audio.instantiateAU(info) { [weak self] unit in
+            guard self != nil, let unit else { return }
+            self?.audio.avEngine.attach(unit)
+            self?.audio.avEngine.connect(unit, to: entry.bus.avAudioNode, format: nil)
+            let host = AUHostInstrument(avAudioUnit: unit)
+            entry.playback.releaseAll()
+            entry.instrument = host
+            entry.playback.instrument = host
+        }
     }
 
-    /// Advance every audible track's playback for the current beat, pulling each track's notes
-    /// from `notesForTrack` (the selected pattern in pattern mode, the flattened arrangement in
-    /// song mode). Honors mute/solo; inaudible tracks are released so notes don't hang.
+    // MARK: - Per-track FX
+
+    func setVolume(trackID: UUID, _ gain: Float) { entries[trackID]?.fader.gain = AUValue(gain) }
+    func setReverb(trackID: UUID, _ wet: Float) { entries[trackID]?.reverb.dryWetMix = AUValue(min(max(wet, 0), 1)) }
+    func setTone(trackID: UUID, _ hz: Float) { entries[trackID]?.tone.cutoffFrequency = AUValue(hz) }
+
+    // MARK: - Playback
+
     func update(forBeat beat: Double, tracks: [Track], notesForTrack: (UUID) -> [NoteEvent]) {
         let anySolo = tracks.contains { $0.soloed }
         for track in tracks {

@@ -274,11 +274,8 @@ struct ContentView: View {
     private func selectAU(_ info: AUInstrumentInfo) {
         showAUBrowser = false
         let id = selTrackID
-        audio.loadAudioUnit(info) { host in
-            guard let host else { return }
-            auNames[id] = info.name
-            trackVoices?.setAU(trackID: id, instrument: host)
-        }
+        auNames[id] = info.name
+        trackVoices?.loadAU(trackID: id, info: info)
     }
 
     private func togglePlay() {
@@ -422,14 +419,30 @@ struct ContentView: View {
     }
 
     private var fxBar: some View {
-        HStack(spacing: 16) {
-            Text("master").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
-            fxSlider("gain", value: $masterGain, range: 0...1.5) { audio.setGain(Float($0)) }
-            fxSlider("reverb", value: $reverbWet, range: 0...1) { audio.setReverb(Float($0)) }
-            fxSlider("low cut", value: $lowCutHz, range: 20...1000) { audio.setLowCut(Float($0)) }
-            fxSlider("tone", value: $highCutHz, range: 800...18_000) { audio.setHighCut(Float($0)) }
-            Spacer()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) {
+                Text("track").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.brand)
+                fxSlider("vol", value: trackFXBinding(\.volume), range: 0...1.5) { trackVoices?.setVolume(trackID: selTrackID, Float($0)) }
+                fxSlider("reverb", value: trackFXBinding(\.reverbSend), range: 0...1) { trackVoices?.setReverb(trackID: selTrackID, Float($0)) }
+                fxSlider("tone", value: trackFXBinding(\.tone), range: 800...18_000) { trackVoices?.setTone(trackID: selTrackID, Float($0)) }
+                Spacer()
+            }
+            HStack(spacing: 16) {
+                Text("master").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+                fxSlider("gain", value: $masterGain, range: 0...1.5) { audio.setGain(Float($0)) }
+                fxSlider("reverb", value: $reverbWet, range: 0...1) { audio.setReverb(Float($0)) }
+                fxSlider("low cut", value: $lowCutHz, range: 20...1000) { audio.setLowCut(Float($0)) }
+                fxSlider("tone", value: $highCutHz, range: 800...18_000) { audio.setHighCut(Float($0)) }
+                Spacer()
+            }
         }
+    }
+
+    private func trackFXBinding(_ keyPath: WritableKeyPath<Track, Double>) -> Binding<Double> {
+        Binding(
+            get: { document.model.tracks[safe: trackIndex]?[keyPath: keyPath] ?? 0 },
+            set: { if document.model.tracks.indices.contains(trackIndex) { document.model.tracks[trackIndex][keyPath: keyPath] = $0 } }
+        )
     }
 
     private func fxSlider(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, apply: @escaping (Double) -> Void) -> some View {
