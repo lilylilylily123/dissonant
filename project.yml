@@ -8,6 +8,15 @@ options:
 packages:
   InKeyCore:
     path: InKeyCore
+  AudioKit:
+    url: https://github.com/AudioKit/AudioKit.git
+    from: "5.6.0"
+  AudioKitEX:
+    url: https://github.com/AudioKit/AudioKitEX.git
+    from: "5.6.0"
+  DunneAudioKit:
+    url: https://github.com/AudioKit/DunneAudioKit.git
+    from: "5.6.0"
 
 settings:
   base:
@@ -27,6 +36,12 @@ targets:
     dependencies:
       - package: InKeyCore
         product: InKeyCore
+      - package: AudioKit
+        product: AudioKit
+      - package: AudioKitEX
+        product: AudioKitEX
+      - package: DunneAudioKit
+        product: DunneAudioKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.crackerjack.inkey.app
