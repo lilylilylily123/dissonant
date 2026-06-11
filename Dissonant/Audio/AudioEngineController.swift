@@ -30,6 +30,14 @@ final class AudioEngineController {
         voices[kind] ?? chordInstrument
     }
 
+    /// Create a fresh synth voice instance and add it to the mixer. Each track needs its own
+    /// instance so simultaneous notes on different tracks don't collide.
+    func makeSynthVoice(_ kind: VoiceKind) -> Instrument {
+        let inst = SynthInstrument(preset: kind.preset)
+        mixer.addInput(inst.node)
+        return inst
+    }
+
     func start() {
         do {
             try engine.start()

@@ -1,113 +1,157 @@
 import SwiftUI
 import DissonantCore
 
-/// The main window: the guidance experience. The chord progression drives the live tier
-/// highlighting; by default you don't *hear* the chords. The melody plays through a
-/// selectable voice — a built-in synth or any installed Audio Unit instrument.
+/// The main window. A track sidebar on the left; the chord lane, voice/length controls,
+/// piano roll, and playable-now readout on the right. The roll edits the *selected* track;
+/// playback layers every track through its own voice. Chords drive guidance, not sound.
 struct ContentView: View {
     @Binding var document: ProjectDocument
 
     @StateObject private var transport = Transport()
     @State private var audio = AudioEngineController()
     @State private var playback: ChordPlayback?
-    @State private var notePlayback: NotePlayback?
+    @State private var trackVoices: TrackVoices?
+
+    @State private var selectedTrackID: UUID?
+    @State private var auNames: [UUID: String] = [:]   // runtime AU name per track (not persisted)
 
     @State private var hearChords = false
     @State private var showLandscape = false
-
-    // Melody voice: a synth preset, or a hosted Audio Unit (overrides the synth when set).
-    @State private var melodyVoice: VoiceKind = .keys
-    @State private var melodyAU: AUHostInstrument?
-    @State private var auName: String?
     @State private var showAUBrowser = false
-
     @State private var noteLength: Double = 1
     @State private var bpm: Int = 120
 
     private let lengthOptions: [(String, Double)] = [("1/16", 0.25), ("1/8", 0.5), ("1/4", 1.0), ("1/2", 2.0), ("1", 4.0)]
 
-    private var currentMelody: MidiPlayable { melodyAU ?? audio.instrument(for: melodyVoice) }
+    // MARK: - Derived
+
+    private var selID: UUID { selectedTrackID ?? document.model.tracks.first?.id ?? UUID() }
+    private var selectedIndex: Int { document.model.tracks.firstIndex { $0.id == selID } ?? 0 }
+    private var selectedVoice: VoiceKind { VoiceKind(rawValue: document.model.tracks[safe: selectedIndex]?.voice ?? "keys") ?? .keys }
+
+    private var notesBinding: Binding<[NoteEvent]> {
+        Binding(
+            get: { document.model.tracks[safe: selectedIndex]?.noteEvents ?? [] },
+            set: { if document.model.tracks.indices.contains(selectedIndex) { document.model.tracks[selectedIndex].noteEvents = $0 } }
+        )
+    }
+
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { document.model.chordTrack.chord(atBeat: playhead)?.name ?? "—" }
 
     var body: some View {
         ZStack {
             Theme.surface.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                ChordLaneView(chordTrack: $document.model.chordTrack, playheadBeat: playhead)
-                voicePicker
-                PianoRollView(
-                    notes: $document.model.noteEvents,
-                    chordTrack: document.model.chordTrack,
-                    key: document.model.key,
-                    playheadBeat: playhead,
-                    onAudition: { pitch in audio.audition(UInt8(clamping: pitch), on: currentMelody) },
-                    showLandscape: showLandscape,
-                    noteLength: noteLength
+            HStack(spacing: 0) {
+                TrackSidebarView(
+                    tracks: $document.model.tracks,
+                    selectedTrackID: selID,
+                    onAdd: addTrack,
+                    onSelect: { selectedTrackID = $0 },
+                    onDelete: deleteTrack
                 )
-                PlayableNowView(chordTrack: document.model.chordTrack, key: document.model.key, playheadBeat: playhead)
-                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 14) {
+                    header
+                    ChordLaneView(chordTrack: $document.model.chordTrack, playheadBeat: playhead)
+                    voicePicker
+                    PianoRollView(
+                        notes: notesBinding,
+                        chordTrack: document.model.chordTrack,
+                        key: document.model.key,
+                        playheadBeat: playhead,
+                        onAudition: auditionNote,
+                        showLandscape: showLandscape,
+                        noteLength: noteLength
+                    )
+                    PlayableNowView(chordTrack: document.model.chordTrack, key: document.model.key, playheadBeat: playhead)
+                    Spacer(minLength: 0)
+                }
+                .padding(18)
             }
-            .padding(18)
         }
-        .frame(minWidth: 940, minHeight: 900)
+        .frame(minWidth: 1080, minHeight: 900)
         .sheet(isPresented: $showAUBrowser) {
             AUBrowserView(onSelect: { selectAU($0) }, onClose: { showAUBrowser = false })
         }
-        .onAppear {
-            audio.start()
-            playback = ChordPlayback(instrument: audio.chordInstrument)
-            notePlayback = NotePlayback(instrument: currentMelody)
-            bpm = Int(document.model.tempo)
-            transport.tempo = Tempo(bpm: document.model.tempo)
-            if document.model.chordTrack.isEmpty {
-                document.model.chordTrack = ProjectModel.starter.chordTrack
-            }
+        .onAppear { setup() }
+        .onChange(of: transport.state.positionBeats) { _, beat in
+            guard transport.state.isPlaying else { return }
+            trackVoices?.update(forBeat: beat, tracks: document.model.tracks)
+            if hearChords { playback?.update(forBeat: beat, in: document.model.chordTrack) }
         }
+        .onChange(of: hearChords) { _, on in if !on { playback?.releaseAll() } }
         .onChange(of: bpm) { _, value in
             transport.tempo = Tempo(bpm: Double(value))
             document.model.tempo = Double(value)
         }
-        .onChange(of: transport.state.positionBeats) { _, beat in
-            guard transport.state.isPlaying else { return }
-            notePlayback?.update(forBeat: beat, notes: document.model.noteEvents)
-            if hearChords { playback?.update(forBeat: beat, in: document.model.chordTrack) }
-        }
-        .onChange(of: hearChords) { _, on in if !on { playback?.releaseAll() } }
     }
 
-    // MARK: - Voice selection
+    // MARK: - Lifecycle
+
+    private func setup() {
+        audio.start()
+        playback = ChordPlayback(instrument: audio.chordInstrument)
+        let voices = TrackVoices(audio: audio)
+        if document.model.chordTrack.isEmpty {
+            document.model.chordTrack = ProjectModel.starter.chordTrack
+        }
+        voices.sync(tracks: document.model.tracks)
+        trackVoices = voices
+        selectedTrackID = document.model.tracks.first?.id
+        bpm = Int(document.model.tempo)
+        transport.tempo = Tempo(bpm: document.model.tempo)
+    }
+
+    private func auditionNote(_ pitch: Int) {
+        guard let inst = trackVoices?.instrument(trackID: selID) else { return }
+        audio.audition(UInt8(clamping: pitch), on: inst)
+    }
+
+    // MARK: - Tracks
+
+    private func addTrack() {
+        let n = document.model.tracks.count + 1
+        let track = Track(name: "track \(n)")
+        document.model.tracks.append(track)
+        trackVoices?.sync(tracks: document.model.tracks)
+        selectedTrackID = track.id
+    }
+
+    private func deleteTrack(_ id: UUID) {
+        guard document.model.tracks.count > 1 else { return }
+        document.model.tracks.removeAll { $0.id == id }
+        if selID == id { selectedTrackID = document.model.tracks.first?.id }
+    }
+
+    // MARK: - Voice
 
     private func selectSynth(_ voice: VoiceKind) {
-        melodyVoice = voice
-        melodyAU = nil
-        auName = nil
-        notePlayback?.releaseAll()
-        notePlayback?.instrument = audio.instrument(for: voice)
+        guard document.model.tracks.indices.contains(selectedIndex) else { return }
+        document.model.tracks[selectedIndex].voice = voice.rawValue
+        auNames[selID] = nil
+        trackVoices?.setSynth(trackID: selID, voice: voice)
     }
 
     private func selectAU(_ info: AUInstrumentInfo) {
         showAUBrowser = false
+        let id = selID
         audio.loadAudioUnit(info) { host in
             guard let host else { return }
-            melodyAU = host
-            auName = info.name
-            notePlayback?.releaseAll()
-            notePlayback?.instrument = host
+            auNames[id] = info.name
+            trackVoices?.setAU(trackID: id, instrument: host)
         }
     }
 
     private func togglePlay() {
         if transport.state.isPlaying {
-            transport.stop(); playback?.releaseAll(); notePlayback?.releaseAll()
+            transport.stop(); playback?.releaseAll(); trackVoices?.releaseAll()
         } else {
             transport.play()
         }
     }
 
     private func rewind() {
-        transport.rewind(); playback?.releaseAll(); notePlayback?.releaseAll()
+        transport.rewind(); playback?.releaseAll(); trackVoices?.releaseAll()
     }
 
     // MARK: - Chrome
@@ -146,8 +190,7 @@ struct ContentView: View {
                 .foregroundStyle(showLandscape ? Theme.brand : Theme.faded)
             ctrlButton(hearChords ? "♪ chords on" : "♪ chords off") { hearChords.toggle() }
                 .foregroundStyle(hearChords ? Theme.brand : Theme.faded)
-            ctrlButton("clear") { document.model.noteEvents.removeAll() }
-            ctrlButton("test tone") { audio.audition(60, on: currentMelody) }
+            ctrlButton("clear") { notesBinding.wrappedValue.removeAll() }
         }
     }
 
@@ -156,11 +199,11 @@ struct ContentView: View {
             Text("voice")
                 .font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
             ForEach(VoiceKind.allCases) { voice in
-                let selected = melodyAU == nil && voice == melodyVoice
+                let selected = auNames[selID] == nil && voice == selectedVoice
                 voiceChip(voice.label, selected: selected) { selectSynth(voice) }
             }
             Divider().frame(height: 16).overlay(Theme.gridLine)
-            voiceChip(auName ?? "AU…", selected: melodyAU != nil) { showAUBrowser = true }
+            voiceChip(auNames[selID] ?? "AU…", selected: auNames[selID] != nil) { showAUBrowser = true }
 
             Spacer()
 
@@ -189,5 +232,11 @@ struct ContentView: View {
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(Theme.panel)
             .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }

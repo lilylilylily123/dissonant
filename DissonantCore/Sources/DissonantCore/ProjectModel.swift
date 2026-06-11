@@ -68,20 +68,20 @@ public struct ProjectModel: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var tempo: Double
     public var chordTrack: ChordTrackModel
-    public var noteEvents: [NoteEvent]
+    public var tracks: [Track]
     public var key: KeyState
 
     public init(
         schemaVersion: Int = ProjectModel.currentSchemaVersion,
         tempo: Double = 120,
         chordTrack: ChordTrackModel = ChordTrackModel(),
-        noteEvents: [NoteEvent] = [],
+        tracks: [Track] = [Track(name: "melody")],
         key: KeyState = .none
     ) {
         self.schemaVersion = schemaVersion
         self.tempo = tempo
         self.chordTrack = chordTrack
-        self.noteEvents = noteEvents
+        self.tracks = tracks
         self.key = key
     }
 
@@ -100,17 +100,30 @@ public struct ProjectModel: Codable, Equatable, Sendable {
     ]))
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, tempo, chordTrack, noteEvents, key
+        case schemaVersion, tempo, chordTrack, tracks, key
     }
 
-    // Custom decode so a file missing any key falls back to a default rather than throwing.
-    // (encode(to:) is synthesized and uses the same CodingKeys.)
+    // Legacy single-track field, read when migrating older files.
+    private enum LegacyKeys: String, CodingKey {
+        case noteEvents
+    }
+
+    // Custom decode so a file missing any key falls back to a default rather than throwing,
+    // and so pre-multitrack files (a flat `noteEvents`) migrate into a single melody track.
+    // (encode(to:) is synthesized and uses CodingKeys, which no longer includes noteEvents.)
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? ProjectModel.currentSchemaVersion
         tempo = try c.decodeIfPresent(Double.self, forKey: .tempo) ?? 120
         chordTrack = try c.decodeIfPresent(ChordTrackModel.self, forKey: .chordTrack) ?? ChordTrackModel()
-        noteEvents = try c.decodeIfPresent([NoteEvent].self, forKey: .noteEvents) ?? []
         key = try c.decodeIfPresent(KeyState.self, forKey: .key) ?? .none
+
+        if let tracks = try c.decodeIfPresent([Track].self, forKey: .tracks), !tracks.isEmpty {
+            self.tracks = tracks
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+            let notes = try legacy.decodeIfPresent([NoteEvent].self, forKey: .noteEvents) ?? []
+            self.tracks = [Track(name: "melody", noteEvents: notes)]
+        }
     }
 }
