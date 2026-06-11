@@ -1,24 +1,32 @@
 import Foundation
 import AudioKit
 
-/// Owns the AudioKit engine and the active instrument. Prefers the SF2 sampler when a
-/// soundfont is bundled; otherwise falls back to the oscillator synth (no asset needed).
+/// Owns the AudioKit engine and a bank of voices, all wired into one mixer. The melody is
+/// routed through whichever voice is selected; the chord bed has its own (pad) voice.
+/// Sampled (SF2) voices join the bank in a later step.
 @MainActor
 final class AudioEngineController {
     let engine = AudioEngine()
     private let mixer = Mixer()
-    let instrument: Instrument
 
-    /// Pass `nil` to force the oscillator. Default looks for a bundled soundfont and
-    /// uses it if present.
-    init(soundFontResource: String? = "GeneralUserGS") {
-        if let name = soundFontResource, let sampler = SamplerInstrument(soundFont: name) {
-            instrument = sampler
-        } else {
-            instrument = OscillatorInstrument()
+    private var voices: [VoiceKind: Instrument] = [:]
+    /// Dedicated voice for the (optional) chord bed.
+    let chordInstrument: Instrument
+
+    init() {
+        for kind in VoiceKind.allCases {
+            let inst = SynthInstrument(preset: kind.preset)
+            voices[kind] = inst
+            mixer.addInput(inst.node)
         }
-        mixer.addInput(instrument.node)
+        let chords = SynthInstrument(preset: .pad)
+        chordInstrument = chords
+        mixer.addInput(chords.node)
         engine.output = mixer
+    }
+
+    func instrument(for kind: VoiceKind) -> Instrument {
+        voices[kind] ?? chordInstrument
     }
 
     func start() {
@@ -33,11 +41,16 @@ final class AudioEngineController {
         engine.stop()
     }
 
-    /// Convenience for verifying the audio path end-to-end (U2 "it makes sound" check).
-    func playTestNote(_ pitch: UInt8 = 60) {
-        instrument.noteOn(pitch, velocity: 100)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.instrument.noteOff(pitch)
+    /// Play a note briefly through a voice — used for placement audition and the test tone.
+    func audition(_ pitch: UInt8, voice: VoiceKind) {
+        let inst = instrument(for: voice)
+        inst.noteOn(pitch, velocity: 100)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            inst.noteOff(pitch)
         }
     }
+}
+
+private extension SynthPreset {
+    static let pad = VoiceKind.pad.preset
 }

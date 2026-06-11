@@ -2,8 +2,8 @@ import SwiftUI
 import DissonantCore
 
 /// The main window: the guidance experience. The chord progression drives the live tier
-/// highlighting; by default you don't *hear* the chords — you see which notes fit. All
-/// content (chords, notes, key) lives in the document, so it saves and reopens (U11).
+/// highlighting; by default you don't *hear* the chords. The melody plays through a
+/// selectable voice. All content (chords, notes, key) lives in the document (U11).
 struct ContentView: View {
     @Binding var document: ProjectDocument
 
@@ -14,6 +14,7 @@ struct ContentView: View {
 
     @State private var hearChords = false
     @State private var showLandscape = false
+    @State private var melodyVoice: VoiceKind = .keys
 
     private var playhead: Double { transport.state.positionBeats }
     private var currentChordName: String { document.model.chordTrack.chord(atBeat: playhead)?.name ?? "—" }
@@ -24,12 +25,13 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 header
                 ChordLaneView(chordTrack: $document.model.chordTrack, playheadBeat: playhead)
+                voicePicker
                 PianoRollView(
                     notes: $document.model.noteEvents,
                     chordTrack: document.model.chordTrack,
                     key: document.model.key,
                     playheadBeat: playhead,
-                    onAudition: { pitch in audio.playTestNote(UInt8(clamping: pitch)) },
+                    onAudition: { pitch in audio.audition(UInt8(clamping: pitch), voice: melodyVoice) },
                     showLandscape: showLandscape
                 )
                 PlayableNowView(chordTrack: document.model.chordTrack, key: document.model.key, playheadBeat: playhead)
@@ -37,13 +39,12 @@ struct ContentView: View {
             }
             .padding(18)
         }
-        .frame(minWidth: 880, minHeight: 720)
+        .frame(minWidth: 880, minHeight: 740)
         .onAppear {
             audio.start()
-            playback = ChordPlayback(instrument: audio.instrument)
-            notePlayback = NotePlayback(instrument: audio.instrument)
+            playback = ChordPlayback(instrument: audio.chordInstrument)
+            notePlayback = NotePlayback(instrument: audio.instrument(for: melodyVoice))
             transport.tempo = Tempo(bpm: document.model.tempo)
-            // Guidance needs chords — seed a progression for any project that has none.
             if document.model.chordTrack.isEmpty {
                 document.model.chordTrack = ProjectModel.starter.chordTrack
             }
@@ -54,6 +55,10 @@ struct ContentView: View {
             if hearChords { playback?.update(forBeat: beat, in: document.model.chordTrack) }
         }
         .onChange(of: hearChords) { _, on in if !on { playback?.releaseAll() } }
+        .onChange(of: melodyVoice) { _, voice in
+            notePlayback?.releaseAll()
+            notePlayback?.instrument = audio.instrument(for: voice)
+        }
     }
 
     private func togglePlay() {
@@ -96,7 +101,24 @@ struct ContentView: View {
             ctrlButton(hearChords ? "♪ chords on" : "♪ chords off") { hearChords.toggle() }
                 .foregroundStyle(hearChords ? Theme.brand : Theme.faded)
             ctrlButton("clear") { document.model.noteEvents.removeAll() }
-            ctrlButton("test tone") { audio.playTestNote() }
+            ctrlButton("test tone") { audio.audition(60, voice: melodyVoice) }
+        }
+    }
+
+    private var voicePicker: some View {
+        HStack(spacing: 6) {
+            Text("voice")
+                .font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
+            ForEach(VoiceKind.allCases) { voice in
+                let selected = voice == melodyVoice
+                Button(voice.label) { melodyVoice = voice }
+                    .buttonStyle(.plain)
+                    .font(.custom(Theme.mono, size: 11))
+                    .foregroundStyle(selected ? Theme.surface : Theme.ink)
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(selected ? Theme.brand : Theme.panel)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
         }
     }
 

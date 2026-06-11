@@ -7,7 +7,8 @@ import DissonantCore
 /// naturally on loop, since a note re-enters the active set when the playhead wraps back.
 @MainActor
 final class NotePlayback {
-    private let instrument: Instrument
+    /// The melody voice. Swap it (after `releaseAll`) when the user picks a different voice.
+    var instrument: Instrument
     private var soundingPitch: [UUID: UInt8] = [:]
 
     init(instrument: Instrument) {
