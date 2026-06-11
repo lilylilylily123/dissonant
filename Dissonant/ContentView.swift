@@ -10,6 +10,7 @@ struct ContentView: View {
     @StateObject private var transport = Transport()
     @State private var audio = AudioEngineController()
     @State private var playback: ChordPlayback?
+    @State private var notePlayback: NotePlayback?
 
     @State private var chordTrack = ChordTrackModel(chords: [
         ChordEvent(startBeat: 0, lengthBeats: 4, pitchClasses: [0, 4, 7], name: "C"),
@@ -48,9 +49,12 @@ struct ContentView: View {
         .onAppear {
             audio.start()
             playback = ChordPlayback(instrument: audio.instrument)
+            notePlayback = NotePlayback(instrument: audio.instrument)
         }
         .onChange(of: transport.state.positionBeats) { _, beat in
-            if transport.state.isPlaying && hearChords {
+            guard transport.state.isPlaying else { return }
+            notePlayback?.update(forBeat: beat, notes: document.model.noteEvents)
+            if hearChords {
                 playback?.update(forBeat: beat, in: chordTrack)
             }
         }
@@ -61,14 +65,14 @@ struct ContentView: View {
 
     private func togglePlay() {
         if transport.state.isPlaying {
-            transport.stop(); playback?.releaseAll()
+            transport.stop(); playback?.releaseAll(); notePlayback?.releaseAll()
         } else {
             transport.play()
         }
     }
 
     private func rewind() {
-        transport.rewind(); playback?.releaseAll()
+        transport.rewind(); playback?.releaseAll(); notePlayback?.releaseAll()
     }
 
     private var header: some View {
