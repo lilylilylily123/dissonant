@@ -338,6 +338,21 @@ struct ContentView: View {
         trackVoices?.setSynth(trackID: selTrackID, voice: voice)
     }
 
+    private func openAUEditor() {
+        guard let au = trackVoices?.instrument(trackID: selTrackID) as? AUHostInstrument else { return }
+        let name = auNames[selTrackID] ?? "Audio Unit"
+        au.requestView { vc in
+            if let vc {
+                AUWindowPresenter.shared.present(vc, title: name)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "\(name) has no custom editor."
+                alert.informativeText = "This plugin doesn't provide its own interface."
+                alert.runModal()
+            }
+        }
+    }
+
     private func selectAU(_ info: AUInstrumentInfo) {
         showAUBrowser = false
         let id = selTrackID
@@ -525,6 +540,9 @@ struct ContentView: View {
             }
             Divider().frame(height: 16).overlay(Theme.gridLine)
             voiceChip(auNames[selTrackID] ?? "AU…", selected: auNames[selTrackID] != nil) { showAUBrowser = true }
+            if auNames[selTrackID] != nil {
+                voiceChip("⚙ edit", selected: false) { openAUEditor() }
+            }
             Spacer()
             Text("len").font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
             ForEach(lengthOptions, id: \.0) { option in

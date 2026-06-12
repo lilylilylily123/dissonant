@@ -1,5 +1,7 @@
 import AVFoundation
 import AudioToolbox
+import AppKit
+import CoreAudioKit
 
 /// Metadata for an installed Audio Unit instrument the user can load as a voice.
 struct AUInstrumentInfo: Identifiable, Equatable {
@@ -56,5 +58,30 @@ final class AUHostInstrument: MidiPlayable {
             MusicDeviceMIDIEvent(avAudioUnit.audioUnit, UInt32(bytes[0]), UInt32(bytes[1]),
                                  bytes.count > 2 ? UInt32(bytes[2]) : 0, 0)
         }
+    }
+
+    /// Ask the plugin for its own editor view controller (its custom GUI). Returns nil if
+    /// the plugin ships no custom interface. Completion is delivered on the main thread.
+    func requestView(_ completion: @escaping (NSViewController?) -> Void) {
+        avAudioUnit.auAudioUnit.requestViewController { viewController in
+            DispatchQueue.main.async { completion(viewController) }
+        }
+    }
+}
+
+/// Hosts a loaded plugin's editor view controller in its own floating window.
+@MainActor
+final class AUWindowPresenter {
+    static let shared = AUWindowPresenter()
+    private var windows: [NSWindow] = []
+
+    func present(_ viewController: NSViewController, title: String) {
+        let window = NSWindow(contentViewController: viewController)
+        window.title = title
+        window.styleMask.insert([.closable, .miniaturizable, .resizable])
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        windows.append(window)
     }
 }
