@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var noteLength: Double = 1
     @State private var bpm: Int = 120
     @State private var bpmText: String = "120"
+    @State private var bpmEditing = false
     @FocusState private var bpmFocused: Bool
 
     @State private var renamingPattern = false
@@ -134,6 +135,7 @@ struct ContentView: View {
                                 noteLength: noteLength,
                                 beats: Int(selectedPattern.lengthBeats)
                             )
+                            .layoutPriority(1)
                             PlayableNowView(chordTrack: selectedPattern.chords, key: document.model.key, playheadBeat: playhead)
                         }
                     } else {
@@ -151,7 +153,7 @@ struct ContentView: View {
                 .padding(18)
             }
         }
-        .frame(minWidth: 1120, minHeight: 920)
+        .frame(minWidth: 1120, minHeight: 700)
         .sheet(isPresented: $showAUBrowser) {
             AUBrowserView(onSelect: { selectAU($0) }, onClose: { showAUBrowser = false })
         }
@@ -376,6 +378,8 @@ struct ContentView: View {
     private func commitBPM() {
         if let v = Int(bpmText.trimmingCharacters(in: .whitespaces)) { setBPM(v) } else { bpmText = String(bpm) }
     }
+    private func startBPMEdit() { bpmText = String(bpm); bpmEditing = true; bpmFocused = true }
+    private func finishBPMEdit() { commitBPM(); bpmEditing = false; bpmFocused = false }
 
     // MARK: - Chrome
 
@@ -385,18 +389,22 @@ struct ContentView: View {
                 .font(.custom(Theme.mono, size: 26)).bold().foregroundStyle(Theme.ink)
             HStack(spacing: 5) {
                 ctrlButton("−") { setBPM(bpm - 1) }
-                TextField("", text: $bpmText)
-                    .textFieldStyle(.plain).frame(width: 36).multilineTextAlignment(.center)
-                    .focused($bpmFocused)
-                    .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.ink)
-                    .onSubmit { commitBPM() }
-                    .onChange(of: bpmFocused) { _, f in if !f { commitBPM() } }
+                if bpmEditing {
+                    TextField("", text: $bpmText)
+                        .textFieldStyle(.plain).frame(width: 40).multilineTextAlignment(.center)
+                        .focused($bpmFocused)
+                        .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.ink)
+                        .onSubmit { finishBPMEdit() }
+                    ctrlButton("✓") { finishBPMEdit() }
+                } else {
+                    Button("\(bpm)") { startBPMEdit() }
+                        .buttonStyle(.plain).frame(minWidth: 26)
+                        .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.ink)
+                }
                 Text("bpm").font(.custom(Theme.mono, size: 11)).foregroundStyle(Theme.faded)
                 ctrlButton("+") { setBPM(bpm + 1) }
-                if bpmFocused {
-                    ctrlButton("✓") { commitBPM(); bpmFocused = false }
-                }
             }
+            .onChange(of: bpmFocused) { _, focused in if !focused && bpmEditing { finishBPMEdit() } }
 
             // mode toggle
             HStack(spacing: 0) {

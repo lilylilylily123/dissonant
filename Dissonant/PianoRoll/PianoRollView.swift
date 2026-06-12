@@ -45,7 +45,7 @@ struct PianoRollView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: true) {
+            ScrollView([.vertical, .horizontal], showsIndicators: true) {
                 HStack(spacing: 0) {
                     keyboardGutter
                     grid
@@ -53,7 +53,7 @@ struct PianoRollView: View {
             }
             .onAppear { proxy.scrollTo(60, anchor: .center) }
         }
-        .frame(height: visibleHeight)
+        .frame(minHeight: 320, maxHeight: .infinity)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
