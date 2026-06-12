@@ -36,7 +36,7 @@ struct ChordLaneView: View {
                 Text("starters")
                     .font(.custom(Theme.mono, size: 10)).foregroundStyle(Theme.faded)
                 ForEach(starters, id: \.name) { starter in
-                    Button(starter.name) { chordTrack = ChordTrackModel(chords: starter.build()) }
+                    Button(starter.name) { chordTrack = ChordTrackModel(chords: starter.build(beats: beats)) }
                         .buttonStyle(.plain)
                         .font(.custom(Theme.mono, size: 11))
                         .padding(.horizontal, 8).padding(.vertical, 4)
@@ -78,9 +78,13 @@ struct ChordLaneView: View {
         let name: String
         let degrees: [Int]
         let diatonic: [ChordSuggestion]
-        func build() -> [ChordEvent] {
-            degrees.enumerated().map { i, degree in
-                let c = diatonic[degree % diatonic.count]
+        /// Fill the whole pattern (every 4 beats), cycling the progression so longer
+        /// patterns (e.g. 8 bars / 32 beats) get chords across their full length —
+        /// otherwise the harmonic map has nothing to color past the first cycle.
+        func build(beats: Int) -> [ChordEvent] {
+            let count = max(degrees.count, beats / 4)
+            return (0..<count).map { i in
+                let c = diatonic[degrees[i % degrees.count] % diatonic.count]
                 return ChordEvent(startBeat: Double(i * 4), lengthBeats: 4, pitchClasses: c.pitchClasses, name: c.name)
             }
         }
