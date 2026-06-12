@@ -76,13 +76,17 @@ final class TrackVoices {
     func loadAU(trackID: UUID, info: AUInstrumentInfo) {
         guard let entry = entries[trackID] else { return }
         audio.instantiateAU(info) { [weak self] unit in
-            guard self != nil, let unit else { return }
-            self?.audio.avEngine.attach(unit)
-            self?.audio.avEngine.connect(unit, to: entry.bus.avAudioNode, format: nil)
-            let host = AUHostInstrument(avAudioUnit: unit)
+            guard let self, let unit else { return }
+            // Attaching/connecting an AU to a live engine throws — stop the graph first,
+            // wire the AU into the track bus, then restart (same fix as adding a track).
+            self.audio.stop()
+            self.audio.avEngine.attach(unit)
+            self.audio.avEngine.connect(unit, to: entry.bus.avAudioNode, format: nil)
             entry.playback.releaseAll()
+            let host = AUHostInstrument(avAudioUnit: unit)
             entry.instrument = host
             entry.playback.instrument = host
+            self.audio.start()
         }
     }
 
