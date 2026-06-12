@@ -52,7 +52,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.crackerjack.dissonant.app
         GENERATE_INFOPLIST_FILE: "NO"
         INFOPLIST_FILE: Dissonant/Info.plist
-        ENABLE_HARDENED_RUNTIME: "YES"
+        # Hardened runtime enforces library validation, which kills the process when a
+        # third-party Audio Unit's binary is loaded in-process (AU browser → instantiate).
+        # Off for local dev so hosted AUs load. For a signed/distributed build, instead keep
+        # it on and ship Dissonant.entitlements with com.apple.security.cs.disable-library-validation.
+        ENABLE_HARDENED_RUNTIME: "NO"
+        CODE_SIGN_ENTITLEMENTS: Dissonant/Dissonant.entitlements
     info:
       path: Dissonant/Info.plist
       properties:
