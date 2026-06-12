@@ -153,7 +153,7 @@ struct ContentView: View {
                 .padding(18)
             }
         }
-        .frame(minWidth: 1120, minHeight: 700)
+        .frame(minWidth: 1380, minHeight: 700)
         .sheet(isPresented: $showAUBrowser) {
             AUBrowserView(onSelect: { selectAU($0) }, onClose: { showAUBrowser = false })
         }
@@ -401,9 +401,10 @@ struct ContentView: View {
                         .buttonStyle(.plain).frame(minWidth: 26)
                         .font(.custom(Theme.mono, size: 14)).foregroundStyle(Theme.ink)
                 }
-                Text("bpm").font(.custom(Theme.mono, size: 11)).foregroundStyle(Theme.faded)
+                Text("bpm").font(.custom(Theme.mono, size: 11)).foregroundStyle(Theme.faded).fixedSize()
                 ctrlButton("+") { setBPM(bpm + 1) }
             }
+            .fixedSize()
             .onChange(of: bpmFocused) { _, focused in if !focused && bpmEditing { finishBPMEdit() } }
 
             // mode toggle
@@ -589,6 +590,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .font(.custom(Theme.mono, size: 13))
             .foregroundStyle(Theme.faded)
+            .lineLimit(1).fixedSize()
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Theme.panel)
             .clipShape(RoundedRectangle(cornerRadius: 5))
