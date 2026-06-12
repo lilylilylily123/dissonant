@@ -44,11 +44,17 @@ final class AUHostInstrument: MidiPlayable {
         self.avAudioUnit = avAudioUnit
     }
 
-    func noteOn(_ pitch: UInt8, velocity: UInt8) {
-        MusicDeviceMIDIEvent(avAudioUnit.audioUnit, 0x90, UInt32(pitch), UInt32(velocity), 0)
-    }
+    func noteOn(_ pitch: UInt8, velocity: UInt8) { send([0x90, pitch, velocity]) }
+    func noteOff(_ pitch: UInt8) { send([0x80, pitch, 0]) }
 
-    func noteOff(_ pitch: UInt8) {
-        MusicDeviceMIDIEvent(avAudioUnit.audioUnit, 0x80, UInt32(pitch), 0, 0)
+    /// Prefer the v3 MIDI-event block (works for out-of-process AUv3); fall back to the
+    /// AudioToolbox C API for in-process v2 units that don't expose the block.
+    private func send(_ bytes: [UInt8]) {
+        if let block = avAudioUnit.auAudioUnit.scheduleMIDIEventBlock {
+            block(AUEventSampleTimeImmediate, 0, bytes.count, bytes)
+        } else {
+            MusicDeviceMIDIEvent(avAudioUnit.audioUnit, UInt32(bytes[0]), UInt32(bytes[1]),
+                                 bytes.count > 2 ? UInt32(bytes[2]) : 0, 0)
+        }
     }
 }

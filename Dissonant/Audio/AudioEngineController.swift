@@ -61,9 +61,12 @@ final class AudioEngineController {
         DrumInstrument()
     }
 
-    /// Instantiate an installed AU instrument (not connected) on the main thread.
+    /// Instantiate an installed AU instrument (not connected) on the main thread. Loaded
+    /// out-of-process: the plugin runs in a separate system process, so it can't be loaded
+    /// into (or crash) this app, and AUv3 app-extension units — which can't load in-process
+    /// at all — work too.
     func instantiateAU(_ info: AUInstrumentInfo, completion: @escaping (AVAudioUnit?) -> Void) {
-        AVAudioUnit.instantiate(with: info.componentDescription, options: []) { unit, _ in
+        AVAudioUnit.instantiate(with: info.componentDescription, options: [.loadOutOfProcess]) { unit, _ in
             DispatchQueue.main.async { completion(unit) }
         }
     }
