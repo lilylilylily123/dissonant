@@ -37,6 +37,7 @@ interface State {
   midiActivityAt: number;
   liveKeyboard: LiveKeyboard;
   magnet: boolean;
+  stamp: boolean;
 
   init(): Promise<void>;
   dispatch(command: Command, transient?: boolean): Promise<void>;
@@ -71,6 +72,7 @@ interface State {
   noteOn(pitch: number, velocity?: number): void;
   noteOff(pitch: number): void;
   toggleMagnet(): void;
+  toggleStamp(): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
   saveProject(saveAs?: boolean): Promise<void>;
@@ -129,6 +131,7 @@ export const useStore = create<State>((set, get) => {
     midiActivityAt: 0,
     liveKeyboard: "off",
     magnet: false,
+    stamp: false,
 
     async init() {
       const b = await getBridge();
@@ -290,6 +293,9 @@ export const useStore = create<State>((set, get) => {
     },
     toggleMagnet() {
       set((s) => ({ magnet: !s.magnet }));
+    },
+    toggleStamp() {
+      set((s) => ({ stamp: !s.stamp }));
     },
 
     async newProject() {

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { beatsPerBar, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { midiName, tierMap } from "../theory";
+import { chordAt, explainNote, midiName, tierMap } from "../theory";
 import {
   adjustVelocity,
   duplicateNotes,
+  magnetPitch,
   moveNotes,
+  stampChord,
   noteAt,
   notesInRect,
   pasteNotes,
@@ -93,6 +95,8 @@ export function PianoRoll() {
   const looping = useStore((s) => s.looping);
   const setLoopRegion = useStore((s) => s.setLoopRegion);
   const loopDrag = useRef<{ anchor: number } | null>(null);
+  const magnet = useStore((s) => s.magnet);
+  const stamp = useStore((s) => s.stamp);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const velRef = useRef<HTMLCanvasElement>(null);
@@ -301,11 +305,17 @@ export function PianoRoll() {
         ctx.fillStyle = "#ff9d2a";
         ctx.fillRect(x, y, 3, h);
       }
-      // Label
+      // Label (a deliberate dissonance keeps its hatch but loses the "!")
       if (w > 22) {
         ctx.fillStyle = "#04140d";
         ctx.font = mono(600, 8);
-        ctx.fillText(t === "dissonance" ? `${midiName(n.pitch)} !` : midiName(n.pitch), x + (n.velocity >= 118 ? 6 : 4), y + h / 2);
+        ctx.fillText(t === "dissonance" && !n.intentional ? `${midiName(n.pitch)} !` : midiName(n.pitch), x + (n.velocity >= 118 ? 6 : 4), y + h / 2);
+      }
+      if (n.intentional && t === "dissonance") {
+        ctx.strokeStyle = C.accent;
+        ctx.lineWidth = 1;
+        roundRect(ctx, x - 1.5, y - 1.5, w + 3, h + 3, 3);
+        ctx.stroke();
       }
       // Border
       ctx.strokeStyle = sel ? "#ffffff" : t ? NOTE_BORDER[t] : "#5f5f68";
@@ -389,14 +399,17 @@ export function PianoRoll() {
     if (hover && !dragRef.current) {
       const t = tierMap(hover.beat, chords, key)[hover.pitch % 12];
       const label = `${midiName(hover.pitch)}${t ? ` · ${t === "chordTone" ? "chord tone" : t}` : ""}`;
+      const why = explainNote(hover.pitch, chords, key, hover.beat);
       ctx.font = mono(500, 9);
-      const tw = ctx.measureText(label).width + 10;
-      const hx = GUTTER + hover.beat * beatW + 8;
-      const hy = yForPitch(hover.pitch) - 16;
-      ctx.fillStyle = "rgba(22,22,26,.92)";
-      ctx.fillRect(hx, hy, tw, 14);
+      const tw = Math.max(ctx.measureText(label).width, ctx.measureText(why).width) + 12;
+      const hx = Math.min(GUTTER + hover.beat * beatW + 8, W - tw - 4);
+      const hy = Math.max(RULER_H + 2, yForPitch(hover.pitch) - 30);
+      ctx.fillStyle = "rgba(22,22,26,.94)";
+      ctx.fillRect(hx, hy, tw, 28);
       ctx.fillStyle = t ? tierColor(t) : C.text1;
-      ctx.fillText(label, hx + 5, hy + 7);
+      ctx.fillText(label, hx + 6, hy + 8);
+      ctx.fillStyle = "#b8b8c0";
+      ctx.fillText(why, hx + 6, hy + 20);
     }
   }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping]);
 
@@ -547,16 +560,28 @@ export function PianoRoll() {
       setPreview(base);
       return;
     }
-    const placed = placeNote(notes, beat, pitch, noteLength, noteLength);
+    if (stamp) {
+      // Chord stamp: place the chord under the cursor as stacked notes, voiced upward.
+      const chord = chordAt(chords, beat);
+      if (!chord) return;
+      const added = stampChord(notes, beat, chord.pitchClasses, pitch, noteLength, noteLength);
+      if (!added.length) return;
+      for (const a of added) audition(a.pitch, a.velocity);
+      commit([...notes, ...added]);
+      setSelection(new Set(added.map((a) => a.id)));
+      return;
+    }
+    const target = magnet ? magnetPitch(pitch, tierMap(beat, chords, key)) : pitch;
+    const placed = placeNote(notes, beat, target, noteLength, noteLength);
     if (!placed) {
       setSelection(new Set());
       return;
     }
-    audition(pitch, placed.velocity);
+    audition(target, placed.velocity);
     const base = [...notes, placed];
     const ids = new Set([placed.id]);
     setSelection(ids);
-    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, base, lastPitch: pitch };
+    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, base, lastPitch: target };
     setPreview(base);
   };
 
@@ -581,7 +606,11 @@ export function PianoRoll() {
         const rawDelta = (x - d.startX) / beatW;
         const newStart = snapRound(d.anchor.startBeat + rawDelta, noteLength);
         const dBeats = newStart - d.anchor.startBeat;
-        const dPitch = pitchForY(y) - pitchForY(d.startY);
+        let dPitch = pitchForY(y) - pitchForY(d.startY);
+        if (magnet && d.ids.size === 1) {
+          const want = magnetPitch(d.anchor.pitch + dPitch, tierMap(d.anchor.startBeat + dBeats, chords, key));
+          dPitch = want - d.anchor.pitch;
+        }
         const next = moveNotes(d.base, d.ids, dBeats, dPitch, { min: LOW, max: HIGH }, beats);
         const moved = next.find((n) => n.id === d.anchor.id);
         if (moved && moved.pitch !== d.lastPitch) {
