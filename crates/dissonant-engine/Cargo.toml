@@ -1,0 +1,15 @@
+[package]
+name = "dissonant-engine"
+description = "Dissonant's audio engine: sample-accurate sequencing, synth + drum voices, mixing and rendering."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dissonant-core = { path = "../dissonant-core" }
+uuid = { workspace = true }
+rtrb = "0.4"
+hound = "3.5"
+cpal = "0.18"
+thiserror = { workspace = true }
+log = "0.4"

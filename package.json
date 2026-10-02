@@ -1,0 +1,17 @@
+{
+  "name": "dissonant",
+  "private": true,
+  "version": "0.2.0",
+  "description": "A cross-platform DAW that shows you which notes sound good.",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "ui": "pnpm --dir ui dev",
+    "test": "pnpm --dir ui test && cargo test --workspace --exclude dissonant-app",
+    "typecheck": "pnpm --dir ui typecheck"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.1"
+  }
+}

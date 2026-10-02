@@ -17,3 +17,14 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# Rust / Tauri
+/target
+src-tauri/target
+src-tauri/gen/schemas
+
+# Node
+node_modules
+ui/dist
+ui/node_modules
+*.log
