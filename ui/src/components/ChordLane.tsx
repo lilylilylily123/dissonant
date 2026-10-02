@@ -1,14 +1,13 @@
 import { useRef, useState } from "react";
 import { selectedPattern, useStore } from "../store";
-import { chordAt, chordName, diatonicChords, noteName, progression, STARTERS, tier } from "../theory";
+import { chordAt, chordName, diatonicChords, noteName, tier } from "../theory";
 import type { ChordEvent } from "../types";
-import { uuid } from "../types";
 
-const GUTTER = 56;
-const BASE_BEAT_W = 52;
+export const GUTTER = 64;
+export const BASE_BEAT_W = 96;
 
-/** The guided chord lane: starters (in the project key), drag to move, drag the right edge to
- *  resize, click to open the free-build editor, right-click to delete. */
+/** The chord track, as a lane above the grid. Drag to move, drag the right edge to resize,
+ *  click to free-build, right-click to delete. Starters live in the inspector's HARMONY section. */
 export function ChordLane() {
   const pattern = useStore(selectedPattern);
   const key = useStore((s) => s.snapshot!.model.key);
@@ -24,7 +23,6 @@ export function ChordLane() {
   const chords = preview ?? pattern.chords.chords;
   const current = chordAt(pattern.chords.chords, playhead);
   const root = key.rootPitchClass ?? 0;
-  const scale = key.scale;
 
   const commit = (next: ChordEvent[]) => void dispatch({ type: "setChords", patternId: pattern.id, chords: next });
 
@@ -44,16 +42,15 @@ export function ChordLane() {
     if (!d) return;
     const dBeats = Math.round((e.clientX - d.startX) / beatW);
     if (dBeats === 0 && preview === null) return;
-    const next = pattern.chords.chords.map((c) => {
-      if (c.id !== d.id) return c;
-      if (d.kind === "move") {
-        const start = Math.min(Math.max(0, d.orig.startBeat + dBeats), pattern.lengthBeats - d.orig.lengthBeats);
-        return { ...c, startBeat: start };
-      }
-      const len = Math.min(Math.max(1, d.orig.lengthBeats + dBeats), pattern.lengthBeats - d.orig.startBeat);
-      return { ...c, lengthBeats: len };
-    });
-    setPreview(next);
+    setPreview(
+      pattern.chords.chords.map((c) => {
+        if (c.id !== d.id) return c;
+        if (d.kind === "move") {
+          return { ...c, startBeat: Math.min(Math.max(0, d.orig.startBeat + dBeats), pattern.lengthBeats - d.orig.lengthBeats) };
+        }
+        return { ...c, lengthBeats: Math.min(Math.max(1, d.orig.lengthBeats + dBeats), pattern.lengthBeats - d.orig.startBeat) };
+      }),
+    );
   };
 
   const onPointerUp = (e: React.PointerEvent, chord: ChordEvent) => {
@@ -68,56 +65,37 @@ export function ChordLane() {
     }
   };
 
-  const addChord = () => {
-    const end = chords.reduce((m, c) => Math.max(m, c.startBeat + c.lengthBeats), 0);
-    if (end >= pattern.lengthBeats) return;
-    const tonic = diatonicChords(root, scale)[0];
-    commit([
-      ...chords,
-      { id: uuid(), startBeat: end, lengthBeats: Math.min(4, pattern.lengthBeats - end), pitchClasses: [...tonic.pitchClasses], name: tonic.name },
-    ]);
-  };
-
   return (
     <div className="chordlane">
-      <div className="lane">
-        <div className="lane-inner" style={{ width: GUTTER + pattern.lengthBeats * beatW }}>
-          {chords.map((c) => (
-            <div
-              key={c.id}
-              className={`chordblock${current?.id === c.id ? " current" : ""}`}
-              style={{ left: GUTTER + c.startBeat * beatW, width: Math.max(8, c.lengthBeats * beatW - 3) }}
-              onPointerDown={(e) => onPointerDown(e, c, "move")}
-              onPointerMove={onPointerMove}
-              onPointerUp={(e) => onPointerUp(e, c)}
-              title="click: edit · drag: move · right-click: delete"
-            >
-              {c.name ?? chordName(c.pitchClasses)}
-              <div className="handle" onPointerDown={(e) => onPointerDown(e, c, "resize")} />
-              {editingId === c.id && (
-                <ChordEditor
-                  chord={c}
-                  root={root}
-                  scale={scale}
-                  onChange={(pcs) => commit(chords.map((x) => (x.id === c.id ? { ...x, pitchClasses: pcs, name: chordName(pcs) } : x)))}
-                  onDelete={() => (setEditingId(null), commit(chords.filter((x) => x.id !== c.id)))}
-                  onClose={() => setEditingId(null)}
-                />
-              )}
-            </div>
-          ))}
-        </div>
+      <div className="gut">
+        <span className="cap">chords</span>
       </div>
-      <div className="row tight">
-        <span className="label">starters</span>
-        {STARTERS.map((st) => (
-          <button key={st.name} className="chip small" onClick={() => commit(progression(st.degrees, root, scale, pattern.lengthBeats))}>
-            {st.name}
-          </button>
+      <div className="inner" style={{ width: pattern.lengthBeats * beatW }}>
+        {chords.length === 0 && <span className="hint">no chords — pick a starter under HARMONY, or ＋ chord</span>}
+        {chords.map((c) => (
+          <div
+            key={c.id}
+            className={`chordblock${current?.id === c.id ? " current" : ""}`}
+            style={{ left: c.startBeat * beatW, width: Math.max(8, c.lengthBeats * beatW - 3) }}
+            onPointerDown={(e) => onPointerDown(e, c, "move")}
+            onPointerMove={onPointerMove}
+            onPointerUp={(e) => onPointerUp(e, c)}
+            title="click: edit · drag: move · right edge: resize · right-click: delete"
+          >
+            {c.name ?? chordName(c.pitchClasses)}
+            <div className="handle" onPointerDown={(e) => onPointerDown(e, c, "resize")} />
+            {editingId === c.id && (
+              <ChordEditor
+                chord={c}
+                root={root}
+                scale={key.scale}
+                onChange={(pcs) => commit(chords.map((x) => (x.id === c.id ? { ...x, pitchClasses: pcs, name: chordName(pcs) } : x)))}
+                onDelete={() => (setEditingId(null), commit(chords.filter((x) => x.id !== c.id)))}
+                onClose={() => setEditingId(null)}
+              />
+            )}
+          </div>
         ))}
-        <button className="chip small ghost" onClick={addChord}>+ chord</button>
-        <button className="chip small ghost faded" onClick={() => commit([])}>clear</button>
-        <span className="label">· in {noteName(root)} {scale} · click a chord to edit</span>
       </div>
     </div>
   );
@@ -143,33 +121,35 @@ function ChordEditor({
   const nextDiatonic = () => {
     const diatonic = diatonicChords(root, scale);
     const idx = diatonic.findIndex((d) => d.name === (chord.name ?? chordName(pcs)));
-    const next = diatonic[(idx + 1 + diatonic.length) % diatonic.length];
-    onChange([...next.pitchClasses]);
+    onChange([...diatonic[(idx + 1 + diatonic.length) % diatonic.length].pitchClasses]);
   };
 
   return (
-    <div className="popover" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} style={{ left: 0 }}>
-      <div style={{ color: "var(--brand)", fontSize: 18, fontWeight: 700 }}>{chordName(pcs)}</div>
-      <div className="label">tap notes to build · color = how it fits what's stacked</div>
+    <div className="popover" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <span className="big">{chordName(pcs)}</span>
+        <span className="cap">free build</span>
+      </div>
+      <div className="flabel" style={{ marginTop: 4 }}>tap notes · color = how it fits what's stacked</div>
       <div className="pcgrid">
         {Array.from({ length: 12 }, (_, pc) => {
           const inChord = pcs.includes(pc);
           const fit = inChord ? "chordTone" : pcs.length === 0 ? null : tier(pc, pcs, null);
-          const bg = inChord ? undefined : fit === "tension" ? "rgba(232,163,64,.38)" : fit === "dissonance" ? "rgba(227,77,77,.38)" : undefined;
           return (
-            <button key={pc} className={inChord ? "in" : ""} style={{ background: bg }} onClick={() => toggle(pc)}>
+            <button key={pc} className={inChord ? "in" : fit === "tension" ? "tension" : fit === "dissonance" ? "dissonance" : ""} onClick={() => toggle(pc)}>
               {noteName(pc)}
               {!inChord && fit === "dissonance" && <span className="flag">!</span>}
+              {!inChord && fit === "tension" && <span className="flag">·</span>}
             </button>
           );
         })}
       </div>
-      <div className="row tight">
-        <button className="chip small" onClick={nextDiatonic}>next ▸ diatonic</button>
-        <button className="chip small faded" onClick={() => onChange([])}>clear</button>
-        <button className="chip small faded" onClick={onDelete}>delete</button>
+      <div className="row" style={{ gap: 4 }}>
+        <button onClick={nextDiatonic} style={{ textTransform: "none" }}>next ▸ diatonic</button>
+        <button className="quiet" onClick={() => onChange([])}>clear</button>
+        <button className="quiet danger" onClick={onDelete}>delete</button>
         <span className="spacer" />
-        <button className="chip small faded" onClick={onClose}>done</button>
+        <button className="solid" onClick={onClose}>done</button>
       </div>
     </div>
   );

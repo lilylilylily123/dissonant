@@ -1,19 +1,17 @@
 import { useEffect } from "react";
-import { Header } from "./components/Header";
-import { TrackSidebar } from "./components/TrackSidebar";
-import { PatternBar } from "./components/PatternBar";
-import { ChordLane } from "./components/ChordLane";
-import { PianoRoll } from "./components/PianoRoll";
-import { PlayableNow } from "./components/PlayableNow";
-import { DrumGrid } from "./components/DrumGrid";
-import { SongView } from "./components/SongView";
-import { FxBar } from "./components/FxBar";
-import { VoicePicker } from "./components/VoicePicker";
-import { selectedTrack, useStore } from "./store";
+import { MenuBar } from "./components/MenuBar";
+import { Transport } from "./components/Transport";
+import { StatusBar } from "./components/StatusBar";
+import { PatternsPanel } from "./components/PatternsPanel";
+import { Arrangement } from "./components/Arrangement";
+import { BottomPanel } from "./components/BottomPanel";
+import { Inspector } from "./components/Inspector";
+import { Editor } from "./components/Editor";
+import { useStore } from "./store";
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
-  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
 }
 
 export default function App() {
@@ -21,7 +19,6 @@ export default function App() {
   const snapshot = useStore((s) => s.snapshot);
   const mode = useStore((s) => s.mode);
   const toast = useStore((s) => s.toast);
-  const track = useStore(selectedTrack);
 
   useEffect(() => {
     void init();
@@ -33,30 +30,34 @@ export default function App() {
       if (isTyping(e.target)) return;
       const s = useStore.getState();
       const mod = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
       if (e.code === "Space") {
         e.preventDefault();
         s.togglePlay();
-      } else if (mod && e.key.toLowerCase() === "z") {
+      } else if (e.key === "Enter" && !mod) {
+        s.rewind();
+      } else if (mod && k === "z") {
         e.preventDefault();
         if (e.shiftKey) void s.redo();
         else void s.undo();
-      } else if (mod && e.key.toLowerCase() === "y") {
+      } else if (mod && k === "y") {
         e.preventDefault();
         void s.redo();
-      } else if (mod && e.key.toLowerCase() === "s") {
+      } else if (mod && k === "s") {
         e.preventDefault();
         void s.saveProject(e.shiftKey);
-      } else if (mod && e.key.toLowerCase() === "o") {
+      } else if (mod && k === "o") {
         e.preventDefault();
         void s.openProject();
-      } else if (mod && e.key.toLowerCase() === "n") {
+      } else if (mod && k === "n") {
         e.preventDefault();
         void s.newProject();
-      } else if (mod && e.key.toLowerCase() === "e") {
+      } else if (mod && k === "e") {
         e.preventDefault();
         void s.exportWav();
-      } else if (!mod && e.key.toLowerCase() === "r") {
-        s.rewind();
+      } else if (!mod && e.key === "Tab") {
+        e.preventDefault();
+        s.setMode(s.mode === "pattern" ? "song" : "pattern");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -64,35 +65,34 @@ export default function App() {
   }, []);
 
   if (!snapshot) {
-    return <div className="main">loading…</div>;
+    return (
+      <div className="frame" style={{ alignItems: "center", justifyContent: "center", color: "var(--text-5)" }}>
+        <span className="mono">loading…</span>
+      </div>
+    );
   }
 
   return (
-    <div className="app" onContextMenu={(e) => e.preventDefault()}>
-      <TrackSidebar />
-      <div className="main">
-        <Header />
-        <PatternBar />
-        <div className="editor">
-          {mode === "pattern" ? (
-            <>
-              <ChordLane />
-              {track?.isDrum ? (
-                <DrumGrid />
-              ) : (
-                <>
-                  <VoicePicker />
-                  <PianoRoll />
-                  <PlayableNow />
-                </>
-              )}
-            </>
-          ) : (
-            <SongView />
-          )}
-        </div>
-        <FxBar />
+    <div className="frame" onContextMenu={(e) => e.preventDefault()}>
+      <MenuBar />
+      <Transport />
+      <div className="content">
+        {mode === "song" ? (
+          <>
+            <PatternsPanel />
+            <div className="center">
+              <Arrangement />
+              <BottomPanel />
+            </div>
+          </>
+        ) : (
+          <>
+            <Inspector />
+            <Editor />
+          </>
+        )}
       </div>
+      <StatusBar />
       {toast && <div className={`toast${toast.error ? " error" : ""}`}>{toast.text}</div>}
     </div>
   );

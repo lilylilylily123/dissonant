@@ -116,6 +116,7 @@ function starterModel(): ProjectModel {
     reverbSend: 0,
     tone: 18000,
     pan: 0,
+    color: null,
   };
   const drums: Track = { ...melody, id: uuid(), name: "drums", isDrum: true };
   const pattern: SongPattern = {
@@ -162,8 +163,14 @@ function reduce(m: ProjectModel, c: Command): void {
         reverbSend: 0,
         tone: 18000,
         pan: 0,
+        color: null,
       };
       m.tracks.push(t);
+      break;
+    }
+    case "setTrackColor": {
+      const t = track(c.id);
+      if (t) t.color = c.color;
       break;
     }
     case "deleteTrack":

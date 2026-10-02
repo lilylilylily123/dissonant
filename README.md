@@ -50,15 +50,23 @@ cargo clippy --workspace --all-targets
 
 ## Using it
 
+Two screens, switched with the **PAT | SONG** control (or Tab):
+
 | Where | How |
 |---|---|
-| Piano roll | click places a note (keep dragging to move it) · drag a note to move, its right edge to resize · ⌥-drag to paint or duplicate · ⇧-drag marquee · right-click erases · ⌫ ⌘A ⌘C ⌘X ⌘V ⌘D · arrows nudge (⇧ = octave / bar) · `[` `]` velocity · ⌘± zoom · click the ruler to seek |
-| Chord lane | pick a starter (in the project key) · drag a chord to move, its right edge to resize · click to free-build · right-click to delete · **♪ chords** to hear the bed |
-| Key | place notes and the key chip offers "looks like X — lock?" · × clears |
-| Patterns | new / dup / rename / del · 1–8 bars · **song** mode arranges them |
-| Drums | left-click/drag adds hits, right-click removes · 1/8 or 1/16 steps |
-| Mixer | per-track vol / pan / reverb / tone · master gain / reverb / cuts / 3-band EQ · meters |
-| Transport | space play/stop · R rewind · ⌘Z/⇧⌘Z undo/redo · ⌘S save · ⌘O open · ⌘E export WAV (offline render, faster than real time) |
+| **PAT** · piano roll | click places a note (keep dragging to move it) · drag a note to move, its right edge to resize · ⌥-drag to paint or duplicate · ⇧-drag marquee · right-click erases · ⌫ ⌘A ⌘C ⌘X ⌘V ⌘D · arrows nudge (⇧ = octave / bar) · `[` `]` velocity · velocity lane: drag the stems · ⌘± zoom · click the ruler to seek · **tiers** tints rows by fit, **map** paints the whole progression |
+| Chord lane | starters live under HARMONY in the inspector (always in the project key) · drag a chord to move, its right edge to resize · click to free-build · right-click to delete · **chords** to hear the bed |
+| Inspector | tracks (select, rename, M/S, reorder, delete) · pattern (name, color, length) · selection ranges · harmony (key, live tier strip) · instrument (voice, bus knobs: drag, ⇧ fine, double-click resets) · song overview |
+| Key | place notes and the KEY cell offers "X? lock" · × unlocks · or pick root + scale under HARMONY |
+| Drums | step grid: left-click/drag adds hits, right-click removes · step follows snap (1/8, 1/16, 1/32) |
+| **SONG** · arrangement | ＋ on a pattern (left) appends it · click a clip to select its pattern, double-click to open it, drag to reorder, right-click to remove · track headers: M/S, volume slider, meters · click the ruler to seek |
+| Bottom panel | **DEVICES**: instrument, track bus (vol / pan / tone / reverb), master (gain, cuts, 3-band EQ, reverb) · **MIXER**: faders, pan, meters, M/S |
+| Transport | space play/stop · Enter return to start · tap tempo · ⌘Z/⇧⌘Z undo/redo · ⌘S save · ⌘O open · ⌘E export WAV (offline render, faster than real time) |
+
+The look follows the UI handoff in `docs/design/2026-10-02-ui-handoff-violet.md` (violet accent, IBM Plex
+Sans Condensed + JetBrains Mono, bundled). Controls only exist for features that are built; the
+record / loop / metronome / tools / ghost notes / CC lane / browser / plugin devices from the mock
+arrive with their features.
 
 Projects are JSON (`.dissonant`). The format is documented by `crates/dissonant-core/src/model.rs`.
 

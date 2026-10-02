@@ -37,6 +37,8 @@ export interface Track {
   reverbSend: number;
   tone: number;
   pan: number;
+  /** `#rrggbb`, or null to use the palette by position. */
+  color: string | null;
 }
 
 export interface ChordTrack {
@@ -94,6 +96,7 @@ export type Command =
   | { type: "moveTrack"; id: string; up: boolean }
   | { type: "setTrackVoice"; id: string; voice: string }
   | { type: "setTrackParam"; id: string; param: TrackParam; value: number }
+  | { type: "setTrackColor"; id: string; color: string | null }
   | { type: "addPattern" }
   | { type: "duplicatePattern"; id: string }
   | { type: "deletePattern"; id: string }
@@ -118,6 +121,32 @@ export interface AudioStatus {
 }
 
 export const VOICES = ["saw", "square", "triangle", "sine", "pad", "pluck"] as const;
+
+/** The handoff's 12-color track palette (last one is reserved for returns/master). */
+export const TRACK_PALETTE = [
+  "#ff3b30",
+  "#ff6a2a",
+  "#ff9d2a",
+  "#ffd02a",
+  "#e2ec3e",
+  "#b8f53a",
+  "#3dffb0",
+  "#3dc8ff",
+  "#5a8cff",
+  "#9a7bff",
+  "#ff4fd8",
+  "#8a8a94",
+];
+
+export function trackColor(track: Track, index: number): string {
+  return track.color ?? TRACK_PALETTE[index % 11];
+}
+
+export const TIER_COLORS: Record<Tier, string> = {
+  chordTone: "#3dffb0",
+  tension: "#ff9d2a",
+  dissonance: "#ff3b30",
+};
 
 /** Drum kit rows, top to bottom. Mirrors `dissonant_engine::drums::KIT`. */
 export const DRUM_KIT: { name: string; pitch: number }[] = [
