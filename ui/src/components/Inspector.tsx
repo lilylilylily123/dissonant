@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { beatsPerBar, dbText, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { beatsPerBar, dbText, effectiveKey, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { chordAt, explainNote, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
 import { arpeggiateNotes, chopNotes, humanizeNotes, legatoNotes, quantizeNotes, resolveTargets, strumNotes } from "../noteEditing";
 import { DRUM_KIT, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
@@ -34,8 +34,10 @@ export function Inspector() {
 
   const chords = pattern.chords.chords;
   const chord = chordAt(chords, s.playhead);
-  const map = tierMap(s.playhead, chords, model.key);
+  const liveKey = effectiveKey(s);
+  const map = tierMap(s.playhead, chords, liveKey);
   const root = model.key.rootPitchClass;
+  const sectionKey = liveKey !== model.key ? liveKey : null;
 
   const finishRename = (id: string) => {
     if (draft.trim()) void s.dispatch({ type: "renameTrack", id, name: draft.trim() });
@@ -50,7 +52,7 @@ export function Inspector() {
   const commit = () => void s.commitGesture();
 
   // Overview geometry
-  const total = model.arrangement.reduce((sum, id) => sum + (model.patterns.find((p) => p.id === id)?.lengthBeats ?? 0), 0);
+  const total = model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
 
   return (
     <aside className="side inspector">
@@ -210,6 +212,12 @@ export function Inspector() {
             <option value="minor">Minor</option>
           </select>
         </div>
+        {sectionKey && sectionKey.rootPitchClass !== null && (
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="flabel">section key</span>
+            <span className="mono" style={{ fontSize: 10, color: "var(--accent)" }}>{noteName(sectionKey.rootPitchClass)} {sectionKey.scale}</span>
+          </div>
+        )}
         <div className="row" style={{ justifyContent: "space-between" }}>
           <span className="flabel">now</span>
           <span className="mono" style={{ fontSize: 11, color: chord ? "var(--text-1)" : "var(--text-5)" }}>{chord?.name ?? (root !== null ? "scale only" : "no guidance yet")}</span>
@@ -284,24 +292,18 @@ export function Inspector() {
       <div className="section" style={{ borderBottom: 0, borderTop: "1px solid var(--line-1)", gap: 6 }}>
         <span className="cap">song overview · {track.name}</span>
         <div className="overview" title="the song; the pattern you're editing is highlighted">
-          {(() => {
-            let off = 0;
-            return model.arrangement.map((pid, i) => {
-              const p = model.patterns.find((x) => x.id === pid);
-              const w = ((p?.lengthBeats ?? 0) / Math.max(1, total)) * 100;
-              const left = (off / Math.max(1, total)) * 100;
-              off += p?.lengthBeats ?? 0;
-              const current = pid === pattern.id;
-              return (
-                <div
-                  key={`${pid}-${i}`}
-                  style={{ left: `${left}%`, width: `calc(${w}% - 1px)`, background: current ? color : `${color}55`, boxShadow: current ? "0 0 0 1px #fff" : undefined, cursor: "pointer" }}
-                  onClick={() => s.selectPattern(pid)}
-                  title={p?.name}
-                />
-              );
-            });
-          })()}
+          {model.clips.map((c) => {
+            const p = model.patterns.find((x) => x.id === c.patternId);
+            const current = c.patternId === pattern.id;
+            return (
+              <div
+                key={c.id}
+                style={{ left: `${(c.startBeat / Math.max(1, total)) * 100}%`, width: `calc(${(c.lengthBeats / Math.max(1, total)) * 100}% - 1px)`, background: current ? color : `${color}55`, boxShadow: current ? "0 0 0 1px #fff" : undefined, cursor: "pointer", opacity: c.muted ? 0.4 : 1 }}
+                onClick={() => s.selectPattern(c.patternId)}
+                title={p?.name}
+              />
+            );
+          })}
         </div>
         <div className="overview-scale">
           <span>1</span>

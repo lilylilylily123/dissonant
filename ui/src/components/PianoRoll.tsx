@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { beatsPerBar, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { beatsPerBar, effectiveKey, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { chordAt, explainNote, midiName, tierMap } from "../theory";
 import {
   adjustVelocity,
@@ -79,7 +79,7 @@ export function PianoRoll() {
   const pattern = useStore(selectedPattern);
   const track = useStore(selectedTrack);
   const trackIdx = useStore(selectedTrackIndex);
-  const key = useStore((s) => s.snapshot!.model.key);
+  const key = useStore(effectiveKey);
   const playhead = useStore((s) => s.playhead);
   const showLandscape = useStore((s) => s.showLandscape);
   const highlightRows = useStore((s) => s.highlightRows);

@@ -160,7 +160,8 @@ function starterModel(): ProjectModel {
     key: { rootPitchClass: null, scale: "major", isLocked: false },
     tracks: [melody, drums],
     patterns: [pattern],
-    arrangement: [pattern.id],
+    clips: [{ id: uuid(), patternId: pattern.id, startBeat: 0, lengthBeats: 16, offsetBeats: 0, muted: false }],
+    sections: [],
     master: { gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 },
   };
 }
@@ -263,7 +264,7 @@ function reduce(m: ProjectModel, c: Command): void {
     case "deletePattern":
       if (m.patterns.length > 1) {
         m.patterns = m.patterns.filter((p) => p.id !== c.id);
-        m.arrangement = m.arrangement.filter((id) => id !== c.id);
+        m.clips = m.clips.filter((cl) => cl.patternId !== c.id);
       }
       break;
     case "renamePattern": {
@@ -302,8 +303,35 @@ function reduce(m: ProjectModel, c: Command): void {
       p.chords = { chords };
       break;
     }
-    case "setArrangement":
-      m.arrangement = c.arrangement.filter((id) => m.patterns.some((p) => p.id === id));
+    case "addClip": {
+      const p = pattern(c.patternId);
+      if (!p || c.startBeat < 0) break;
+      m.clips.push({ id: uuid(), patternId: p.id, startBeat: c.startBeat, lengthBeats: c.lengthBeats ?? p.lengthBeats, offsetBeats: 0, muted: false });
+      m.clips.sort((a, b) => a.startBeat - b.startBeat);
+      break;
+    }
+    case "updateClip": {
+      const i = m.clips.findIndex((cl) => cl.id === c.clip.id);
+      if (i < 0 || c.clip.lengthBeats <= 0 || c.clip.startBeat < 0) break;
+      m.clips[i] = { ...c.clip };
+      m.clips.sort((a, b) => a.startBeat - b.startBeat);
+      break;
+    }
+    case "removeClip":
+      m.clips = m.clips.filter((cl) => cl.id !== c.id);
+      break;
+    case "addSection":
+      m.sections.push({ id: uuid(), name: c.name.trim() || `section ${m.sections.length + 1}`, startBeat: Math.max(0, c.startBeat), key: null, color: null });
+      m.sections.sort((a, b) => a.startBeat - b.startBeat);
+      break;
+    case "updateSection": {
+      const i = m.sections.findIndex((x) => x.id === c.section.id);
+      if (i >= 0 && c.section.name.trim()) m.sections[i] = { ...c.section };
+      m.sections.sort((a, b) => a.startBeat - b.startBeat);
+      break;
+    }
+    case "removeSection":
+      m.sections = m.sections.filter((x) => x.id !== c.id);
       break;
     case "setMaster":
       m.master = { ...c.master } as MasterSettings;
@@ -339,8 +367,8 @@ function mockBridge(): Bridge {
   const snapshot = (): Snapshot => ({ model: clone(model), canUndo: undo.length > 0 || pending !== null, canRedo: redo.length > 0, dirty, path });
 
   const loopLength = () => {
-    if (mode === "song" && model.arrangement.length > 0) {
-      return model.arrangement.reduce((sum, id) => sum + (model.patterns.find((p) => p.id === id)?.lengthBeats ?? 0), 0);
+    if (mode === "song" && model.clips.length > 0) {
+      return model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
     }
     const p = model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
     return p?.lengthBeats ?? 16;

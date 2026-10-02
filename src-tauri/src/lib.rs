@@ -155,7 +155,7 @@ impl AppState {
 
 fn build_sequence(model: &ProjectModel, mode: PlayMode, pattern_id: Option<Uuid>) -> Sequence {
     match mode {
-        PlayMode::Song if !model.arrangement.is_empty() => Sequence::from_song(model),
+        PlayMode::Song if !model.clips.is_empty() => Sequence::from_song(model),
         _ => {
             let pid = pattern_id
                 .filter(|id| model.pattern(id).is_some())
@@ -508,7 +508,7 @@ async fn export_wav(state: State<'_, AppState>, path: String, tail_seconds: Opti
     let (sequence, master, hear_chords) = {
         let doc = state.doc.lock().unwrap();
         let ctx = state.playback.lock().unwrap();
-        let seq = if doc.model().arrangement.is_empty() {
+        let seq = if doc.model().clips.is_empty() {
             build_sequence(doc.model(), PlayMode::Pattern, ctx.pattern_id)
         } else {
             Sequence::from_song(doc.model())

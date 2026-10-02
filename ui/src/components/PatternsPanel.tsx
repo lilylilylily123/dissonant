@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { beatsPerBar, selectedPattern, useStore } from "../store";
+import { songLength } from "../types";
 
 /** Left column in SONG mode: the pattern library. Click selects, ＋ appends to the song. */
 export function PatternsPanel() {
@@ -77,7 +78,7 @@ export function PatternsPanel() {
                   className="ico"
                   title="append to song"
                   style={{ color: "var(--accent)" }}
-                  onClick={(e) => (e.stopPropagation(), dispatch({ type: "setArrangement", arrangement: [...model.arrangement, p.id] }))}
+                  onClick={(e) => (e.stopPropagation(), dispatch({ type: "addClip", patternId: p.id, startBeat: songLength(model), lengthBeats: null }))}
                 >
                   ＋
                 </button>
@@ -104,7 +105,7 @@ export function PatternsPanel() {
             ))}
           </div>
           <div className="help" style={{ padding: 0 }}>
-            ＋ adds the pattern to the end of the song · in the timeline: click selects, double-click opens, drag reorders, right-click removes
+            ＋ adds the pattern to the end of the song · timeline: drag a clip to move, its right edge to trim or loop-extend, ⌥-drag to copy, right-click to remove, double-click to edit · double-click the marker strip to add a section
           </div>
         </div>
       )}

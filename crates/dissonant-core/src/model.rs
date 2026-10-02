@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// A diatonic scale family. Expanded later (modes, harmonic minor, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -305,6 +305,66 @@ impl Default for MasterSettings {
     }
 }
 
+/// A pattern placed on the song timeline. The pattern loops from `offset_beats` for
+/// `length_beats`, so a clip can be trimmed, extended or started mid-pattern.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Clip {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    pub pattern_id: Uuid,
+    pub start_beat: f64,
+    pub length_beats: f64,
+    #[serde(default)]
+    pub offset_beats: f64,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+impl Clip {
+    pub fn new(pattern_id: Uuid, start_beat: f64, length_beats: f64) -> Self {
+        Clip {
+            id: Uuid::new_v4(),
+            pattern_id,
+            start_beat,
+            length_beats,
+            offset_beats: 0.0,
+            muted: false,
+        }
+    }
+
+    pub fn end_beat(&self) -> f64 {
+        self.start_beat + self.length_beats
+    }
+}
+
+/// A named marker on the song (intro, verse, drop…). With a `key`, the section modulates:
+/// patterns placed inside it are tiered against that key instead of the project key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Section {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    pub name: String,
+    pub start_beat: f64,
+    #[serde(default)]
+    pub key: Option<KeyState>,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+impl Section {
+    pub fn new(name: impl Into<String>, start_beat: f64) -> Self {
+        Section {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            start_beat,
+            key: None,
+            color: None,
+        }
+    }
+}
+
 /// Beats per bar and the beat unit. Only the numerator changes grids and bar math; the
 /// engine counts in quarter-note beats regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,8 +414,16 @@ pub struct ProjectModel {
     pub tracks: Vec<Track>,
     #[serde(default = "default_patterns")]
     pub patterns: Vec<SongPattern>,
-    /// The song: an ordered list of pattern ids, played back to back.
+    /// The song: clips placed on the timeline (all tracks share the clip lane, since a
+    /// pattern holds every track's notes).
     #[serde(default)]
+    pub clips: Vec<Clip>,
+    /// Song markers, optionally with their own key.
+    #[serde(default)]
+    pub sections: Vec<Section>,
+    /// Legacy (schema ≤ 3): an ordered list of pattern ids played back to back. Folded into
+    /// `clips` by [`ProjectModel::normalized`] and never written again.
+    #[serde(default, skip_serializing)]
     pub arrangement: Vec<Uuid>,
     #[serde(default)]
     pub master: MasterSettings,
@@ -378,6 +446,8 @@ impl ProjectModel {
             key: KeyState::NONE,
             tracks: default_tracks(),
             patterns: default_patterns(),
+            clips: vec![],
+            sections: vec![],
             arrangement: vec![],
             master: MasterSettings::default(),
             time_signature: TimeSignature::default(),
@@ -391,8 +461,35 @@ impl ProjectModel {
         let chords = crate::theory::harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 16.0, 4.0);
         model.patterns[0].chords = crate::chord_track::ChordTrack::new(chords);
         model.tracks.push(Track::drums("drums"));
-        model.arrangement = vec![model.patterns[0].id];
+        let p = &model.patterns[0];
+        model.clips = vec![Clip::new(p.id, 0.0, p.length_beats)];
         model
+    }
+
+    pub fn clip(&self, id: &Uuid) -> Option<&Clip> {
+        self.clips.iter().find(|c| &c.id == id)
+    }
+
+    pub fn section(&self, id: &Uuid) -> Option<&Section> {
+        self.sections.iter().find(|s| &s.id == id)
+    }
+
+    /// End of the last clip (0 for an empty song).
+    pub fn song_length(&self) -> f64 {
+        self.clips.iter().map(Clip::end_beat).fold(0.0, f64::max)
+    }
+
+    /// The section containing `beat` (the last one starting at or before it).
+    pub fn section_at(&self, beat: f64) -> Option<&Section> {
+        self.sections
+            .iter()
+            .filter(|s| s.start_beat <= beat)
+            .max_by(|a, b| a.start_beat.total_cmp(&b.start_beat))
+    }
+
+    /// The key in force at `beat`: the section's key if it has one, else the project key.
+    pub fn key_at(&self, beat: f64) -> KeyState {
+        self.section_at(beat).and_then(|s| s.key).unwrap_or(self.key)
     }
 
     pub fn track(&self, id: &Uuid) -> Option<&Track> {
@@ -429,7 +526,20 @@ impl ProjectModel {
             }
         }
         let pattern_ids: Vec<Uuid> = self.patterns.iter().map(|p| p.id).collect();
-        self.arrangement.retain(|id| pattern_ids.contains(id));
+        // Legacy flat arrangement → clips, back to back.
+        if self.clips.is_empty() && !self.arrangement.is_empty() {
+            let mut at = 0.0;
+            for pid in &self.arrangement {
+                if let Some(p) = self.patterns.iter().find(|p| &p.id == pid) {
+                    self.clips.push(Clip::new(p.id, at, p.length_beats));
+                    at += p.length_beats;
+                }
+            }
+        }
+        self.arrangement.clear();
+        self.clips.retain(|c| pattern_ids.contains(&c.pattern_id) && c.length_beats > 0.0 && c.start_beat >= 0.0);
+        self.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        self.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
         self
     }
 

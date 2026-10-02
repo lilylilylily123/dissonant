@@ -20,7 +20,7 @@ pub use arrangement::Arrangement;
 pub use chord_track::ChordTrack;
 pub use document::{Command, Document, EditError, TrackParam};
 pub use model::{
-    ChordEvent, KeyState, MasterSettings, NoteEvent, ProjectModel, ScaleType, SongPattern, TimeSignature, Track,
+    ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, ScaleType, Section, SongPattern, TimeSignature, Track,
     SCHEMA_VERSION,
 };
 pub use sequence::{Sequence, SequenceTrack};

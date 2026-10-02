@@ -11,15 +11,12 @@ export function StatusBar() {
   const bpb = useStore(beatsPerBar);
 
   const noteCount = pattern && track ? (pattern.notesByTrack[track.id]?.length ?? 0) : 0;
-  const totalBeats = snapshot.model.arrangement.reduce(
-    (sum, id) => sum + (snapshot.model.patterns.find((p) => p.id === id)?.lengthBeats ?? 0),
-    0,
-  );
+  const totalBeats = snapshot.model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
 
   const context =
     mode === "pattern"
       ? `${pattern?.name ?? "—"} › ${track?.name ?? "—"} · ${noteCount} notes${selectedNoteIds.length ? ` · ${selectedNoteIds.length} selected` : ""} · snap ${gridLabel(noteLength)}`
-      : `song · ${snapshot.model.arrangement.length} blocks · ${+(totalBeats / bpb).toFixed(2)} bars · ${snapshot.model.tracks.length} tracks`;
+      : `song · ${snapshot.model.clips.length} clips · ${snapshot.model.sections.length} sections · ${+(totalBeats / bpb).toFixed(2)} bars · ${snapshot.model.tracks.length} tracks`;
 
   return (
     <div className="statusbar">

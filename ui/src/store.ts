@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, MidiStatus, PlayMode, Snapshot, SongPattern, Track } from "./types";
-import { beatsPerBar as bpbOf } from "./types";
+import type { AudioStatus, Command, KeyState, MidiStatus, PlayMode, Snapshot, SongPattern, Track } from "./types";
+import { beatsPerBar as bpbOf, keyAt } from "./types";
 
 export interface Toast {
   text: string;
@@ -413,4 +413,16 @@ export function meterPos(peak: number): number {
 
 export function beatsPerBar(s: State): number {
   return bpbOf(s.snapshot?.model.timeSignature);
+}
+
+/**
+ * The key the selected pattern is tiered against: if the pattern sits in a section with
+ * its own key (its first clip), that key; otherwise the project key.
+ */
+export function effectiveKey(s: State): KeyState {
+  const m = s.snapshot?.model;
+  if (!m) return { rootPitchClass: null, scale: "major", isLocked: false };
+  const p = selectedPattern(s);
+  const clip = p ? m.clips.find((c) => c.patternId === p.id) : undefined;
+  return clip ? keyAt(m, clip.startBeat) : m.key;
 }

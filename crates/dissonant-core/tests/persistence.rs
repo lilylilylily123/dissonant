@@ -13,7 +13,8 @@ fn round_trip_preserves_all_state() {
     model.patterns[0]
         .notes_by_track
         .insert(tid, vec![NoteEvent::new(0.0, 1.0, 60).with_velocity(77)]);
-    model.arrangement = vec![pid, pid];
+    model.clips = vec![Clip::new(pid, 0.0, 16.0), Clip::new(pid, 16.0, 8.0)];
+    model.sections = vec![Section::new("intro", 0.0)];
 
     let json = model.to_json().unwrap();
     let decoded = ProjectModel::from_json(&json).unwrap();
@@ -67,8 +68,25 @@ fn notes_without_velocity_default_to_100_and_bad_values_are_clamped() {
     assert_eq!(decoded.tracks[0].voice, "saw");
     assert_eq!(decoded.tracks[0].tone, 18_000.0);
     assert_eq!(decoded.patterns[0].chords.chord_at(1.0).unwrap().name.as_deref(), Some("C"));
-    // Unknown pattern ids are dropped from the arrangement.
-    assert_eq!(decoded.arrangement.len(), 1);
+    // The legacy arrangement list becomes clips; unknown pattern ids are dropped.
+    assert!(decoded.arrangement.is_empty());
+    assert_eq!(decoded.clips.len(), 1);
+    assert_eq!(decoded.clips[0].start_beat, 0.0);
+    assert_eq!(decoded.clips[0].length_beats, 16.0);
+}
+
+#[test]
+fn legacy_arrangement_lays_clips_back_to_back() {
+    let json = r#"{
+      "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "name": "a", "lengthBeats": 8 },
+                    { "id": "33333333-3333-3333-3333-333333333333", "name": "b", "lengthBeats": 16 } ],
+      "arrangement": [ "22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333", "22222222-2222-2222-2222-222222222222" ]
+    }"#;
+    let m = ProjectModel::from_json(json).unwrap();
+    let starts: Vec<f64> = m.clips.iter().map(|c| c.start_beat).collect();
+    assert_eq!(starts, vec![0.0, 8.0, 24.0]);
+    assert_eq!(m.song_length(), 32.0);
+    assert!(!m.to_json().unwrap().contains("\"arrangement\""));
 }
 
 #[test]

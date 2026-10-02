@@ -78,15 +78,15 @@ impl Sequence {
             .map(|t| {
                 SequenceTrack::from_track(
                     t,
-                    Arrangement::flattened_notes(&t.id, &model.patterns, &model.arrangement),
+                    Arrangement::flattened_notes(&t.id, &model.patterns, &model.clips),
                 )
             })
             .collect();
-        let total = Arrangement::total_length(&model.patterns, &model.arrangement);
+        let total = Arrangement::total_length(&model.clips);
         let fallback = model.patterns.first().map(|p| p.length_beats).unwrap_or(16.0);
         Sequence {
             tracks,
-            chords: Arrangement::flattened_chords(&model.patterns, &model.arrangement),
+            chords: Arrangement::flattened_chords(&model.patterns, &model.clips),
             length_beats: if total > 0.0 { total } else { fallback },
             tempo_bpm: model.tempo,
         }
@@ -109,7 +109,7 @@ mod tests {
         model.patterns[0]
             .notes_by_track
             .insert(track_id, vec![NoteEvent::new(0.0, 1.0, 60)]);
-        model.arrangement = vec![pattern_id, pattern_id];
+        model.clips = vec![crate::model::Clip::new(pattern_id, 0.0, 16.0), crate::model::Clip::new(pattern_id, 16.0, 16.0)];
 
         let p = Sequence::from_pattern(&model, &pattern_id).unwrap();
         assert_eq!(p.length_beats, 16.0);
