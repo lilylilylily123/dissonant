@@ -177,6 +177,9 @@ pub struct Track {
     /// -1 (left) … 1 (right).
     #[serde(default)]
     pub pan: f64,
+    /// Display color (`#rrggbb`). `None` means "pick from the palette by position".
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 impl Track {
@@ -192,6 +195,7 @@ impl Track {
             reverb_send: 0.0,
             tone: default_tone(),
             pan: 0.0,
+            color: None,
         }
     }
 

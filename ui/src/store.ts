@@ -7,15 +7,21 @@ export interface Toast {
   error?: boolean;
 }
 
+export type BottomPanel = "devices" | "mixer";
+
 interface State {
   snapshot: Snapshot | null;
   mode: PlayMode;
   selectedTrackId: string | null;
   selectedPatternId: string | null;
+  selectedNoteIds: string[];
   noteLength: number;
   zoom: number;
+  arrZoom: number; // px per bar in the arrangement
   showLandscape: boolean;
+  highlightRows: boolean;
   hearChords: boolean;
+  bottomPanel: BottomPanel;
   playhead: number;
   playing: boolean;
   masterPeak: [number, number];
@@ -31,15 +37,20 @@ interface State {
   setMode(mode: PlayMode): void;
   selectTrack(id: string): void;
   selectPattern(id: string): void;
+  setSelectedNoteIds(ids: string[]): void;
   setNoteLength(len: number): void;
   setZoom(zoom: number): void;
+  setArrZoom(px: number): void;
   toggleLandscape(): void;
+  toggleHighlight(): void;
   toggleHearChords(): void;
+  setBottomPanel(p: BottomPanel): void;
   play(): void;
   stop(): void;
   togglePlay(): void;
   rewind(): void;
   seek(beat: number): void;
+  tapTempo(): void;
   audition(pitch: number, velocity?: number): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
@@ -50,6 +61,7 @@ interface State {
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let taps: number[] = [];
 
 export const useStore = create<State>((set, get) => {
   const syncPlayback = async () => {
@@ -77,10 +89,14 @@ export const useStore = create<State>((set, get) => {
     mode: "pattern",
     selectedTrackId: null,
     selectedPatternId: null,
-    noteLength: 1,
+    selectedNoteIds: [],
+    noteLength: 0.25,
     zoom: 1,
+    arrZoom: 30,
     showLandscape: false,
+    highlightRows: true,
     hearChords: false,
+    bottomPanel: "devices",
     playhead: 0,
     playing: false,
     masterPeak: [0, 0],
@@ -126,32 +142,38 @@ export const useStore = create<State>((set, get) => {
       set({ mode });
       void syncPlayback();
     },
-
     selectTrack(id) {
-      set({ selectedTrackId: id });
+      set({ selectedTrackId: id, selectedNoteIds: [] });
     },
-
     selectPattern(id) {
-      set({ selectedPatternId: id });
+      set({ selectedPatternId: id, selectedNoteIds: [] });
       void syncPlayback();
     },
-
+    setSelectedNoteIds(ids) {
+      set({ selectedNoteIds: ids });
+    },
     setNoteLength(len) {
       set({ noteLength: len });
     },
-
     setZoom(zoom) {
-      set({ zoom: Math.min(4, Math.max(0.35, zoom)) });
+      set({ zoom: Math.min(3, Math.max(0.25, zoom)) });
     },
-
+    setArrZoom(px) {
+      set({ arrZoom: Math.min(160, Math.max(12, px)) });
+    },
     toggleLandscape() {
       set((s) => ({ showLandscape: !s.showLandscape }));
     },
-
+    toggleHighlight() {
+      set((s) => ({ highlightRows: !s.highlightRows }));
+    },
     toggleHearChords() {
       const on = !get().hearChords;
       set({ hearChords: on });
       void getBridge().then((b) => b.setHearChords(on));
+    },
+    setBottomPanel(p) {
+      set({ bottomPanel: p });
     },
 
     play() {
@@ -169,6 +191,18 @@ export const useStore = create<State>((set, get) => {
     },
     seek(beat) {
       void getBridge().then((b) => b.seek(beat));
+    },
+
+    tapTempo() {
+      const now = performance.now();
+      taps = taps.filter((t) => now - t < 3000);
+      taps.push(now);
+      if (taps.length >= 2) {
+        const intervals = taps.slice(1).map((t, i) => t - taps[i]);
+        const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+        const bpm = Math.round(60000 / avg);
+        if (bpm >= 20 && bpm <= 300) void get().dispatch({ type: "setTempo", bpm });
+      }
     },
 
     audition(pitch, velocity = 100) {
@@ -241,7 +275,7 @@ export const useStore = create<State>((set, get) => {
   };
 });
 
-// ─── Selectors ─────────────────────────────────────────────────────────────────────────────
+// ─── Selectors / helpers ───────────────────────────────────────────────────────────────────
 
 export function selectedPattern(s: State): SongPattern | null {
   const m = s.snapshot?.model;
@@ -255,10 +289,37 @@ export function selectedTrack(s: State): Track | null {
   return m.tracks.find((t) => t.id === s.selectedTrackId) ?? m.tracks[0] ?? null;
 }
 
-export const LENGTH_OPTIONS: [string, number][] = [
+export function selectedTrackIndex(s: State): number {
+  const m = s.snapshot?.model;
+  if (!m) return 0;
+  const i = m.tracks.findIndex((t) => t.id === s.selectedTrackId);
+  return i < 0 ? 0 : i;
+}
+
+export const GRID_OPTIONS: [string, number][] = [
+  ["1/32", 0.125],
   ["1/16", 0.25],
   ["1/8", 0.5],
   ["1/4", 1],
   ["1/2", 2],
   ["1", 4],
 ];
+
+export function gridLabel(len: number): string {
+  return GRID_OPTIONS.find(([, v]) => v === len)?.[0] ?? `${len}`;
+}
+
+export function dbText(gain: number): string {
+  if (gain <= 0.0005) return "-inf";
+  const db = 20 * Math.log10(gain);
+  return `${db >= 0 ? "+" : ""}${db.toFixed(1)}`;
+}
+
+export function peakDb(peak: number): number {
+  return peak <= 0.0001 ? -60 : 20 * Math.log10(peak);
+}
+
+/** 0..1 meter position for a peak, on a -48 dB … 0 dB scale. */
+export function meterPos(peak: number): number {
+  return Math.min(1, Math.max(0, (peakDb(peak) + 48) / 48));
+}

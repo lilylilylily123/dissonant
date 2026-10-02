@@ -34,6 +34,8 @@ pub enum Command {
     MoveTrack { id: Uuid, up: bool },
     SetTrackVoice { id: Uuid, voice: String },
     SetTrackParam { id: Uuid, param: TrackParam, value: f64 },
+    /// `#rrggbb`, or `None` to fall back to the palette.
+    SetTrackColor { id: Uuid, color: Option<String> },
     AddPattern,
     DuplicatePattern { id: Uuid },
     DeletePattern { id: Uuid },
@@ -234,6 +236,15 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 TrackParam::Tone => t.tone = value.clamp(200.0, 20_000.0),
                 TrackParam::Pan => t.pan = value.clamp(-1.0, 1.0),
             }
+        }
+        SetTrackColor { id, color } => {
+            if let Some(c) = &color {
+                let ok = c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
+                if !ok {
+                    return Err(EditError::InvalidValue);
+                }
+            }
+            m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.color = color.map(|c| c.to_lowercase());
         }
         AddPattern => {
             let mut p = SongPattern::new(format!("pattern {}", m.patterns.len() + 1));
@@ -473,6 +484,20 @@ mod tests {
         assert_ne!(a.notes(&tid)[0].id, b.notes(&tid)[0].id);
         assert_ne!(a.chords.chords()[0].id, b.chords.chords()[0].id);
         assert_eq!(b.name, "pattern 1 copy");
+    }
+
+    #[test]
+    fn track_color_is_validated() {
+        let mut d = doc();
+        let id = d.model().tracks[0].id;
+        d.apply(Command::SetTrackColor { id, color: Some("#FF3B30".into()) }, false).unwrap();
+        assert_eq!(d.model().tracks[0].color.as_deref(), Some("#ff3b30"));
+        assert_eq!(
+            d.apply(Command::SetTrackColor { id, color: Some("red".into()) }, false),
+            Err(EditError::InvalidValue)
+        );
+        d.apply(Command::SetTrackColor { id, color: None }, false).unwrap();
+        assert!(d.model().tracks[0].color.is_none());
     }
 
     #[test]
