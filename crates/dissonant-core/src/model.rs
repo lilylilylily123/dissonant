@@ -4,7 +4,7 @@
 //! Decoding is tolerant: every field has a `serde(default)` so a file missing a later-added
 //! field still opens. JSON keys are camelCase to match the previous app's files.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -101,6 +101,10 @@ pub struct NoteEvent {
     pub pitch: i32,
     #[serde(default = "default_velocity")]
     pub velocity: i32,
+    /// The player marked this (dissonant) note as deliberate: the tier cue stays, the flag
+    /// stops nagging. Guidance, never a gate (R11).
+    #[serde(default)]
+    pub intentional: bool,
 }
 
 impl NoteEvent {
@@ -111,6 +115,7 @@ impl NoteEvent {
             length_beats,
             pitch,
             velocity: default_velocity(),
+            intentional: false,
         }
     }
 
@@ -222,8 +227,35 @@ pub struct SongPattern {
     pub length_beats: f64,
     #[serde(default)]
     pub chords: crate::chord_track::ChordTrack,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_notes_by_track")]
     pub notes_by_track: HashMap<Uuid, Vec<NoteEvent>>,
+}
+
+/// `notesByTrack` is a JSON object keyed by track id — except in files written by the
+/// original Swift app, whose `Codable` encoded a `[UUID: [NoteEvent]]` as a flat array of
+/// alternating keys and values. Accept both.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NotesByTrackRepr {
+    Map(HashMap<Uuid, Vec<NoteEvent>>),
+    Flat(Vec<serde_json::Value>),
+}
+
+fn de_notes_by_track<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<Uuid, Vec<NoteEvent>>, D::Error> {
+    match NotesByTrackRepr::deserialize(d)? {
+        NotesByTrackRepr::Map(m) => Ok(m),
+        NotesByTrackRepr::Flat(values) => {
+            let mut out = HashMap::new();
+            for pair in values.chunks(2) {
+                if pair.len() == 2 {
+                    let key: Uuid = serde_json::from_value(pair[0].clone()).map_err(serde::de::Error::custom)?;
+                    let notes: Vec<NoteEvent> = serde_json::from_value(pair[1].clone()).map_err(serde::de::Error::custom)?;
+                    out.insert(key, notes);
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 impl SongPattern {
@@ -273,6 +305,28 @@ impl Default for MasterSettings {
     }
 }
 
+/// Beats per bar and the beat unit. Only the numerator changes grids and bar math; the
+/// engine counts in quarter-note beats regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TimeSignature {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl Default for TimeSignature {
+    fn default() -> Self {
+        TimeSignature { numerator: 4, denominator: 4 }
+    }
+}
+
+impl TimeSignature {
+    /// Quarter-note beats in one bar (3/4 → 3, 6/8 → 3, 7/8 → 3.5).
+    pub fn beats_per_bar(&self) -> f64 {
+        self.numerator as f64 * 4.0 / self.denominator.max(1) as f64
+    }
+}
+
 fn default_tempo() -> f64 {
     120.0
 }
@@ -305,6 +359,8 @@ pub struct ProjectModel {
     pub arrangement: Vec<Uuid>,
     #[serde(default)]
     pub master: MasterSettings,
+    #[serde(default)]
+    pub time_signature: TimeSignature,
 }
 
 impl Default for ProjectModel {
@@ -324,6 +380,7 @@ impl ProjectModel {
             patterns: default_patterns(),
             arrangement: vec![],
             master: MasterSettings::default(),
+            time_signature: TimeSignature::default(),
         }
     }
 

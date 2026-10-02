@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { dbText, useStore } from "../store";
+import { beatsPerBar, dbText, useStore } from "../store";
 import { DRUM_KIT, trackColor, type NoteEvent, type SongPattern, type Track } from "../types";
 import { VMeter } from "./Meter";
 
@@ -15,6 +15,7 @@ export function Arrangement() {
   const selectedPatternId = useStore((s) => s.selectedPatternId);
   const trackPeaks = useStore((s) => s.trackPeaks);
   const s = useStore();
+  const bpb = useStore(beatsPerBar);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [viewW, setViewW] = useState(1200);
@@ -27,10 +28,10 @@ export function Arrangement() {
     return () => ro.disconnect();
   }, []);
 
-  const pxPerBeat = pxPerBar / 4;
+  const pxPerBeat = pxPerBar / bpb;
   const totalBeats = model.arrangement.reduce((sum, id) => sum + (model.patterns.find((p) => p.id === id)?.lengthBeats ?? 0), 0);
   // Fill the viewport, and always leave room past the end of the song.
-  const bars = Math.max(Math.ceil((viewW - HEAD_W - 12) / pxPerBar), Math.ceil(totalBeats / 4) + 8);
+  const bars = Math.max(Math.ceil((viewW - HEAD_W - 12) / pxPerBar), Math.ceil(totalBeats / bpb) + 8);
   const timelineW = bars * pxPerBar;
 
   // Clip geometry per arrangement slot.
@@ -135,6 +136,7 @@ export function Arrangement() {
             peak={trackPeaks[ti] ?? 0}
             timelineW={timelineW}
             pxPerBar={pxPerBar}
+            bpb={bpb}
           >
             {slots.map(({ index, pattern, start }) =>
               pattern ? (
@@ -174,6 +176,7 @@ function TrackRow({
   peak,
   timelineW,
   pxPerBar,
+  bpb,
   children,
 }: {
   track: Track;
@@ -183,6 +186,7 @@ function TrackRow({
   peak: number;
   timelineW: number;
   pxPerBar: number;
+  bpb: number;
   children: React.ReactNode;
 }) {
   const dispatch = useStore((s) => s.dispatch);
@@ -200,7 +204,7 @@ function TrackRow({
   const gridBg = {
     backgroundImage:
       "linear-gradient(90deg,#2a2a31 1px,transparent 1px),linear-gradient(90deg,#1e1e24 1px,transparent 1px),linear-gradient(90deg,#17171b 1px,transparent 1px)",
-    backgroundSize: `${pxPerBar * 4}px 100%, ${pxPerBar}px 100%, ${pxPerBar / 4}px 100%`,
+    backgroundSize: `${pxPerBar * 4}px 100%, ${pxPerBar}px 100%, ${pxPerBar / bpb}px 100%`,
   };
 
   return (

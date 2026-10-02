@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { beatsPerBar, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { midiName, tierMap } from "../theory";
 import {
   adjustVelocity,
@@ -88,6 +88,11 @@ export function PianoRoll() {
   const seek = useStore((s) => s.seek);
   const setZoom = useStore((s) => s.setZoom);
   const setSelectedNoteIds = useStore((s) => s.setSelectedNoteIds);
+  const bpb = useStore(beatsPerBar);
+  const loopRegion = useStore((s) => s.loopRegion);
+  const looping = useStore((s) => s.looping);
+  const setLoopRegion = useStore((s) => s.setLoopRegion);
+  const loopDrag = useRef<{ anchor: number } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const velRef = useRef<HTMLCanvasElement>(null);
@@ -214,7 +219,7 @@ export function PianoRoll() {
     const sub = Math.min(noteLength, 1);
     for (let t = 0; t <= beats + 1e-9; t += sub) {
       const x = GUTTER + t * beatW;
-      const isBar = Math.abs(t % 4) < 1e-9;
+      const isBar = Math.abs(t % bpb) < 1e-9;
       const isBeat = Math.abs(t % 1) < 1e-9;
       ctx.fillStyle = isBar ? C.gridBar : isBeat ? C.gridBeat : C.gridSub;
       ctx.fillRect(Math.round(x), RULER_H, 1, gridH);
@@ -225,19 +230,25 @@ export function PianoRoll() {
     ctx.fillRect(0, 0, W, RULER_H);
     ctx.fillStyle = C.line1;
     ctx.fillRect(0, RULER_H - 1, W, 1);
-    ctx.globalAlpha = 0.8;
+    // Loop brace: the whole pattern in the track color, a sub-region in accent.
+    ctx.globalAlpha = looping ? 0.8 : 0.25;
     ctx.fillStyle = color;
     ctx.fillRect(GUTTER, 2, gridW, 6);
+    if (loopRegion) {
+      ctx.fillStyle = C.accent;
+      ctx.fillRect(GUTTER + loopRegion[0] * beatW, 2, (loopRegion[1] - loopRegion[0]) * beatW, 6);
+    }
     ctx.globalAlpha = 1;
     for (let b = 0; b < beats; b++) {
       const x = GUTTER + b * beatW;
-      const isBar = b % 4 === 0;
+      const barIdx = Math.floor(b / bpb);
+      const isBar = Math.abs(b % bpb) < 1e-9;
       if (!isBar && beatW < 40) continue;
       ctx.fillStyle = isBar ? "#5a5a62" : "#2e2e36";
       ctx.fillRect(Math.round(x), 10, 1, 18);
       ctx.fillStyle = isBar ? C.text1 : C.text4;
       ctx.font = isBar ? mono(600, 11) : mono(400, 9);
-      ctx.fillText(isBar ? `${b / 4 + 1}` : `${Math.floor(b / 4) + 1}.${(b % 4) + 1}`, x + 4, 19);
+      ctx.fillText(isBar ? `${barIdx + 1}` : `${barIdx + 1}.${Math.floor(b % bpb) + 1}`, x + 4, 19);
     }
     // Chord names in the ruler
     ctx.font = mono(500, 9);
@@ -387,7 +398,7 @@ export function PianoRoll() {
       ctx.fillStyle = t ? tierColor(t) : C.text1;
       ctx.fillText(label, hx + 5, hy + 7);
     }
-  }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc]);
+  }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping]);
 
   // ─── Velocity lane canvas ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -411,7 +422,7 @@ export function PianoRoll() {
     ctx.translate(-scrollLeft, 0);
     // grid
     for (let b = 0; b <= beats; b++) {
-      ctx.fillStyle = b % 4 === 0 ? "#2a2a32" : "#18181d";
+      ctx.fillStyle = Math.abs(b % bpb) < 1e-9 ? "#2a2a32" : "#18181d";
       ctx.fillRect(Math.round(GUTTER + b * beatW), 0, 1, H);
     }
     ctx.fillStyle = "#1c1c22";
@@ -440,7 +451,7 @@ export function PianoRoll() {
     ctx.fillText("127", GUTTER - 8 - ctx.measureText("127").width, 8);
     ctx.fillText("64", GUTTER - 8 - ctx.measureText("64").width, H / 2);
     ctx.fillText("0", GUTTER - 8 - ctx.measureText("0").width, H - 8);
-  }, [shown, chords, key, playhead, beatW, beats, gridW, selection, scrollLeft, viewW]);
+  }, [shown, chords, key, playhead, beatW, beats, gridW, selection, scrollLeft, viewW, bpb]);
 
   // ─── Interaction ──────────────────────────────────────────────────────────────────────────
   const local = (e: React.PointerEvent, el: HTMLElement) => {
@@ -461,7 +472,18 @@ export function PianoRoll() {
     scrollRef.current?.focus();
     const { x, y } = local(e, canvas);
     if (y < RULER_H) {
-      if (x >= GUTTER) seek(Math.max(0, Math.min(beats, beatForX(x))));
+      if (x < GUTTER) return;
+      if (e.button === 2) {
+        setLoopRegion(null);
+        return;
+      }
+      if (y < 10) {
+        // Drag in the brace strip to set a loop region (snapped to beats).
+        canvas.setPointerCapture(e.pointerId);
+        loopDrag.current = { anchor: Math.max(0, Math.min(beats, Math.round(beatForX(x)))) };
+        return;
+      }
+      seek(Math.max(0, Math.min(beats, beatForX(x))));
       return;
     }
     if (x < GUTTER) {
@@ -541,6 +563,12 @@ export function PianoRoll() {
   const onPointerMove = (e: React.PointerEvent) => {
     const canvas = canvasRef.current!;
     const { x, y } = local(e, canvas);
+    if (loopDrag.current) {
+      const b = Math.max(0, Math.min(beats, Math.round(beatForX(x))));
+      const a = loopDrag.current.anchor;
+      if (b !== a) setLoopRegion([Math.min(a, b), Math.max(a, b)]);
+      return;
+    }
     const d = dragRef.current;
     if (!d) {
       const beat = beatForX(x);
@@ -603,6 +631,10 @@ export function PianoRoll() {
   };
 
   const endDrag = () => {
+    if (loopDrag.current) {
+      loopDrag.current = null;
+      return;
+    }
     const d = dragRef.current;
     dragRef.current = null;
     if (!d) return;

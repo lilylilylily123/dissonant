@@ -24,7 +24,29 @@ export interface NoteEvent {
   lengthBeats: number;
   pitch: number;
   velocity: number;
+  /** The player marked this dissonance as deliberate. */
+  intentional?: boolean;
 }
+
+export interface TimeSignature {
+  numerator: number;
+  denominator: number;
+}
+
+/** Quarter-note beats per bar. */
+export function beatsPerBar(ts: TimeSignature | undefined): number {
+  if (!ts) return 4;
+  return (ts.numerator * 4) / Math.max(1, ts.denominator);
+}
+
+export const TIME_SIGNATURES: TimeSignature[] = [
+  { numerator: 2, denominator: 4 },
+  { numerator: 3, denominator: 4 },
+  { numerator: 4, denominator: 4 },
+  { numerator: 5, denominator: 4 },
+  { numerator: 6, denominator: 8 },
+  { numerator: 7, denominator: 8 },
+];
 
 export interface Track {
   id: string;
@@ -71,6 +93,7 @@ export interface ProjectModel {
   patterns: SongPattern[];
   arrangement: string[];
   master: MasterSettings;
+  timeSignature?: TimeSignature;
 }
 
 export interface Snapshot {
@@ -105,7 +128,8 @@ export type Command =
   | { type: "setNotes"; patternId: string; trackId: string; notes: NoteEvent[] }
   | { type: "setChords"; patternId: string; chords: ChordEvent[] }
   | { type: "setArrangement"; arrangement: string[] }
-  | { type: "setMaster"; master: MasterSettings };
+  | { type: "setMaster"; master: MasterSettings }
+  | { type: "setTimeSignature"; numerator: number; denominator: number };
 
 export interface PlayheadEvent {
   beat: number;
@@ -118,6 +142,12 @@ export interface AudioStatus {
   running: boolean;
   sampleRate: number | null;
   error: string | null;
+}
+
+export interface MidiStatus {
+  inputs: string[];
+  open: string | null;
+  armed: boolean;
 }
 
 export const VOICES = ["saw", "square", "triangle", "sine", "pad", "pluck"] as const;

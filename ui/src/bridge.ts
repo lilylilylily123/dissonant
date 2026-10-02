@@ -7,6 +7,7 @@ import type {
   ChordEvent,
   Command,
   MasterSettings,
+  MidiStatus,
   NoteEvent,
   PlayheadEvent,
   PlayMode,
@@ -39,6 +40,19 @@ export interface Bridge {
   restartAudio(): Promise<AudioStatus>;
   exportWav(path: string, tailSeconds?: number): Promise<string>;
   onPlayhead(cb: (e: PlayheadEvent) => void): () => void;
+  /** The backend changed the document on its own (e.g. a recorded note landed). */
+  onDocument(cb: (s: Snapshot) => void): () => void;
+  onMidiActivity(cb: (pitch: number) => void): () => void;
+  midiStatus(): Promise<MidiStatus>;
+  openMidiInput(name?: string): Promise<MidiStatus>;
+  closeMidiInput(): Promise<MidiStatus>;
+  setLiveTrack(trackId: string | null): Promise<void>;
+  setRecord(armed: boolean, quantize?: number): Promise<MidiStatus>;
+  noteOn(pitch: number, velocity?: number): Promise<void>;
+  noteOff(pitch: number): Promise<void>;
+  setLoop(start: number, end: number): Promise<void>;
+  clearLoop(): Promise<void>;
+  setLooping(on: boolean): Promise<void>;
   pickOpenPath(): Promise<string | null>;
   pickSavePath(defaultName: string, extension: string): Promise<string | null>;
 }
@@ -51,6 +65,19 @@ async function tauriBridge(): Promise<Bridge> {
   const { invoke } = await import("@tauri-apps/api/core");
   const { listen } = await import("@tauri-apps/api/event");
   const dialog = await import("@tauri-apps/plugin-dialog");
+
+  const subscribe = <T,>(name: string, cb: (payload: T) => void): (() => void) => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    listen<T>(name, (e) => cb(e.payload)).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  };
 
   return {
     isTauri: true,
@@ -72,18 +99,19 @@ async function tauriBridge(): Promise<Bridge> {
     audioStatus: () => invoke<AudioStatus>("audio_status"),
     restartAudio: () => invoke<AudioStatus>("restart_audio"),
     exportWav: (path, tailSeconds = 1.5) => invoke<string>("export_wav", { path, tailSeconds }),
-    onPlayhead: (cb) => {
-      let unlisten: (() => void) | null = null;
-      let cancelled = false;
-      listen<PlayheadEvent>("playhead", (e) => cb(e.payload)).then((u) => {
-        if (cancelled) u();
-        else unlisten = u;
-      });
-      return () => {
-        cancelled = true;
-        unlisten?.();
-      };
-    },
+    onPlayhead: (cb) => subscribe<PlayheadEvent>("playhead", cb),
+    onDocument: (cb) => subscribe<Snapshot>("document", cb),
+    onMidiActivity: (cb) => subscribe<number>("midi-activity", cb),
+    midiStatus: () => invoke<MidiStatus>("midi_status"),
+    openMidiInput: (name) => invoke<MidiStatus>("open_midi_input", { name: name ?? null }),
+    closeMidiInput: () => invoke<MidiStatus>("close_midi_input"),
+    setLiveTrack: (trackId) => invoke("set_live_track", { trackId }),
+    setRecord: (armed, quantize) => invoke<MidiStatus>("set_record", { armed, quantize: quantize ?? null }),
+    noteOn: (pitch, velocity = 100) => invoke("note_on", { pitch, velocity }),
+    noteOff: (pitch) => invoke("note_off", { pitch }),
+    setLoop: (start, end) => invoke("set_loop", { start, end }),
+    clearLoop: () => invoke("clear_loop"),
+    setLooping: (on) => invoke("set_looping", { on }),
     pickOpenPath: async () => {
       const r = await dialog.open({
         multiple: false,
@@ -280,6 +308,9 @@ function reduce(m: ProjectModel, c: Command): void {
     case "setMaster":
       m.master = { ...c.master } as MasterSettings;
       break;
+    case "setTimeSignature":
+      m.timeSignature = { numerator: c.numerator, denominator: c.denominator };
+      break;
   }
 }
 
@@ -295,7 +326,15 @@ function mockBridge(): Bridge {
   let playing = false;
   let beat = 0;
   let last = performance.now();
+  let loop: [number, number] | null = null;
+  let looping = true;
+  let armed = false;
+  let quantize = 0.25;
+  let liveTrack: string | null = null;
+  const held = new Map<number, { start: number; velocity: number }>();
   const listeners = new Set<(e: PlayheadEvent) => void>();
+  const docListeners = new Set<(s: Snapshot) => void>();
+  const midiListeners = new Set<(p: number) => void>();
 
   const snapshot = (): Snapshot => ({ model: clone(model), canUndo: undo.length > 0 || pending !== null, canRedo: redo.length > 0, dirty, path });
 
@@ -312,7 +351,8 @@ function mockBridge(): Bridge {
     if (playing) {
       beat += ((now - last) / 1000) * (model.tempo / 60);
       const len = loopLength();
-      if (beat >= len) beat = beat % len;
+      const [ls, le] = loop && loop[1] > loop[0] ? [Math.min(loop[0], len), Math.min(loop[1], len)] : [0, len];
+      if (looping && beat >= le && le > ls) beat = ls + ((beat - le) % (le - ls));
     }
     last = now;
     const e: PlayheadEvent = { beat, playing, masterPeak: [0, 0], trackPeaks: [] };
@@ -433,6 +473,59 @@ function mockBridge(): Bridge {
     onPlayhead: (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);
+    },
+    onDocument: (cb) => {
+      docListeners.add(cb);
+      return () => docListeners.delete(cb);
+    },
+    onMidiActivity: (cb) => {
+      midiListeners.add(cb);
+      return () => midiListeners.delete(cb);
+    },
+    midiStatus: async () => ({ inputs: [], open: null, armed }),
+    openMidiInput: async () => ({ inputs: [], open: null, armed }),
+    closeMidiInput: async () => ({ inputs: [], open: null, armed }),
+    setLiveTrack: async (id) => {
+      liveTrack = id;
+    },
+    setRecord: async (a, q) => {
+      armed = a;
+      if (q !== undefined) quantize = q;
+      if (!a) held.clear();
+      return { inputs: [], open: null, armed };
+    },
+    noteOn: async (pitch, velocity = 100) => {
+      blip(pitch, velocity);
+      for (const cb of midiListeners) cb(pitch);
+      if (armed && playing) held.set(pitch, { start: beat, velocity });
+    },
+    noteOff: async (pitch) => {
+      const h = held.get(pitch);
+      held.delete(pitch);
+      if (!h) return;
+      const track = liveTrack ?? model.tracks[0]?.id;
+      const p = model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
+      if (!track || !p) return;
+      const grid = quantize > 0 ? quantize : 1 / 32;
+      let len = beat - h.start;
+      if (len < 0) len += p.lengthBeats;
+      const start = Math.round((h.start % p.lengthBeats) / grid) * grid;
+      const notes = (p.notesByTrack[track] ?? []).filter((n) => !(n.pitch === pitch && Math.abs(n.startBeat - start) < grid / 2));
+      notes.push({ id: uuid(), startBeat: Math.min(start, p.lengthBeats - grid), lengthBeats: Math.max(grid, Math.round(len / grid) * grid), pitch, velocity: h.velocity });
+      undo.push(clone(model));
+      redo.length = 0;
+      reduce(model, { type: "setNotes", patternId: p.id, trackId: track, notes });
+      dirty = true;
+      for (const cb of docListeners) cb(snapshot());
+    },
+    setLoop: async (s, e) => {
+      loop = [s, e];
+    },
+    clearLoop: async () => {
+      loop = null;
+    },
+    setLooping: async (on) => {
+      looping = on;
     },
     pickOpenPath: async () => null,
     pickSavePath: async (name, ext) => `${name}.${ext}`,

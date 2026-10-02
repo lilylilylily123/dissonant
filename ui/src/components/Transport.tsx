@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { GRID_OPTIONS, peakDb, selectedPattern, useStore } from "../store";
+import { TIME_SIGNATURES } from "../types";
 import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
 
@@ -68,6 +69,24 @@ export function Transport() {
             <polygon points="0,0 12,7 0,14" fill={s.playing ? "#0b0b0d" : "#9a9aa4"} />
           </svg>
         </button>
+        <button
+          className="tbtn"
+          style={s.armed ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
+          onClick={() => s.toggleRecord()}
+          title="record arm (R): played notes land in the selected pattern while playing"
+        >
+          <div style={{ width: 11, height: 11, borderRadius: "50%", background: s.armed ? "#ff3b30" : "#5f5f68", boxShadow: s.armed ? "0 0 8px #ff3b30" : "none" }} />
+        </button>
+        <button
+          className="tbtn"
+          style={s.looping ? { background: "var(--accent-bg)", borderColor: "var(--accent-border)" } : undefined}
+          onClick={() => s.toggleLooping()}
+          title="loop (L) · drag the ruler's top strip to set a region · right-click it to clear"
+        >
+          <svg width="16" height="12" viewBox="0 0 16 12">
+            <path d="M3 4 H12 L10 2 M13 8 H4 L6 10" stroke={s.looping ? "#b48cff" : "#9a9aa4"} strokeWidth="1.6" fill="none" />
+          </svg>
+        </button>
       </div>
       <div className="lcd">
         <div className="tgroup">
@@ -118,7 +137,22 @@ export function Transport() {
       </div>
       <div className="grid22">
         <span className="k">sig</span>
-        <span className="v">4 / 4</span>
+        <span className="v">
+          <select
+            value={`${model.timeSignature?.numerator ?? 4}/${model.timeSignature?.denominator ?? 4}`}
+            onChange={(e) => {
+              const [n, d] = e.target.value.split("/").map(Number);
+              void s.dispatch({ type: "setTimeSignature", numerator: n, denominator: d });
+            }}
+            style={{ height: 18, padding: "0 14px 0 4px" }}
+          >
+            {TIME_SIGNATURES.map((t) => (
+              <option key={`${t.numerator}/${t.denominator}`} value={`${t.numerator}/${t.denominator}`}>
+                {t.numerator} / {t.denominator}
+              </option>
+            ))}
+          </select>
+        </span>
         <span className="k">key</span>
         <span className="v">
           {model.key.isLocked && model.key.rootPitchClass !== null ? (
@@ -159,6 +193,14 @@ export function Transport() {
       </div>
       <span className="spacer" />
       <div className="row" style={{ gap: 3 }}>
+        <div className="seg" title="play the selected track from your computer keyboard · tier: home row = chord tones, top row = tensions, following the playhead · chrom: Z/Q rows chromatic · −/+ octave">
+          <div className={s.liveKeyboard === "off" ? "on" : ""} onClick={() => s.setLiveKeyboard("off")}>keys off</div>
+          <div className={s.liveKeyboard === "tier" ? "on" : ""} onClick={() => s.setLiveKeyboard("tier")}>tier</div>
+          <div className={s.liveKeyboard === "chromatic" ? "on" : ""} onClick={() => s.setLiveKeyboard("chromatic")}>chrom</div>
+        </div>
+        <MidiChip />
+      </div>
+      <div className="row" style={{ gap: 3 }}>
         <button className={`chip${s.highlightRows ? " on" : ""}`} onClick={() => s.toggleHighlight()} title="tint piano-roll rows by how each note fits the chord under the playhead">tiers</button>
         <button className={`chip${s.showLandscape ? " on" : ""}`} onClick={() => s.toggleLandscape()} title="harmonic map: color every beat of the roll by its fit against the chord there">map</button>
         <button className={`chip${s.hearChords ? " on" : ""}`} onClick={() => s.toggleHearChords()} title="hear the chord track as a pad bed">chords</button>
@@ -181,6 +223,36 @@ export function Transport() {
           <span>0</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function MidiChip() {
+  const s = useStore();
+  const midi = s.midi;
+  const active = performance.now() - s.midiActivityAt < 150;
+  if (!midi) return null;
+  const isMock = !s.audio?.running && midi.inputs.length === 0 && !midi.open;
+  return (
+    <div
+      className="opt"
+      style={{ borderColor: midi.open ? "var(--rec-border)" : "var(--line-3)", gap: 6 }}
+      title={isMock ? "MIDI input needs the desktop app" : "MIDI input device"}
+    >
+      <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: midi.open ? (active ? "#ff6a5e" : "#ff3b30") : "#4a4a52", display: "inline-block", boxShadow: active ? "0 0 6px #ff3b30" : "none" }} />
+      <span className="k" style={{ color: midi.open ? "var(--rec-text)" : undefined }}>midi in</span>
+      <select
+        value={midi.open ?? ""}
+        onChange={(e) => (e.target.value ? void s.openMidi(e.target.value) : void s.closeMidi())}
+        onFocus={() => void s.refreshMidi()}
+        style={{ height: 16, padding: "0 14px 0 4px", border: 0, background: "transparent", maxWidth: 140 }}
+      >
+        <option value="">off</option>
+        {midi.inputs.map((name) => (
+          <option key={name} value={name}>{name}</option>
+        ))}
+        {midi.open && !midi.inputs.includes(midi.open) && <option value={midi.open}>{midi.open}</option>}
+      </select>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { selectedPattern, useStore } from "../store";
+import { beatsPerBar, selectedPattern, useStore } from "../store";
 
 /** Left column in SONG mode: the pattern library. Click selects, ＋ appends to the song. */
 export function PatternsPanel() {
@@ -8,6 +8,7 @@ export function PatternsPanel() {
   const selectPattern = useStore((s) => s.selectPattern);
   const setMode = useStore((s) => s.setMode);
   const dispatch = useStore((s) => s.dispatch);
+  const bpb = useStore(beatsPerBar);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
@@ -69,7 +70,7 @@ export function PatternsPanel() {
                   <span className="name">{p.name}</span>
                 )}
                 <span className="meta">
-                  {p.lengthBeats / 4}b · {noteCount(p.id)}n
+                  {+(p.lengthBeats / bpb).toFixed(2)}b · {noteCount(p.id)}n
                 </span>
                 <button className="ico" title="rename" onClick={(e) => (e.stopPropagation(), setDraft(p.name), setRenaming(p.id))}>✎</button>
                 <button
@@ -89,14 +90,14 @@ export function PatternsPanel() {
         <div className="section" style={{ borderBottom: 0, borderTop: "1px solid var(--line-1)" }}>
           <div className="head">
             <span className="cap">length</span>
-            <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>{pattern.lengthBeats / 4} bars</span>
+            <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>{+(pattern.lengthBeats / bpb).toFixed(2)} bars</span>
           </div>
           <div className="chipsrow">
             {[1, 2, 4, 8].map((bars) => (
               <button
                 key={bars}
-                className={`chip${pattern.lengthBeats === bars * 4 ? " on" : ""}`}
-                onClick={() => dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * 4 })}
+                className={`chip${pattern.lengthBeats === bars * bpb ? " on" : ""}`}
+                onClick={() => dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * bpb })}
               >
                 {bars}
               </button>

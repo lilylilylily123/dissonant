@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { dbText, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { beatsPerBar, dbText, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { chordAt, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
 import { DRUM_KIT, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
 import { hz, Knob, lin, log, panText, pct } from "./Knob";
@@ -15,6 +15,7 @@ export function Inspector() {
   const pattern = useStore(selectedPattern);
   const track = useStore(selectedTrack);
   const trackIdx = useStore(selectedTrackIndex);
+  const bpb = useStore(beatsPerBar);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [renamingPattern, setRenamingPattern] = useState(false);
@@ -109,7 +110,7 @@ export function Inspector() {
         <div className="head">
           <span className="cap">pattern</span>
           <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>
-            midi · {pattern.lengthBeats / 4} bars
+            midi · {+(pattern.lengthBeats / bpb).toFixed(2)} bars
           </span>
         </div>
         <div className="namebar" style={{ background: color }} onClick={() => !renamingPattern && (setDraft(pattern.name), setRenamingPattern(true))} title="click to rename">
@@ -149,7 +150,7 @@ export function Inspector() {
           <span className="flabel">length</span>
           <div className="row" style={{ gap: 3 }}>
             {[1, 2, 4, 8].map((bars) => (
-              <button key={bars} className={`chip tiny${pattern.lengthBeats === bars * 4 ? " on" : ""}`} onClick={() => s.dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * 4 })}>
+              <button key={bars} className={`chip tiny${pattern.lengthBeats === bars * bpb ? " on" : ""}`} onClick={() => s.dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * bpb })}>
                 {bars}
               </button>
             ))}
@@ -287,8 +288,8 @@ export function Inspector() {
         </div>
         <div className="overview-scale">
           <span>1</span>
-          <span>{Math.max(1, Math.round(total / 8) + 1)}</span>
-          <span>{Math.max(1, Math.round(total / 4) + 1)}</span>
+          <span>{Math.max(1, Math.round(total / bpb / 2) + 1)}</span>
+          <span>{Math.max(1, Math.round(total / bpb) + 1)}</span>
         </div>
       </div>
     </aside>

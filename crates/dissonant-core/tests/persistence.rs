@@ -79,3 +79,25 @@ fn json_uses_camel_case_keys() {
     assert!(json.contains("\"lengthBeats\""));
     assert!(!json.contains("length_beats"));
 }
+
+#[test]
+fn imports_swift_flat_array_notes_by_track() {
+    // The Swift app's Codable wrote `[UUID: [NoteEvent]]` as [key, value, key, value].
+    let json = r#"{
+      "schemaVersion": 2, "tempo": 110,
+      "key": { "rootPitchClass": 7, "scale": "major", "isLocked": true },
+      "tracks": [ { "id": "11111111-1111-1111-1111-111111111111", "name": "melody", "voice": "pluck", "muted": false, "soloed": false, "isDrum": false, "volume": 1, "reverbSend": 0.2, "tone": 9000, "pan": 0 } ],
+      "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "name": "verse", "lengthBeats": 16,
+        "chords": { "chords": [] },
+        "notesByTrack": [ "11111111-1111-1111-1111-111111111111", [ { "id": "44444444-4444-4444-4444-444444444444", "startBeat": 2, "lengthBeats": 0.5, "pitch": 67 } ] ] } ],
+      "arrangement": [ "22222222-2222-2222-2222-222222222222" ]
+    }"#;
+    let m = ProjectModel::from_json(json).unwrap();
+    let tid = m.tracks[0].id;
+    assert_eq!(m.patterns[0].notes(&tid).len(), 1);
+    assert_eq!(m.patterns[0].notes(&tid)[0].pitch, 67);
+    assert_eq!(m.patterns[0].notes(&tid)[0].velocity, 100);
+    assert_eq!(m.key.root_pitch_class, Some(7));
+    assert_eq!(m.time_signature, TimeSignature::default());
+    assert_eq!(m.schema_version, SCHEMA_VERSION);
+}

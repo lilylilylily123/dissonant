@@ -31,6 +31,7 @@ impl Arrangement {
                     length_beats: note.length_beats,
                     pitch: note.pitch,
                     velocity: note.velocity,
+                    intentional: note.intentional,
                 });
             }
             offset += pattern.length_beats;

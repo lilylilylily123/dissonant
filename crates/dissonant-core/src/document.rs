@@ -47,6 +47,7 @@ pub enum Command {
     SetChords { pattern_id: Uuid, chords: Vec<ChordEvent> },
     SetArrangement { arrangement: Vec<Uuid> },
     SetMaster { master: MasterSettings },
+    SetTimeSignature { numerator: u32, denominator: u32 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -334,6 +335,12 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
         SetArrangement { arrangement } => {
             m.arrangement = arrangement.into_iter().filter(|id| m.patterns.iter().any(|p| &p.id == id)).collect();
         }
+        SetTimeSignature { numerator, denominator } => {
+            if !(1..=16).contains(&numerator) || ![2, 4, 8, 16].contains(&denominator) {
+                return Err(EditError::InvalidValue);
+            }
+            m.time_signature = crate::model::TimeSignature { numerator, denominator };
+        }
         SetMaster { master } => {
             let v = [
                 master.gain,
@@ -498,6 +505,25 @@ mod tests {
         );
         d.apply(Command::SetTrackColor { id, color: None }, false).unwrap();
         assert!(d.model().tracks[0].color.is_none());
+    }
+
+    #[test]
+    fn time_signature_is_validated() {
+        let mut d = doc();
+        d.apply(Command::SetTimeSignature { numerator: 7, denominator: 8 }, false).unwrap();
+        assert_eq!(d.model().time_signature.beats_per_bar(), 3.5);
+        assert_eq!(d.apply(Command::SetTimeSignature { numerator: 0, denominator: 4 }, false), Err(EditError::InvalidValue));
+        assert_eq!(d.apply(Command::SetTimeSignature { numerator: 4, denominator: 3 }, false), Err(EditError::InvalidValue));
+    }
+
+    #[test]
+    fn intentional_flag_survives_set_notes() {
+        let mut d = doc();
+        let (pid, tid) = (d.model().patterns[0].id, d.model().tracks[0].id);
+        let mut n = NoteEvent::new(0.0, 1.0, 65);
+        n.intentional = true;
+        d.apply(Command::SetNotes { pattern_id: pid, track_id: tid, notes: vec![n] }, false).unwrap();
+        assert!(d.model().patterns[0].notes(&tid)[0].intentional);
     }
 
     #[test]

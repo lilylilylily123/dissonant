@@ -64,6 +64,12 @@ pub enum EngineCommand {
     Stop,
     Seek { beat: f64 },
     SetLooping(bool),
+    /// Loop a sub-range `[start, end)` of the sequence instead of the whole thing.
+    SetLoop { start: f64, end: f64 },
+    ClearLoop,
+    /// A held note from a controller / typing keyboard. Released by `NoteOff`.
+    NoteOn { track_id: Uuid, pitch: u8, velocity: u8 },
+    NoteOff { track_id: Uuid, pitch: u8 },
     /// Replace what's playing. The old `Arc` is dropped on the audio thread; sequences are
     /// small so this is acceptable for now (a return channel is the real-time-pure fix).
     SetSequence(Arc<Sequence>),
@@ -107,6 +113,7 @@ pub struct Engine {
     master: Master,
     playing: bool,
     looping: bool,
+    loop_region: Option<(f64, f64)>,
     position: f64,
     tempo: Tempo,
     mix_l: Vec<f32>,
@@ -130,6 +137,7 @@ impl Engine {
             master: Master::new(sample_rate, master),
             playing: false,
             looping: true,
+            loop_region: None,
             position: 0.0,
             tempo: Tempo::default(),
             mix_l: vec![0.0; 8192],
@@ -160,11 +168,32 @@ impl Engine {
             EngineCommand::Seek { beat } => {
                 self.release_all();
                 self.position = beat.max(0.0);
-                if self.looping && self.position >= self.sequence.length_beats {
-                    self.position = 0.0;
+                let (start, end) = self.loop_bounds();
+                if self.looping && self.position >= end {
+                    self.position = start;
                 }
             }
             EngineCommand::SetLooping(on) => self.looping = on,
+            EngineCommand::SetLoop { start, end } => {
+                if end > start && start >= 0.0 {
+                    self.loop_region = Some((start, end));
+                } else {
+                    self.loop_region = None;
+                }
+            }
+            EngineCommand::ClearLoop => self.loop_region = None,
+            EngineCommand::NoteOn { track_id, pitch, velocity } => {
+                if let Some(ch) = self.channel_mut(&track_id) {
+                    ch.instrument.note_on(pitch, velocity);
+                }
+                self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
+            }
+            EngineCommand::NoteOff { track_id, pitch } => {
+                if let Some(ch) = self.channel_mut(&track_id) {
+                    ch.instrument.note_off(pitch);
+                }
+                self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
+            }
             EngineCommand::SetSequence(seq) => self.set_sequence(seq),
             EngineCommand::SetHearChords(on) => {
                 self.hear_chords = on;
@@ -193,6 +222,16 @@ impl Engine {
             }
         }
         self.publish();
+    }
+
+    /// The active loop as `(start, end)`: the region if one is set (clamped to the
+    /// sequence), else the whole sequence.
+    fn loop_bounds(&self) -> (f64, f64) {
+        let len = self.sequence.length_beats.max(0.0);
+        match self.loop_region {
+            Some((s, e)) if e > s => (s.max(0.0).min(len), e.min(len).max(s.max(0.0))),
+            _ => (0.0, len),
+        }
     }
 
     fn channel_mut(&mut self, id: &Uuid) -> Option<&mut Channel> {
@@ -238,8 +277,9 @@ impl Engine {
         self.channels = new_channels;
         self.channel_ids = new_ids;
         self.tempo = Tempo::new(self.sequence.tempo_bpm);
-        if self.looping && self.position >= self.sequence.length_beats {
-            self.position = 0.0;
+        let (start, end) = self.loop_bounds();
+        if self.looping && self.position >= end {
+            self.position = start;
         }
     }
 
@@ -359,9 +399,10 @@ impl Engine {
     fn advance(&self, position: f64, frames: usize) -> f64 {
         let beats = self.tempo.beats_for_samples(frames as f64, self.sample_rate as f64);
         let mut p = position + beats;
-        let len = self.sequence.length_beats;
-        if self.looping && len > 0.0 && p >= len {
-            p = (p - len) % len;
+        let (start, end) = self.loop_bounds();
+        let len = end - start;
+        if self.looping && len > 0.0 && p >= end {
+            p = start + (p - end) % len;
         }
         p
     }
@@ -374,16 +415,16 @@ impl Engine {
         }
         let spb = self.tempo.samples_per_beat(self.sample_rate as f64);
         let block_beats = frames as f64 / spb;
-        let len = self.sequence.length_beats;
+        let (loop_start, loop_end) = self.loop_bounds();
         let start = self.position;
         let end = start + block_beats;
 
-        if self.looping && len > 0.0 && end >= len {
-            // Two segments: [start, len) then [0, end - len), with a release at the seam.
-            let seam = ((len - start) * spb).round() as usize;
-            self.collect_segment(start, len, 0, spb);
+        if self.looping && loop_end > loop_start && end >= loop_end && start < loop_end {
+            // Two segments: [start, loop_end) then [loop_start, …), with a release at the seam.
+            let seam = ((loop_end - start) * spb).round() as usize;
+            self.collect_segment(start, loop_end, 0, spb);
             self.events.push(Event { offset: seam.min(frames), kind: EventKind::ReleaseAll });
-            self.collect_segment(0.0, end - len, seam, spb);
+            self.collect_segment(loop_start, loop_start + (end - loop_end), seam, spb);
         } else {
             self.collect_segment(start, end, 0, spb);
         }
@@ -601,6 +642,46 @@ mod tests {
         let left = render(&mut e, 44_100 * 2, 512);
         assert!(left[..4000].iter().any(|s| s.abs() > 0.01));
         assert!(left[70_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn loop_region_repeats_only_its_range() {
+        // Notes at beat 0 and beat 4 in a 16-beat pattern; loop [4, 8) → only the beat-4 note
+        // sounds, once per 4 beats.
+        let mut model = ProjectModel::empty();
+        model.tracks[0].voice = "sine".into();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        model.patterns[0]
+            .notes_by_track
+            .insert(tid, vec![NoteEvent::new(0.0, 0.5, 69), NoteEvent::new(4.0, 0.5, 69)]);
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::SetLoop { start: 4.0, end: 8.0 });
+        e.handle(EngineCommand::Seek { beat: 0.0 });
+        assert_eq!(e.position(), 0.0, "seeking before the loop is allowed");
+        e.handle(EngineCommand::Seek { beat: 4.0 });
+        e.handle(EngineCommand::Play);
+        // 4 beats = 88200 samples per loop pass; render two passes.
+        let left = render(&mut e, 88_200 * 2 + 100, 512);
+        let first = first_onset(&left).unwrap();
+        assert!(first <= 2, "first onset {first}");
+        let second = first_onset(&left[88_200 - 10..]).unwrap() + 88_200 - 10;
+        assert!((second as i64 - 88_200).abs() <= 2, "second onset {second}");
+        assert!(e.position() >= 4.0 && e.position() < 8.0);
+    }
+
+    #[test]
+    fn held_note_sounds_until_released() {
+        let model = ProjectModel::empty();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::NoteOn { track_id: tid, pitch: 60, velocity: 100 });
+        let held = render(&mut e, 44_100 * 2, 512);
+        assert!(held[80_000..].iter().any(|s| s.abs() > 0.01), "a held note must not auto-release");
+        e.handle(EngineCommand::NoteOff { track_id: tid, pitch: 60 });
+        let tail = render(&mut e, 44_100, 512);
+        assert!(tail[30_000..].iter().all(|s| s.abs() < 1e-4));
     }
 
     #[test]
