@@ -7,6 +7,7 @@ import { Arrangement } from "./components/Arrangement";
 import { BottomPanel } from "./components/BottomPanel";
 import { Inspector } from "./components/Inspector";
 import { Editor } from "./components/Editor";
+import { Dialog } from "./components/Dialog";
 import { useStore } from "./store";
 import { useLiveKeyboard } from "./liveKeyboard";
 
@@ -31,6 +32,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (isTyping(e.target)) return;
       const s = useStore.getState();
+      if (s.dialog) return; // the dialog owns the keyboard
       const mod = e.metaKey || e.ctrlKey;
       const k = e.key.toLowerCase();
       if (e.code === "Space") {
@@ -57,6 +59,9 @@ export default function App() {
       } else if (mod && k === "e") {
         e.preventDefault();
         void s.exportWav();
+      } else if (mod && k === "q") {
+        e.preventDefault();
+        void s.requestClose();
       } else if (!mod && e.key === "Tab") {
         e.preventDefault();
         s.setMode(s.mode === "pattern" ? "song" : "pattern");
@@ -100,6 +105,7 @@ export default function App() {
       </div>
       <StatusBar />
       {toast && <div className={`toast${toast.error ? " error" : ""}`}>{toast.text}</div>}
+      <Dialog />
     </div>
   );
 }

@@ -1,11 +1,28 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, KeyState, MidiStatus, PlayMode, Snapshot, SongPattern, Track } from "./types";
-import { beatsPerBar as bpbOf, keyAt } from "./types";
+import type { AudioStatus, Command, KeyState, MidiStatus, PlayMode, RecoveryCandidate, Snapshot, SongPattern, Track } from "./types";
+import { beatsPerBar as bpbOf, fileNameOf, keyAt } from "./types";
 
 export interface Toast {
   text: string;
   error?: boolean;
+}
+
+/** One button of an in-app dialog. `value` is what `ask` resolves with. */
+export interface DialogButton {
+  label: string;
+  value: string;
+  kind?: "primary" | "danger" | "quiet";
+}
+
+export interface DialogSpec {
+  title: string;
+  message?: string;
+  /** Optional monospace detail line (a path, a count). */
+  detail?: string;
+  buttons: DialogButton[];
+  /** Resolved with when the dialog is dismissed with Esc / the backdrop. */
+  cancelValue?: string;
 }
 
 export type BottomPanel = "devices" | "mixer";
@@ -30,6 +47,8 @@ interface State {
   trackPeaks: number[];
   audio: AudioStatus | null;
   toast: Toast | null;
+  dialog: DialogSpec | null;
+  recent: string[];
   looping: boolean;
   loopRegion: [number, number] | null;
   armed: boolean;
@@ -40,7 +59,8 @@ interface State {
   stamp: boolean;
 
   init(): Promise<void>;
-  dispatch(command: Command, transient?: boolean): Promise<void>;
+  /** `label` names the edit in the Edit menu ("move notes"); defaults to the command's name. */
+  dispatch(command: Command, transient?: boolean, label?: string): Promise<void>;
   commitGesture(): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
@@ -75,14 +95,31 @@ interface State {
   toggleStamp(): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
-  saveProject(saveAs?: boolean): Promise<void>;
+  /** Open a known path (recent file, dropped file), asking about unsaved work first. */
+  openPath(path: string): Promise<void>;
+  /** Save; resolves true when the document ended up saved (false on cancel / error). */
+  saveProject(saveAs?: boolean): Promise<boolean>;
   exportWav(): Promise<void>;
   restartAudio(): Promise<void>;
   showToast(text: string, error?: boolean): void;
+  /** Show an in-app dialog and resolve with the chosen button's value. */
+  ask(spec: DialogSpec): Promise<string>;
+  /** Yes/no convenience over `ask`. */
+  confirm(title: string, message?: string, okLabel?: string, danger?: boolean): Promise<boolean>;
+  /** Called by a dialog button; resolves the pending `ask`. */
+  answerDialog(value: string): void;
+  /** Unsaved changes stand in the way of `what`; returns true when it is OK to proceed. */
+  confirmDiscard(what: string): Promise<boolean>;
+  /** The OS close button: save / discard / cancel, then quit. */
+  requestClose(): Promise<void>;
+  refreshRecent(): Promise<void>;
+  clearRecent(): Promise<void>;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let taps: number[] = [];
+let dialogResolve: ((value: string) => void) | null = null;
+let lastTitle = "";
 
 export const useStore = create<State>((set, get) => {
   const syncPlayback = async () => {
@@ -103,6 +140,42 @@ export const useStore = create<State>((set, get) => {
       selectedPatternId: patternOk ? selectedPatternId : (patterns[0]?.id ?? null),
     });
     if (!patternOk) void syncPlayback();
+    // OS window title: "song.dissonant • — dissonant"
+    const title = `${fileNameOf(snapshot.path)}${snapshot.dirty ? " •" : ""} — dissonant`;
+    if (title !== lastTitle) {
+      lastTitle = title;
+      void getBridge().then((b) => b.setTitle(title));
+    }
+  };
+
+  /** Offer to restore autosaves left by an earlier run, newest first. */
+  const offerRecovery = async (candidates: RecoveryCandidate[]) => {
+    const b = await getBridge();
+    for (const c of candidates) {
+      const when = new Date(c.savedAtMs).toLocaleString();
+      const answer = await get().ask({
+        title: "Recover unsaved work?",
+        message: `An autosave of ${c.projectPath ? `“${fileNameOf(c.projectPath)}”` : "an untitled project"} from ${when} was found. It was never saved.`,
+        detail: c.projectPath ?? undefined,
+        buttons: [
+          { label: "Restore", value: "restore", kind: "primary" },
+          { label: "Delete autosave", value: "discard", kind: "danger" },
+          { label: "Later", value: "later", kind: "quiet" },
+        ],
+        cancelValue: "later",
+      });
+      if (answer === "restore") {
+        try {
+          applySnapshot(await b.restoreAutosave(c.autosavePath));
+          await syncPlayback();
+          get().showToast("restored from autosave — save to keep it");
+        } catch (e) {
+          get().showToast(String(e), true);
+        }
+        return; // one document at a time; the rest stay on disk for next launch
+      }
+      if (answer === "discard") await b.discardAutosave(c.autosavePath);
+    }
   };
 
   return {
@@ -124,6 +197,8 @@ export const useStore = create<State>((set, get) => {
     trackPeaks: [],
     audio: null,
     toast: null,
+    dialog: null,
+    recent: [],
     looping: true,
     loopRegion: null,
     armed: false,
@@ -141,16 +216,29 @@ export const useStore = create<State>((set, get) => {
       b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks }));
       b.onDocument((snap) => applySnapshot(snap));
       b.onMidiActivity(() => set({ midiActivityAt: performance.now() }));
+      b.onCloseRequested(() => void get().requestClose());
+      b.onFileDropped((path) => void get().openPath(path));
+      b.onAudioStatus((e) => {
+        set({ audio: e.status });
+        get().showToast(e.message, !e.status.running);
+      });
       const audio = await b.audioStatus();
       set({ audio });
       if (!audio.running && b.isTauri) get().showToast(`audio: ${audio.error ?? "not running"}`, true);
       void get().refreshMidi();
+      void get().refreshRecent();
+      try {
+        const candidates = await b.recoveryCandidates();
+        if (candidates.length) void offerRecovery(candidates);
+      } catch {
+        /* no recovery backend */
+      }
     },
 
-    async dispatch(command, transient = false) {
+    async dispatch(command, transient = false, label) {
       const b = await getBridge();
       try {
-        applySnapshot(await b.apply(command, transient));
+        applySnapshot(await b.apply(command, transient, label));
       } catch (e) {
         get().showToast(String(e), true);
       }
@@ -300,37 +388,56 @@ export const useStore = create<State>((set, get) => {
 
     async newProject() {
       const b = await getBridge();
-      if (get().snapshot?.dirty && !confirm("Discard unsaved changes?")) return;
+      if (!(await get().confirmDiscard("creating a new project"))) return;
       applySnapshot(await b.newProject(true));
       await syncPlayback();
     },
 
     async openProject() {
       const b = await getBridge();
+      if (!(await get().confirmDiscard("opening another project"))) return;
       const path = await b.pickOpenPath();
       if (!path) return;
       try {
         applySnapshot(await b.openProject(path));
         await syncPlayback();
-        get().showToast(`opened ${path}`);
+        get().showToast(`opened ${fileNameOf(path)}`);
+        void get().refreshRecent();
       } catch (e) {
         get().showToast(String(e), true);
       }
+    },
+
+    async openPath(path) {
+      const b = await getBridge();
+      if (path === get().snapshot?.path && !get().snapshot?.dirty) return;
+      if (!(await get().confirmDiscard(`opening “${fileNameOf(path)}”`))) return;
+      try {
+        applySnapshot(await b.openProject(path));
+        await syncPlayback();
+        get().showToast(`opened ${fileNameOf(path)}`);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+      void get().refreshRecent();
     },
 
     async saveProject(saveAs = false) {
       const b = await getBridge();
       let path: string | undefined;
       if (saveAs || !get().snapshot?.path) {
-        const picked = await b.pickSavePath("untitled.dissonant", "dissonant");
-        if (!picked) return;
+        const picked = await b.pickSavePath(fileNameOf(get().snapshot?.path), "dissonant");
+        if (!picked) return false;
         path = picked;
       }
       try {
         applySnapshot(await b.saveProject(path));
         get().showToast("saved");
+        void get().refreshRecent();
+        return true;
       } catch (e) {
         get().showToast(String(e), true);
+        return false;
       }
     },
 
@@ -358,6 +465,80 @@ export const useStore = create<State>((set, get) => {
       set({ toast: { text, error } });
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => set({ toast: null }), error ? 6000 : 2500);
+    },
+
+    ask(spec) {
+      // One dialog at a time: a new one cancels the previous.
+      dialogResolve?.(spec.cancelValue ?? "cancel");
+      return new Promise<string>((resolve) => {
+        dialogResolve = resolve;
+        set({ dialog: spec });
+      });
+    },
+    answerDialog(value) {
+      const resolve = dialogResolve;
+      dialogResolve = null;
+      set({ dialog: null });
+      resolve?.(value);
+    },
+    async confirm(title, message, okLabel = "OK", danger = false) {
+      const v = await get().ask({
+        title,
+        message,
+        buttons: [
+          { label: okLabel, value: "ok", kind: danger ? "danger" : "primary" },
+          { label: "Cancel", value: "cancel", kind: "quiet" },
+        ],
+        cancelValue: "cancel",
+      });
+      return v === "ok";
+    },
+    async confirmDiscard(what) {
+      const snap = get().snapshot;
+      if (!snap?.dirty) return true;
+      const v = await get().ask({
+        title: "Unsaved changes",
+        message: `“${fileNameOf(snap.path)}” has changes that will be lost by ${what}.`,
+        buttons: [
+          { label: "Save", value: "save", kind: "primary" },
+          { label: "Discard", value: "discard", kind: "danger" },
+          { label: "Cancel", value: "cancel", kind: "quiet" },
+        ],
+        cancelValue: "cancel",
+      });
+      if (v === "save") return get().saveProject(false);
+      return v === "discard";
+    },
+    async requestClose() {
+      const b = await getBridge();
+      const snap = get().snapshot;
+      if (!snap?.dirty) return b.quit();
+      const v = await get().ask({
+        title: "Save before closing?",
+        message: `“${fileNameOf(snap.path)}” has unsaved changes.`,
+        buttons: [
+          { label: "Save", value: "save", kind: "primary" },
+          { label: "Don’t save", value: "discard", kind: "danger" },
+          { label: "Cancel", value: "cancel", kind: "quiet" },
+        ],
+        cancelValue: "cancel",
+      });
+      if (v === "cancel") return;
+      if (v === "save" && !(await get().saveProject(false))) return;
+      await b.quit();
+    },
+    async refreshRecent() {
+      const b = await getBridge();
+      try {
+        set({ recent: await b.recentFiles() });
+      } catch {
+        /* no backend */
+      }
+    },
+    async clearRecent() {
+      const b = await getBridge();
+      await b.clearRecent();
+      set({ recent: [] });
     },
   };
 });

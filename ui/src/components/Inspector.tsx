@@ -95,9 +95,11 @@ export function Inspector() {
                 <button
                   className="ico"
                   title="delete track"
-                  onClick={(e) => {
+                  onClick={async (e) => {
                     e.stopPropagation();
-                    if (confirm(`Delete “${t.name}” and its notes in every pattern?`)) void s.dispatch({ type: "deleteTrack", id: t.id });
+                    if (await s.confirm("Delete track?", `“${t.name}” and its notes in every pattern will be removed.`, "Delete", true)) {
+                      void s.dispatch({ type: "deleteTrack", id: t.id });
+                    }
                   }}
                 >
                   ×
@@ -166,7 +168,16 @@ export function Inspector() {
         <div className="row" style={{ gap: 4 }}>
           <button onClick={() => s.dispatch({ type: "addPattern" })}>+ new</button>
           <button onClick={() => s.dispatch({ type: "duplicatePattern", id: pattern.id })}>dup</button>
-          <button disabled={model.patterns.length <= 1} onClick={() => confirm(`Delete “${pattern.name}”?`) && s.dispatch({ type: "deletePattern", id: pattern.id })}>del</button>
+          <button
+            disabled={model.patterns.length <= 1}
+            onClick={async () => {
+              if (await s.confirm("Delete pattern?", `“${pattern.name}” and its clips in the song will be removed.`, "Delete", true)) {
+                void s.dispatch({ type: "deletePattern", id: pattern.id });
+              }
+            }}
+          >
+            del
+          </button>
         </div>
       </div>
 
@@ -326,17 +337,17 @@ function TransformGrid() {
   const grid = s.noteLength;
   const chords = pattern.chords.chords;
   const tierOf = (n: { pitch: number; startBeat: number }) => tierMap(n.startBeat, chords, key)[((n.pitch % 12) + 12) % 12];
-  const apply = (next: typeof notes) => void s.dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next });
+  const apply = (next: typeof notes, label: string) => void s.dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
   const tools: [string, string, () => void][] = [
-    ["quantize", "snap starts and lengths to the grid", () => apply(quantizeNotes(notes, ids, grid))],
-    ["humanize", "loosen timing and velocity; chord tones stay tighter", () => apply(humanizeNotes(notes, ids, { timing: grid * 0.15, velocity: 12 }, tierOf))],
-    ["legato", "extend each note to the next one", () => apply(legatoNotes(notes, ids))],
-    ["arp ↑", "spread stacked notes into rising grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "up"))],
-    ["arp ↓", "spread stacked notes into falling grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "down"))],
-    ["arp ⇅", "up then down", () => apply(arpeggiateNotes(notes, ids, grid, "updown"))],
-    ["strum", "offset the notes of each stack, low to high", () => apply(strumNotes(notes, ids, grid / 4))],
-    ["chop", "split notes into grid-length pieces", () => apply(chopNotes(notes, ids, grid))],
-    ["arp ?", "random order", () => apply(arpeggiateNotes(notes, ids, grid, "random"))],
+    ["quantize", "snap starts and lengths to the grid", () => apply(quantizeNotes(notes, ids, grid), "quantize")],
+    ["humanize", "loosen timing and velocity; chord tones stay tighter", () => apply(humanizeNotes(notes, ids, { timing: grid * 0.15, velocity: 12 }, tierOf), "humanize")],
+    ["legato", "extend each note to the next one", () => apply(legatoNotes(notes, ids), "legato")],
+    ["arp ↑", "spread stacked notes into rising grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "up"), "arpeggiate")],
+    ["arp ↓", "spread stacked notes into falling grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "down"), "arpeggiate")],
+    ["arp ⇅", "up then down", () => apply(arpeggiateNotes(notes, ids, grid, "updown"), "arpeggiate")],
+    ["strum", "offset the notes of each stack, low to high", () => apply(strumNotes(notes, ids, grid / 4), "strum")],
+    ["chop", "split notes into grid-length pieces", () => apply(chopNotes(notes, ids, grid), "chop")],
+    ["arp ?", "random order", () => apply(arpeggiateNotes(notes, ids, grid, "random"), "arpeggiate")],
   ];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>
@@ -362,7 +373,11 @@ function ResolveKeep({ note }: { note: { id: string; pitch: number; startBeat: n
   const why = explainNote(note.pitch, chords, key, note.startBeat);
   const notes = pattern.notesByTrack[track.id] ?? [];
   const update = (patch: Partial<{ pitch: number; intentional: boolean }>) =>
-    void s.dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: notes.map((n) => (n.id === note.id ? { ...n, ...patch } : n)) });
+    void s.dispatch(
+      { type: "setNotes", patternId: pattern.id, trackId: track.id, notes: notes.map((n) => (n.id === note.id ? { ...n, ...patch } : n)) },
+      false,
+      "pitch" in patch ? "resolve note" : "keep note",
+    );
   const { down, up } = resolveTargets(note.pitch, tiers);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 2 }}>

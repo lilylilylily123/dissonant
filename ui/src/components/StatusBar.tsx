@@ -25,8 +25,11 @@ export function StatusBar() {
       {useStore.getState().armed && <span style={{ color: "var(--rec-text)" }}>● REC</span>}
       {useStore.getState().liveKeyboard !== "off" && <span style={{ color: "var(--accent)" }}>keys: {useStore.getState().liveKeyboard}</span>}
       <span className="spacer" />
-      <span>UNDO {snapshot.canUndo ? "●" : "○"}</span>
-      <span>REDO {snapshot.canRedo ? "●" : "○"}</span>
+      <span title={snapshot.undoLabel ? `undo ${snapshot.undoLabel}` : "nothing to undo"}>
+        UNDO {snapshot.canUndo ? "●" : "○"}
+        {snapshot.undoLabel && <span style={{ color: "var(--text-5)", marginLeft: 4 }}>{snapshot.undoLabel}</span>}
+      </span>
+      <span title={snapshot.redoLabel ? `redo ${snapshot.redoLabel}` : "nothing to redo"}>REDO {snapshot.canRedo ? "●" : "○"}</span>
       <span>{audio?.sampleRate ? `${audio.sampleRate / 1000} kHz` : "—"}</span>
       <span style={{ color: "var(--text-3)" }}>v0.2.0</span>
     </div>

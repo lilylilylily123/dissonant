@@ -57,7 +57,7 @@ const NOTE_SEL: Record<Tier, string> = { chordTone: "#c9ffe9", tension: "#ffe0b8
 const tierColor = (t: Tier | null) => (t ? TIER_COLORS[t] : "#9a9aa4");
 
 type Drag =
-  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; base: NoteEvent[]; lastPitch: number }
+  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate" }
   | { kind: "resize"; ids: Set<string>; anchor: NoteEvent; startX: number; base: NoteEvent[] }
   | { kind: "paint"; base: NoteEvent[] }
   | { kind: "erase"; base: NoteEvent[] }
@@ -124,8 +124,8 @@ export function PianoRoll() {
   const beatForX = (x: number) => (x - GUTTER) / beatW;
 
   const commit = useCallback(
-    (next: NoteEvent[]) => {
-      if (pattern && track) void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next });
+    (next: NoteEvent[], label = "edit notes") => {
+      if (pattern && track) void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
     },
     [dispatch, pattern, track],
   );
@@ -532,7 +532,9 @@ export function PianoRoll() {
       let ids = selection.has(hit.note.id) ? new Set(selection) : new Set([hit.note.id]);
       let base = notes;
       let anchor = hit.note;
+      let origin: "duplicate" | undefined;
       if (e.altKey && !hit.edge) {
+        origin = "duplicate";
         const originals = notes.filter((n) => ids.has(n.id));
         const copies = originals.map((o) => ({ ...o, id: uuid() }));
         base = [...notes, ...copies];
@@ -542,7 +544,7 @@ export function PianoRoll() {
       setSelection(ids);
       dragRef.current = hit.edge
         ? { kind: "resize", ids, anchor, startX: x, base }
-        : { kind: "move", ids, anchor, startX: x, startY: y, base, lastPitch: anchor.pitch };
+        : { kind: "move", ids, anchor, startX: x, startY: y, base, lastPitch: anchor.pitch, origin };
       setPreview(base);
       return;
     }
@@ -567,7 +569,7 @@ export function PianoRoll() {
       const added = stampChord(notes, beat, chord.pitchClasses, pitch, noteLength, noteLength);
       if (!added.length) return;
       for (const a of added) audition(a.pitch, a.velocity);
-      commit([...notes, ...added]);
+      commit([...notes, ...added], "stamp chord");
       setSelection(new Set(added.map((a) => a.id)));
       return;
     }
@@ -581,7 +583,7 @@ export function PianoRoll() {
     const base = [...notes, placed];
     const ids = new Set([placed.id]);
     setSelection(ids);
-    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, base, lastPitch: target };
+    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, base, lastPitch: target, origin: "place" };
     setPreview(base);
   };
 
@@ -673,7 +675,7 @@ export function PianoRoll() {
     }
     const result = preview;
     setPreview(null);
-    if (result && result !== notes) commit(result);
+    if (result && result !== notes) commit(result, dragLabel(d, notes, result));
   };
 
   // Velocity lane: drag a stem (or all selected stems) vertically.
@@ -720,24 +722,24 @@ export function PianoRoll() {
     const grid = noteLength;
 
     if (k === "Backspace" || k === "Delete") {
-      if (selection.size) commit(removeNotes(notes, selection));
+      if (selection.size) commit(removeNotes(notes, selection), "delete notes");
     } else if (mod && k.toLowerCase() === "a") {
       setSelection(new Set(notes.map((n) => n.id)));
     } else if (mod && k.toLowerCase() === "c") {
       clipboard = notes.filter((n) => selection.has(n.id));
     } else if (mod && k.toLowerCase() === "x") {
       clipboard = notes.filter((n) => selection.has(n.id));
-      if (selection.size) commit(removeNotes(notes, selection));
+      if (selection.size) commit(removeNotes(notes, selection), "cut notes");
     } else if (mod && k.toLowerCase() === "v") {
       if (!clipboard.length) return;
       const at = bounds ? snapFloor(bounds.end, grid) : snapFloor(playhead, grid);
       const { notes: next, newIds } = pasteNotes(notes, clipboard, at);
-      commit(next);
+      commit(next, "paste notes");
       setSelection(newIds);
     } else if (mod && k.toLowerCase() === "d") {
       if (!selection.size) return;
       const { notes: next, newIds } = duplicateNotes(notes, selection, grid);
-      commit(next);
+      commit(next, "duplicate notes");
       setSelection(newIds);
     } else if (mod && (k === "=" || k === "+")) {
       setZoom(zoom * 1.25);
@@ -748,9 +750,9 @@ export function PianoRoll() {
     } else if (k.startsWith("Arrow") && selection.size) {
       const dBeats = k === "ArrowLeft" ? -(e.shiftKey ? 4 : grid) : k === "ArrowRight" ? (e.shiftKey ? 4 : grid) : 0;
       const dPitch = k === "ArrowUp" ? (e.shiftKey ? 12 : 1) : k === "ArrowDown" ? -(e.shiftKey ? 12 : 1) : 0;
-      commit(moveNotes(notes, selection, dBeats, dPitch, { min: LOW, max: HIGH }, beats));
+      commit(moveNotes(notes, selection, dBeats, dPitch, { min: LOW, max: HIGH }, beats), dPitch ? "transpose notes" : "nudge notes");
     } else if ((k === "[" || k === "]") && selection.size) {
-      commit(adjustVelocity(notes, selection, k === "]" ? 10 : -10));
+      commit(adjustVelocity(notes, selection, k === "]" ? 10 : -10), "change velocity");
     } else {
       return; // let global shortcuts through
     }
@@ -801,6 +803,30 @@ export function PianoRoll() {
       </div>
     </div>
   );
+}
+
+/** Name a finished drag for the Edit menu. */
+function dragLabel(d: Drag, before: NoteEvent[], after: NoteEvent[]): string {
+  switch (d.kind) {
+    case "move": {
+      if (d.origin === "place") return "place note";
+      if (d.origin === "duplicate") return "duplicate notes";
+      const anchorBefore = before.find((n) => n.id === d.anchor.id);
+      const anchorAfter = after.find((n) => n.id === d.anchor.id);
+      if (anchorBefore && anchorAfter && anchorBefore.pitch !== anchorAfter.pitch && anchorBefore.startBeat === anchorAfter.startBeat) return "transpose notes";
+      return "move notes";
+    }
+    case "resize":
+      return "resize notes";
+    case "paint":
+      return "paint notes";
+    case "erase":
+      return "erase notes";
+    case "velocity":
+      return "change velocity";
+    case "marquee":
+      return "edit notes";
+  }
 }
 
 function gridLabelFor(len: number): string {

@@ -4,6 +4,7 @@
 
 import type {
   AudioStatus,
+  AudioStatusEvent,
   ChordEvent,
   Command,
   MasterSettings,
@@ -12,6 +13,7 @@ import type {
   PlayheadEvent,
   PlayMode,
   ProjectModel,
+  RecoveryCandidate,
   Snapshot,
   Track,
   SongPattern,
@@ -22,7 +24,8 @@ import { normalize, progression, STARTERS } from "./theory";
 export interface Bridge {
   readonly isTauri: boolean;
   getState(): Promise<Snapshot>;
-  apply(command: Command, transient?: boolean): Promise<Snapshot>;
+  /** `label` names the edit for the Edit menu ("move notes"); the command's own name otherwise. */
+  apply(command: Command, transient?: boolean, label?: string): Promise<Snapshot>;
   commitGesture(): Promise<Snapshot>;
   undo(): Promise<Snapshot>;
   redo(): Promise<Snapshot>;
@@ -55,6 +58,22 @@ export interface Bridge {
   setLooping(on: boolean): Promise<void>;
   pickOpenPath(): Promise<string | null>;
   pickSavePath(defaultName: string, extension: string): Promise<string | null>;
+  /** OS window title (file name + dirty mark). */
+  setTitle(title: string): Promise<void>;
+  /** Close the app for real; the backend only asks first while the document is dirty. */
+  quit(): Promise<void>;
+  /** The window's close button was pressed while the document was dirty. */
+  onCloseRequested(cb: () => void): () => void;
+  /** A `.dissonant` file was dropped onto the window. */
+  onFileDropped(cb: (path: string) => void): () => void;
+  /** The audio device changed under us (lost, switched, reappeared). */
+  onAudioStatus(cb: (e: AudioStatusEvent) => void): () => void;
+  recentFiles(): Promise<string[]>;
+  clearRecent(): Promise<void>;
+  recoveryCandidates(): Promise<RecoveryCandidate[]>;
+  restoreAutosave(autosavePath: string): Promise<Snapshot>;
+  discardAutosave(autosavePath: string): Promise<void>;
+  autosaveNow(): Promise<string | null>;
 }
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -64,6 +83,7 @@ const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 async function tauriBridge(): Promise<Bridge> {
   const { invoke } = await import("@tauri-apps/api/core");
   const { listen } = await import("@tauri-apps/api/event");
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
   const dialog = await import("@tauri-apps/plugin-dialog");
 
   const subscribe = <T,>(name: string, cb: (payload: T) => void): (() => void) => {
@@ -82,7 +102,7 @@ async function tauriBridge(): Promise<Bridge> {
   return {
     isTauri: true,
     getState: () => invoke<Snapshot>("get_state"),
-    apply: (command, transient = false) => invoke<Snapshot>("apply", { command, transient }),
+    apply: (command, transient = false, label) => invoke<Snapshot>("apply", { command, transient, label: label ?? null }),
     commitGesture: () => invoke<Snapshot>("commit_gesture"),
     undo: () => invoke<Snapshot>("undo"),
     redo: () => invoke<Snapshot>("redo"),
@@ -127,6 +147,17 @@ async function tauriBridge(): Promise<Bridge> {
       });
       return r ?? null;
     },
+    setTitle: (title) => getCurrentWindow().setTitle(title),
+    quit: () => invoke("quit"),
+    onCloseRequested: (cb) => subscribe<null>("close-requested", () => cb()),
+    onFileDropped: (cb) => subscribe<string>("file-dropped", cb),
+    onAudioStatus: (cb) => subscribe<AudioStatusEvent>("audio-status", cb),
+    recentFiles: () => invoke<string[]>("recent_files"),
+    clearRecent: () => invoke("clear_recent"),
+    recoveryCandidates: () => invoke<RecoveryCandidate[]>("recovery_candidates"),
+    restoreAutosave: (autosavePath) => invoke<Snapshot>("restore_autosave", { autosavePath }),
+    discardAutosave: (autosavePath) => invoke("discard_autosave", { autosavePath }),
+    autosaveNow: () => invoke<string | null>("autosave_now"),
   };
 }
 
@@ -364,7 +395,43 @@ function mockBridge(): Bridge {
   const docListeners = new Set<(s: Snapshot) => void>();
   const midiListeners = new Set<(p: number) => void>();
 
-  const snapshot = (): Snapshot => ({ model: clone(model), canUndo: undo.length > 0 || pending !== null, canRedo: redo.length > 0, dirty, path });
+  const undoLabels: string[] = [];
+  const redoLabels: string[] = [];
+  let pendingLabel = "edit";
+  const closeListeners = new Set<() => void>();
+  const snapshot = (): Snapshot => ({
+    model: clone(model),
+    canUndo: undo.length > 0 || pending !== null,
+    canRedo: redo.length > 0,
+    dirty,
+    path,
+    undoLabel: pending ? pendingLabel : (undoLabels[undoLabels.length - 1] ?? null),
+    redoLabel: redoLabels[redoLabels.length - 1] ?? null,
+  });
+  const defaultLabel = (c: Command) => c.type.replace(/([A-Z])/g, " $1").toLowerCase().trim();
+  const recentKey = "dissonant.mock.recent";
+  const loadRecent = (): string[] => {
+    try {
+      return JSON.parse(localStorage.getItem(recentKey) ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  };
+  const remember = (p: string) => {
+    const list = [p, ...loadRecent().filter((x) => x !== p)].slice(0, 12);
+    try {
+      localStorage.setItem(recentKey, JSON.stringify(list));
+    } catch {
+      /* storage unavailable */
+    }
+  };
+  // The browser stands in for the OS close button.
+  window.addEventListener("beforeunload", (e) => {
+    if (dirty) {
+      e.preventDefault();
+      for (const cb of closeListeners) cb();
+    }
+  });
 
   const loopLength = () => {
     if (mode === "song" && model.clips.length > 0) {
@@ -410,24 +477,34 @@ function mockBridge(): Bridge {
   };
 
   const commitGesture = () => {
-    if (pending && JSON.stringify(pending) !== JSON.stringify(model)) undo.push(pending);
+    if (pending && JSON.stringify(pending) !== JSON.stringify(model)) {
+      undo.push(pending);
+      undoLabels.push(pendingLabel);
+    }
     pending = null;
   };
 
   return {
     isTauri: false,
     getState: async () => snapshot(),
-    apply: async (command, transient = false) => {
+    apply: async (command, transient = false, label) => {
       const before = clone(model);
       const next = clone(model);
       reduce(next, command);
       if (JSON.stringify(next) === JSON.stringify(before)) return snapshot();
-      if (transient) pending ??= before;
-      else {
+      const name = label?.trim() || defaultLabel(command);
+      if (transient) {
+        if (!pending) {
+          pending = before;
+          pendingLabel = name;
+        }
+      } else {
         commitGesture();
         undo.push(before);
+        undoLabels.push(name);
       }
       redo.length = 0;
+      redoLabels.length = 0;
       model = next;
       dirty = true;
       return snapshot();
@@ -441,6 +518,7 @@ function mockBridge(): Bridge {
       const prev = undo.pop();
       if (prev) {
         redo.push(model);
+        redoLabels.push(undoLabels.pop() ?? "edit");
         model = prev;
         dirty = true;
       }
@@ -450,6 +528,7 @@ function mockBridge(): Bridge {
       const next = redo.pop();
       if (next) {
         undo.push(model);
+        undoLabels.push(redoLabels.pop() ?? "edit");
         model = next;
         dirty = true;
       }
@@ -459,6 +538,8 @@ function mockBridge(): Bridge {
       model = starterModel();
       undo.length = 0;
       redo.length = 0;
+      undoLabels.length = 0;
+      redoLabels.length = 0;
       dirty = false;
       path = null;
       beat = 0;
@@ -466,12 +547,18 @@ function mockBridge(): Bridge {
     },
     openProject: async (p) => {
       path = p;
+      remember(p);
       return snapshot();
     },
     saveProject: async (p) => {
       if (p) path = p;
       dirty = false;
-      localStorage.setItem("dissonant.mock.project", JSON.stringify(model));
+      if (path) remember(path);
+      try {
+        localStorage.setItem("dissonant.mock.project", JSON.stringify(model));
+      } catch {
+        /* storage unavailable */
+      }
       return snapshot();
     },
     setPlaybackContext: async (m, pid) => {
@@ -494,9 +581,8 @@ function mockBridge(): Bridge {
     auditionOff: async () => {},
     audioStatus: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
     restartAudio: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
-    exportWav: async (p) => {
-      alert("Export needs the desktop app (Tauri). In the browser mock nothing is rendered.");
-      return p;
+    exportWav: async () => {
+      throw new Error("export needs the desktop app — the browser mock renders nothing");
     },
     onPlayhead: (cb) => {
       listeners.add(cb);
@@ -556,7 +642,32 @@ function mockBridge(): Bridge {
       looping = on;
     },
     pickOpenPath: async () => null,
-    pickSavePath: async (name, ext) => `${name}.${ext}`,
+    pickSavePath: async (name, ext) => (name.endsWith(`.${ext}`) ? name : `${name}.${ext}`),
+    setTitle: async (title) => {
+      document.title = title;
+    },
+    quit: async () => {
+      dirty = false;
+      window.close();
+    },
+    onCloseRequested: (cb) => {
+      closeListeners.add(cb);
+      return () => closeListeners.delete(cb);
+    },
+    onFileDropped: () => () => {},
+    onAudioStatus: () => () => {},
+    recentFiles: async () => loadRecent(),
+    clearRecent: async () => {
+      try {
+        localStorage.removeItem(recentKey);
+      } catch {
+        /* storage unavailable */
+      }
+    },
+    recoveryCandidates: async () => [],
+    restoreAutosave: async () => snapshot(),
+    discardAutosave: async () => {},
+    autosaveNow: async () => null,
   };
 }
 

@@ -9,6 +9,7 @@ export function PatternsPanel() {
   const selectPattern = useStore((s) => s.selectPattern);
   const setMode = useStore((s) => s.setMode);
   const dispatch = useStore((s) => s.dispatch);
+  const confirmDialog = useStore((s) => s.confirm);
   const bpb = useStore(beatsPerBar);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -32,7 +33,12 @@ export function PatternsPanel() {
           <button disabled={!pattern} onClick={() => pattern && dispatch({ type: "duplicatePattern", id: pattern.id })}>dup</button>
           <button
             disabled={!pattern || model.patterns.length <= 1}
-            onClick={() => pattern && confirm(`Delete “${pattern.name}”?`) && dispatch({ type: "deletePattern", id: pattern.id })}
+            onClick={async () => {
+              if (!pattern) return;
+              if (await confirmDialog("Delete pattern?", `“${pattern.name}” and its clips in the song will be removed.`, "Delete", true)) {
+                void dispatch({ type: "deletePattern", id: pattern.id });
+              }
+            }}
           >
             del
           </button>

@@ -3,7 +3,7 @@
 //! undo/redo in one place and re-feeds the engine a fresh [`Sequence`] after every change.
 
 use dissonant_core::{Command, Document, MasterSettings, NoteEvent, ProjectModel, Sequence};
-use dissonant_engine::{render_wav, AudioDevice, EngineCommand, RenderOptions};
+use dissonant_engine::{default_output_name, render_wav, AudioDevice, EngineCommand, RenderOptions};
 use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -22,13 +22,28 @@ pub enum PlayMode {
     Song,
 }
 
-#[derive(Default)]
 struct PlaybackContext {
     mode: PlayMode,
     pattern_id: Option<Uuid>,
     hear_chords: bool,
     /// The track live input (MIDI / typing keyboard) plays and records into.
     live_track: Option<Uuid>,
+    /// Mirrors of engine transport settings, re-sent when the audio device restarts.
+    looping: bool,
+    loop_region: Option<(f64, f64)>,
+}
+
+impl Default for PlaybackContext {
+    fn default() -> Self {
+        PlaybackContext {
+            mode: PlayMode::Pattern,
+            pattern_id: None,
+            hear_chords: false,
+            live_track: None,
+            looping: true,
+            loop_region: None,
+        }
+    }
 }
 
 /// Record-arm state. Held notes are keyed by (track, pitch) with their start beat + velocity.
@@ -50,6 +65,14 @@ pub struct AppState {
     midi_port: Mutex<Option<String>>,
     midi_last_ms: AtomicU64,
     recorder: Mutex<Recorder>,
+    /// Tauri app-data dir (recent files, untitled autosaves). Set once in `setup`.
+    data_dir: Mutex<Option<PathBuf>>,
+    /// Document revision the last autosave captured.
+    autosaved_revision: AtomicU64,
+    /// The autosave file currently on disk for this document, if any.
+    autosave_path: Mutex<Option<PathBuf>>,
+    /// Set by `quit` so the close handler lets the window go.
+    force_close: AtomicBool,
 }
 
 /// What every editing command returns to the UI.
@@ -61,7 +84,37 @@ pub struct Snapshot {
     pub can_redo: bool,
     pub dirty: bool,
     pub path: Option<String>,
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
 }
+
+/// An autosave that may hold work newer than its project file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCandidate {
+    pub autosave_path: String,
+    pub project_path: Option<String>,
+    pub saved_at_ms: u64,
+}
+
+/// The on-disk autosave format: the model plus where it belongs.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutosaveFile {
+    project_path: Option<String>,
+    saved_at_ms: u64,
+    model: ProjectModel,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioStatusEvent {
+    pub status: AudioStatus,
+    pub message: String,
+}
+
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_RECENT: usize = 12;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +131,7 @@ pub struct AudioStatus {
     pub running: bool,
     pub sample_rate: Option<u32>,
     pub error: Option<String>,
+    pub device_name: Option<String>,
 }
 
 impl AppState {
@@ -92,6 +146,10 @@ impl AppState {
             midi_port: Mutex::new(None),
             midi_last_ms: AtomicU64::new(0),
             recorder: Mutex::new(Recorder::default()),
+            data_dir: Mutex::new(None),
+            autosaved_revision: AtomicU64::new(0),
+            autosave_path: Mutex::new(None),
+            force_close: AtomicBool::new(false),
         }
     }
 
@@ -115,7 +173,191 @@ impl AppState {
             can_redo: doc.can_redo(),
             dirty: doc.is_dirty(),
             path: doc.path.as_ref().map(|p| p.display().to_string()),
+            undo_label: doc.undo_label().map(str::to_string),
+            redo_label: doc.redo_label().map(str::to_string),
         }
+    }
+
+    fn audio_status(&self) -> AudioStatus {
+        let audio = self.audio.lock().unwrap();
+        AudioStatus {
+            running: audio.is_some(),
+            sample_rate: audio.as_ref().map(|a| a.sample_rate),
+            error: self.audio_error.lock().unwrap().clone(),
+            device_name: audio.as_ref().map(|a| a.device_name.clone()),
+        }
+    }
+
+    /// Re-send the transport settings the engine forgets when its device is rebuilt.
+    fn resend_transport(&self) {
+        let (hear_chords, looping, loop_region) = {
+            let ctx = self.playback.lock().unwrap();
+            (ctx.hear_chords, ctx.looping, ctx.loop_region)
+        };
+        self.send(EngineCommand::SetHearChords(hear_chords));
+        self.send(EngineCommand::SetLooping(looping));
+        match loop_region {
+            Some((start, end)) => self.send(EngineCommand::SetLoop { start, end }),
+            None => self.send(EngineCommand::ClearLoop),
+        }
+    }
+
+    /// Tear the device down and open the current default again, keeping the transport where
+    /// it was. Returns the new status.
+    fn restart_audio(&self) -> AudioStatus {
+        let was = self.engine_position();
+        *self.audio.lock().unwrap() = None;
+        self.start_audio();
+        self.sync_engine();
+        self.resend_transport();
+        if let Some((beat, playing)) = was {
+            self.send(EngineCommand::Seek { beat });
+            if playing {
+                self.send(EngineCommand::Play);
+            }
+        }
+        self.audio_status()
+    }
+
+    // ── Files on disk: recent list and autosave ───────────────────────────────────────────
+
+    fn data_dir(&self) -> Option<PathBuf> {
+        self.data_dir.lock().unwrap().clone()
+    }
+
+    fn recent_path(&self) -> Option<PathBuf> {
+        self.data_dir().map(|d| d.join("recent.json"))
+    }
+
+    fn load_recent(&self) -> Vec<String> {
+        let Some(path) = self.recent_path() else { return vec![] };
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_recent(&self, list: &[String]) {
+        if let Some(path) = self.recent_path() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(list) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
+    fn remember_recent(&self, file: &std::path::Path) {
+        let shown = file.display().to_string();
+        let mut list = self.load_recent();
+        list.retain(|p| p != &shown);
+        list.insert(0, shown);
+        list.truncate(MAX_RECENT);
+        self.save_recent(&list);
+    }
+
+    /// Where this document's autosave goes: next to the project, or in app data for untitled.
+    fn autosave_target(&self, project: Option<&std::path::Path>) -> Option<PathBuf> {
+        match project {
+            Some(p) => Some(autosave_path_for(p)),
+            None => self.data_dir().map(|d| d.join("autosave").join("untitled.autosave.json")),
+        }
+    }
+
+    /// Write an autosave if the document changed since the last one. Returns the path written.
+    fn autosave(&self) -> Option<PathBuf> {
+        let (json, path, revision) = {
+            let doc = self.doc.lock().unwrap();
+            if !doc.is_dirty() || doc.revision() == self.autosaved_revision.load(Ordering::Relaxed) {
+                return None;
+            }
+            let target = self.autosave_target(doc.path.as_deref())?;
+            let file = AutosaveFile {
+                project_path: doc.path.as_ref().map(|p| p.display().to_string()),
+                saved_at_ms: now_ms(),
+                model: doc.model().clone(),
+            };
+            (serde_json::to_string(&file).ok()?, target, doc.revision())
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            log::warn!("autosave failed: {}", path.display());
+            return None;
+        }
+        self.autosaved_revision.store(revision, Ordering::Relaxed);
+        *self.autosave_path.lock().unwrap() = Some(path.clone());
+        Some(path)
+    }
+
+    /// Delete this document's autosave (after a real save, or when the document is replaced).
+    fn clear_autosave(&self) {
+        if let Some(path) = self.autosave_path.lock().unwrap().take() {
+            let _ = std::fs::remove_file(path);
+        }
+        let revision = self.doc.lock().unwrap().revision();
+        self.autosaved_revision.store(revision, Ordering::Relaxed);
+    }
+
+    /// Autosaves lying around from an earlier run: the untitled slot plus one next to any
+    /// recent project, when it is newer than the project itself.
+    fn recovery_candidates(&self) -> Vec<RecoveryCandidate> {
+        let mut out = Vec::new();
+        let mut consider = |autosave: PathBuf| {
+            let Ok(json) = std::fs::read_to_string(&autosave) else { return };
+            let Ok(file) = serde_json::from_str::<AutosaveFile>(&json) else { return };
+            if let Some(project) = &file.project_path {
+                // Skip autosaves older than the project they belong to (a stale leftover).
+                let project_ms = std::fs::metadata(project)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64);
+                if matches!(project_ms, Some(ms) if ms >= file.saved_at_ms) {
+                    let _ = std::fs::remove_file(&autosave);
+                    return;
+                }
+            }
+            out.push(RecoveryCandidate {
+                autosave_path: autosave.display().to_string(),
+                project_path: file.project_path,
+                saved_at_ms: file.saved_at_ms,
+            });
+        };
+        if let Some(untitled) = self.autosave_target(None) {
+            if untitled.exists() {
+                consider(untitled);
+            }
+        }
+        for recent in self.load_recent() {
+            let path = autosave_path_for(std::path::Path::new(&recent));
+            if path.exists() {
+                consider(path);
+            }
+        }
+        out.sort_by_key(|c| std::cmp::Reverse(c.saved_at_ms));
+        out
+    }
+
+    /// Replace the document and forget the previous one's autosave.
+    fn load_model(&self, model: ProjectModel, path: Option<PathBuf>, keep_dirty: bool) {
+        self.clear_autosave();
+        {
+            let mut doc = self.doc.lock().unwrap();
+            if keep_dirty {
+                doc.restore(model, path);
+            } else {
+                doc.replace(model, path);
+            }
+        }
+        self.playback.lock().unwrap().pattern_id = None;
+        self.send(EngineCommand::Stop);
+        self.send(EngineCommand::Seek { beat: 0.0 });
+        self.sync_engine();
     }
 
     fn send(&self, cmd: EngineCommand) {
@@ -153,6 +395,13 @@ impl AppState {
     }
 }
 
+/// `song.dissonant` → `song.dissonant.autosave.json`, next to the project.
+fn autosave_path_for(project: &std::path::Path) -> PathBuf {
+    let mut name = project.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "project".into());
+    name.push(".autosave.json");
+    project.with_file_name(name)
+}
+
 fn build_sequence(model: &ProjectModel, mode: PlayMode, pattern_id: Option<Uuid>) -> Sequence {
     match mode {
         PlayMode::Song if !model.clips.is_empty() => Sequence::from_song(model),
@@ -174,12 +423,12 @@ fn get_state(state: State<'_, AppState>) -> Snapshot {
 }
 
 #[tauri::command]
-fn apply(state: State<'_, AppState>, command: Command, transient: Option<bool>) -> Result<Snapshot, String> {
+fn apply(state: State<'_, AppState>, command: Command, transient: Option<bool>, label: Option<String>) -> Result<Snapshot, String> {
     state
         .doc
         .lock()
         .unwrap()
-        .apply(command, transient.unwrap_or(false))
+        .apply_labeled(command, transient.unwrap_or(false), label)
         .map_err(|e| e.to_string())?;
     state.sync_engine();
     Ok(state.snapshot())
@@ -212,11 +461,7 @@ fn new_project(state: State<'_, AppState>, starter: Option<bool>) -> Snapshot {
     } else {
         ProjectModel::empty()
     };
-    state.doc.lock().unwrap().replace(model, None);
-    state.playback.lock().unwrap().pattern_id = None;
-    state.send(EngineCommand::Stop);
-    state.send(EngineCommand::Seek { beat: 0.0 });
-    state.sync_engine();
+    state.load_model(model, None, false);
     state.snapshot()
 }
 
@@ -224,11 +469,9 @@ fn new_project(state: State<'_, AppState>, starter: Option<bool>) -> Snapshot {
 fn open_project(state: State<'_, AppState>, path: String) -> Result<Snapshot, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))?;
     let model = ProjectModel::from_json(&json).map_err(|e| format!("not a dissonant project: {e}"))?;
-    state.doc.lock().unwrap().replace(model, Some(PathBuf::from(&path)));
-    state.playback.lock().unwrap().pattern_id = None;
-    state.send(EngineCommand::Stop);
-    state.send(EngineCommand::Seek { beat: 0.0 });
-    state.sync_engine();
+    let file = PathBuf::from(&path);
+    state.remember_recent(&file);
+    state.load_model(model, Some(file), false);
     Ok(state.snapshot())
 }
 
@@ -241,10 +484,62 @@ fn save_project(state: State<'_, AppState>, path: Option<String>) -> Result<Snap
     };
     let json = doc.model().to_json().map_err(|e| e.to_string())?;
     std::fs::write(&target, json).map_err(|e| format!("could not write {}: {e}", target.display()))?;
-    doc.path = Some(target);
+    doc.path = Some(target.clone());
     doc.mark_saved();
     drop(doc);
+    state.remember_recent(&target);
+    state.clear_autosave();
+    // A stale autosave next to the file would otherwise be offered on the next launch.
+    let _ = std::fs::remove_file(autosave_path_for(&target));
     Ok(state.snapshot())
+}
+
+// ─── Window, recent files, recovery ─────────────────────────────────────────────────────────
+
+/// Close the app for real (the close handler asks first while the document is dirty).
+#[tauri::command]
+fn quit(app: AppHandle, state: State<'_, AppState>) {
+    state.force_close.store(true, Ordering::SeqCst);
+    state.clear_autosave();
+    app.exit(0);
+}
+
+#[tauri::command]
+fn recent_files(state: State<'_, AppState>) -> Vec<String> {
+    state.load_recent().into_iter().filter(|p| std::path::Path::new(p).exists()).collect()
+}
+
+#[tauri::command]
+fn clear_recent(state: State<'_, AppState>) {
+    state.save_recent(&[]);
+}
+
+#[tauri::command]
+fn recovery_candidates(state: State<'_, AppState>) -> Vec<RecoveryCandidate> {
+    state.recovery_candidates()
+}
+
+/// Load an autosave as the current (dirty) document, bound to its original path if it had one.
+#[tauri::command]
+fn restore_autosave(state: State<'_, AppState>, autosave_path: String) -> Result<Snapshot, String> {
+    let json = std::fs::read_to_string(&autosave_path).map_err(|e| format!("could not read autosave: {e}"))?;
+    let file: AutosaveFile = serde_json::from_str(&json).map_err(|e| format!("not an autosave: {e}"))?;
+    let path = file.project_path.map(PathBuf::from);
+    state.load_model(file.model.normalized(), path, true);
+    // The restored document now owns this autosave file.
+    *state.autosave_path.lock().unwrap() = Some(PathBuf::from(autosave_path));
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn discard_autosave(autosave_path: String) {
+    let _ = std::fs::remove_file(autosave_path);
+}
+
+/// Write the autosave now (the UI calls this before risky operations; the timer covers the rest).
+#[tauri::command]
+fn autosave_now(state: State<'_, AppState>) -> Option<String> {
+    state.autosave().map(|p| p.display().to_string())
 }
 
 // ─── Transport ───────────────────────────────────────────────────────────────────────────────
@@ -300,20 +595,12 @@ fn audition_off(state: State<'_, AppState>, track_id: Uuid, pitch: u8) {
 
 #[tauri::command]
 fn audio_status(state: State<'_, AppState>) -> AudioStatus {
-    let audio = state.audio.lock().unwrap();
-    AudioStatus {
-        running: audio.is_some(),
-        sample_rate: audio.as_ref().map(|a| a.sample_rate),
-        error: state.audio_error.lock().unwrap().clone(),
-    }
+    state.audio_status()
 }
 
 #[tauri::command]
 fn restart_audio(state: State<'_, AppState>) -> AudioStatus {
-    *state.audio.lock().unwrap() = None;
-    state.start_audio();
-    state.sync_engine();
-    audio_status(state)
+    state.restart_audio()
 }
 
 // ─── Live input: MIDI + typing keyboard, with record-arm ──────────────────────────────────
@@ -483,16 +770,19 @@ fn note_off(app: AppHandle, pitch: u8) {
 
 #[tauri::command]
 fn set_loop(state: State<'_, AppState>, start: f64, end: f64) {
+    state.playback.lock().unwrap().loop_region = if end > start { Some((start, end)) } else { None };
     state.send(EngineCommand::SetLoop { start, end });
 }
 
 #[tauri::command]
 fn clear_loop(state: State<'_, AppState>) {
+    state.playback.lock().unwrap().loop_region = None;
     state.send(EngineCommand::ClearLoop);
 }
 
 #[tauri::command]
 fn set_looping(state: State<'_, AppState>, on: bool) {
+    state.playback.lock().unwrap().looping = on;
     state.send(EngineCommand::SetLooping(on));
 }
 
@@ -574,6 +864,71 @@ fn spawn_playhead_emitter(app: AppHandle) {
         .expect("playhead thread");
 }
 
+/// Watches the output device: restarts on the new default when the stream errors (device
+/// unplugged) or the system default changes (headphones plugged in), and keeps retrying while
+/// no device is available. Tells the UI through the `audio-status` event.
+fn spawn_audio_watchdog(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("dissonant-audio-watchdog".into())
+        .spawn(move || {
+            let mut last_attempt = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(1000));
+                let state = app.state::<AppState>();
+                let (running, failed, current) = {
+                    let audio = state.audio.lock().unwrap();
+                    (
+                        audio.is_some(),
+                        audio.as_ref().map(|a| a.has_failed()).unwrap_or(false),
+                        audio.as_ref().map(|a| a.device_name.clone()),
+                    )
+                };
+                let default = default_output_name();
+                let reason = if failed {
+                    Some("audio device lost".to_string())
+                } else if running && default.is_some() && default != current {
+                    Some(format!("output switched to {}", default.clone().unwrap_or_default()))
+                } else if !running && default.is_some() && last_attempt.elapsed() >= Duration::from_secs(3) {
+                    Some("audio device available".to_string())
+                } else {
+                    None
+                };
+                let Some(reason) = reason else { continue };
+                last_attempt = std::time::Instant::now();
+                log::info!("{reason}: restarting audio");
+                let status = state.restart_audio();
+                let message = if status.running {
+                    format!("{reason} — now on {}", status.device_name.clone().unwrap_or_default())
+                } else {
+                    format!("{reason} — {}", status.error.clone().unwrap_or_else(|| "no output".into()))
+                };
+                let _ = app.emit("audio-status", AudioStatusEvent { status, message });
+            }
+        })
+        .expect("audio watchdog thread");
+}
+
+/// Writes `<project>.autosave.json` while the document is dirty and changing.
+fn spawn_autosaver(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("dissonant-autosave".into())
+        .spawn(move || {
+            let mut last_write = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_secs(5));
+                if last_write.elapsed() < AUTOSAVE_INTERVAL {
+                    continue;
+                }
+                let state = app.state::<AppState>();
+                if let Some(path) = state.autosave() {
+                    log::debug!("autosaved to {}", path.display());
+                    last_write = std::time::Instant::now();
+                }
+            }
+        })
+        .expect("autosave thread");
+}
+
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -582,10 +937,44 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             let state = app.state::<AppState>();
+            match app.path().app_data_dir() {
+                Ok(dir) => {
+                    let _ = std::fs::create_dir_all(&dir);
+                    *state.data_dir.lock().unwrap() = Some(dir);
+                }
+                Err(e) => log::warn!("no app data dir: {e}"),
+            }
             state.start_audio();
             state.sync_engine();
             spawn_playhead_emitter(app.handle().clone());
+            spawn_audio_watchdog(app.handle().clone());
+            spawn_autosaver(app.handle().clone());
             Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                let state = window.state::<AppState>();
+                let dirty = state.doc.lock().unwrap().is_dirty();
+                if dirty && !state.force_close.load(Ordering::SeqCst) {
+                    // Keep the window; the UI asks save / discard / cancel and calls `quit`.
+                    api.prevent_close();
+                    let _ = window.emit("close-requested", ());
+                } else {
+                    state.clear_autosave();
+                }
+            }
+            WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
+                let project = paths.iter().find(|p| {
+                    matches!(
+                        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+                        Some("dissonant") | Some("json")
+                    )
+                });
+                if let Some(p) = project {
+                    let _ = window.emit("file-dropped", p.display().to_string());
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -616,6 +1005,13 @@ pub fn run() {
             set_loop,
             clear_loop,
             set_looping,
+            quit,
+            recent_files,
+            clear_recent,
+            recovery_candidates,
+            restore_autosave,
+            discard_autosave,
+            autosave_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

@@ -136,6 +136,21 @@ export interface Snapshot {
   canRedo: boolean;
   dirty: boolean;
   path: string | null;
+  /** What the next undo reverts ("move notes"). */
+  undoLabel: string | null;
+  redoLabel: string | null;
+}
+
+/** An autosave from an earlier run that may hold unsaved work. */
+export interface RecoveryCandidate {
+  autosavePath: string;
+  projectPath: string | null;
+  savedAtMs: number;
+}
+
+export function fileNameOf(path: string | null | undefined, fallback = "untitled.dissonant"): string {
+  if (!path) return fallback;
+  return path.split(/[\\/]/).pop() || fallback;
 }
 
 export type TrackParam = "volume" | "reverbSend" | "tone" | "pan";
@@ -181,6 +196,12 @@ export interface AudioStatus {
   running: boolean;
   sampleRate: number | null;
   error: string | null;
+  deviceName?: string | null;
+}
+
+export interface AudioStatusEvent {
+  status: AudioStatus;
+  message: string;
 }
 
 export interface MidiStatus {

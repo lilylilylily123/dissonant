@@ -75,15 +75,24 @@ pub enum EditError {
     NoSuchSection,
 }
 
+/// One undo step: the model before the edit, and what the edit was ("move notes").
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    model: ProjectModel,
+    label: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Document {
     model: ProjectModel,
-    undo: Vec<ProjectModel>,
-    redo: Vec<ProjectModel>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
     /// Snapshot taken at the start of a transient gesture, pushed to `undo` when it ends.
-    pending: Option<ProjectModel>,
+    pending: Option<HistoryEntry>,
     pub path: Option<std::path::PathBuf>,
     dirty: bool,
+    /// Bumps on every change to the model (edits, undo, redo, replace). Autosave compares it.
+    revision: u64,
 }
 
 const MAX_UNDO: usize = 200;
@@ -97,6 +106,7 @@ impl Document {
             pending: None,
             path: None,
             dirty: false,
+            revision: 0,
         }
     }
 
@@ -120,10 +130,36 @@ impl Document {
         !self.redo.is_empty()
     }
 
+    /// What the next undo would revert ("move notes"), if anything.
+    pub fn undo_label(&self) -> Option<&str> {
+        self.pending
+            .as_ref()
+            .map(|e| e.label.as_str())
+            .or_else(|| self.undo.last().map(|e| e.label.as_str()))
+    }
+
+    /// What the next redo would re-apply, if anything.
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|e| e.label.as_str())
+    }
+
+    /// Monotonic change counter; two equal revisions mean the model has not changed.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Apply a command. `transient` edits (slider drags) don't create their own undo step;
     /// the first one in a run snapshots the model and the next non-transient command (or
     /// [`Document::commit_gesture`]) turns that snapshot into a single undo entry.
     pub fn apply(&mut self, command: Command, transient: bool) -> Result<(), EditError> {
+        self.apply_labeled(command, transient, None)
+    }
+
+    /// [`Document::apply`] with an explicit undo label. The UI knows *what* an edit was
+    /// ("resize notes") better than the command does ("edit notes"); when it does not say,
+    /// [`Command::label`] is used.
+    pub fn apply_labeled(&mut self, command: Command, transient: bool, label: Option<String>) -> Result<(), EditError> {
+        let label = label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| command.label());
         let before = self.model.clone();
         let mut next = self.model.clone();
         apply_to(&mut next, command)?;
@@ -132,23 +168,23 @@ impl Document {
         }
         if transient {
             if self.pending.is_none() {
-                self.pending = Some(before);
+                self.pending = Some(HistoryEntry { model: before, label });
             }
         } else {
             self.commit_gesture();
-            self.push_undo(before);
+            self.push_undo(HistoryEntry { model: before, label });
         }
         self.redo.clear();
         self.model = next;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
     /// End a run of transient edits, making it one undo step.
     pub fn commit_gesture(&mut self) {
-        if let Some(snapshot) = self.pending.take() {
-            if snapshot != self.model {
-                self.push_undo(snapshot);
+        if let Some(entry) = self.pending.take() {
+            if entry.model != self.model {
+                self.push_undo(entry);
             }
         }
     }
@@ -156,9 +192,10 @@ impl Document {
     pub fn undo(&mut self) -> bool {
         self.commit_gesture();
         match self.undo.pop() {
-            Some(previous) => {
-                self.redo.push(std::mem::replace(&mut self.model, previous));
-                self.dirty = true;
+            Some(entry) => {
+                let current = std::mem::replace(&mut self.model, entry.model);
+                self.redo.push(HistoryEntry { model: current, label: entry.label });
+                self.touch();
                 true
             }
             None => false,
@@ -168,9 +205,10 @@ impl Document {
     pub fn redo(&mut self) -> bool {
         self.commit_gesture();
         match self.redo.pop() {
-            Some(next) => {
-                self.undo.push(std::mem::replace(&mut self.model, next));
-                self.dirty = true;
+            Some(entry) => {
+                let current = std::mem::replace(&mut self.model, entry.model);
+                self.undo.push(HistoryEntry { model: current, label: entry.label });
+                self.touch();
                 true
             }
             None => false,
@@ -185,13 +223,70 @@ impl Document {
         self.pending = None;
         self.path = path;
         self.dirty = false;
+        self.revision += 1;
     }
 
-    fn push_undo(&mut self, snapshot: ProjectModel) {
-        self.undo.push(snapshot);
+    /// Replace the model but keep it marked dirty — used when restoring an autosave, which is
+    /// by definition unsaved work.
+    pub fn restore(&mut self, model: ProjectModel, path: Option<std::path::PathBuf>) {
+        self.replace(model, path);
+        self.dirty = true;
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    fn push_undo(&mut self, entry: HistoryEntry) {
+        self.undo.push(entry);
         if self.undo.len() > MAX_UNDO {
             self.undo.remove(0);
         }
+    }
+}
+
+impl Command {
+    /// A short, lower-case description for the Edit menu ("Undo set tempo").
+    pub fn label(&self) -> String {
+        use Command::*;
+        match self {
+            SetTempo { .. } => "set tempo",
+            SetKey { .. } => "set key",
+            AddTrack { is_drum: true } => "add drum track",
+            AddTrack { .. } => "add track",
+            DeleteTrack { .. } => "delete track",
+            RenameTrack { .. } => "rename track",
+            SetTrackMuted { muted: true, .. } => "mute track",
+            SetTrackMuted { .. } => "unmute track",
+            SetTrackSoloed { soloed: true, .. } => "solo track",
+            SetTrackSoloed { .. } => "unsolo track",
+            MoveTrack { .. } => "reorder tracks",
+            SetTrackVoice { .. } => "change instrument",
+            SetTrackParam { param, .. } => match param {
+                TrackParam::Volume => "change volume",
+                TrackParam::ReverbSend => "change reverb send",
+                TrackParam::Tone => "change tone",
+                TrackParam::Pan => "change pan",
+            },
+            SetTrackColor { .. } => "color track",
+            AddPattern => "add pattern",
+            DuplicatePattern { .. } => "duplicate pattern",
+            DeletePattern { .. } => "delete pattern",
+            RenamePattern { .. } => "rename pattern",
+            SetPatternLength { .. } => "change pattern length",
+            SetNotes { .. } => "edit notes",
+            SetChords { .. } => "edit chords",
+            AddClip { .. } => "add clip",
+            UpdateClip { .. } => "edit clip",
+            RemoveClip { .. } => "remove clip",
+            AddSection { .. } => "add section",
+            UpdateSection { .. } => "edit section",
+            RemoveSection { .. } => "remove section",
+            SetMaster { .. } => "change master",
+            SetTimeSignature { .. } => "set time signature",
+        }
+        .to_string()
     }
 }
 
@@ -616,6 +711,55 @@ mod tests {
         assert_eq!(d.model().time_signature.beats_per_bar(), 3.5);
         assert_eq!(d.apply(Command::SetTimeSignature { numerator: 0, denominator: 4 }, false), Err(EditError::InvalidValue));
         assert_eq!(d.apply(Command::SetTimeSignature { numerator: 4, denominator: 3 }, false), Err(EditError::InvalidValue));
+    }
+
+    #[test]
+    fn undo_labels_follow_the_history() {
+        let mut d = doc();
+        assert_eq!(d.undo_label(), None);
+        d.apply(Command::SetTempo { bpm: 90.0 }, false).unwrap();
+        assert_eq!(d.undo_label(), Some("set tempo"));
+        let (pid, tid) = (d.model().patterns[0].id, d.model().tracks[0].id);
+        d.apply_labeled(
+            Command::SetNotes { pattern_id: pid, track_id: tid, notes: vec![NoteEvent::new(0.0, 1.0, 60)] },
+            false,
+            Some("place note".into()),
+        )
+        .unwrap();
+        assert_eq!(d.undo_label(), Some("place note"));
+        assert_eq!(d.redo_label(), None);
+        d.undo();
+        assert_eq!(d.undo_label(), Some("set tempo"));
+        assert_eq!(d.redo_label(), Some("place note"));
+        d.redo();
+        assert_eq!(d.undo_label(), Some("place note"));
+        // A transient gesture carries its label while it is still open.
+        let id = tid;
+        d.apply(Command::SetTrackParam { id, param: TrackParam::Pan, value: 0.3 }, true).unwrap();
+        assert_eq!(d.undo_label(), Some("change pan"));
+        d.commit_gesture();
+        assert_eq!(d.undo_label(), Some("change pan"));
+        // An empty label falls back to the command's own.
+        d.apply_labeled(Command::SetTempo { bpm: 95.0 }, false, Some("  ".into())).unwrap();
+        assert_eq!(d.undo_label(), Some("set tempo"));
+    }
+
+    #[test]
+    fn revision_bumps_on_every_change_and_restore_stays_dirty() {
+        let mut d = doc();
+        let r0 = d.revision();
+        d.apply(Command::SetTempo { bpm: 120.0 }, false).unwrap(); // no-op
+        assert_eq!(d.revision(), r0);
+        d.apply(Command::SetTempo { bpm: 99.0 }, false).unwrap();
+        assert!(d.revision() > r0);
+        let r1 = d.revision();
+        d.undo();
+        assert!(d.revision() > r1);
+        d.mark_saved();
+        assert!(!d.is_dirty());
+        d.restore(ProjectModel::starter(), None);
+        assert!(d.is_dirty());
+        assert!(!d.can_undo());
     }
 
     #[test]

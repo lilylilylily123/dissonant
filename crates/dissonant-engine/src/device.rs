@@ -25,8 +25,26 @@ pub struct AudioDevice {
     producer: Mutex<rtrb::Producer<EngineCommand>>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
+    /// Set from the stream's error callback (device unplugged, format lost). The application
+    /// polls it and restarts on the current default device.
+    failed: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     pub sample_rate: u32,
+    /// Name of the device the stream was opened on.
+    pub device_name: String,
+}
+
+/// The name of the host's current default output device, if any.
+pub fn default_output_name() -> Option<String> {
+    let device = cpal::default_host().default_output_device()?;
+    Some(device_name(&device))
+}
+
+fn device_name(device: &cpal::Device) -> String {
+    device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "output".into())
 }
 
 impl AudioDevice {
@@ -35,21 +53,23 @@ impl AudioDevice {
         let (producer, consumer) = rtrb::RingBuffer::<EngineCommand>::new(1024);
         let shared = Arc::new(Shared::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<u32, DeviceError>>();
+        let failed = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, String), DeviceError>>();
 
         let thread_shared = shared.clone();
         let thread_stop = stop.clone();
+        let thread_failed = failed.clone();
         let thread = std::thread::Builder::new()
             .name("dissonant-audio".into())
             .spawn(move || {
-                let result = build_stream(consumer, thread_shared, master);
+                let result = build_stream(consumer, thread_shared, master, thread_failed);
                 match result {
-                    Ok((stream, sample_rate)) => {
+                    Ok((stream, sample_rate, name)) => {
                         if let Err(e) = stream.play() {
                             let _ = ready_tx.send(Err(DeviceError::Cpal(e.to_string())));
                             return;
                         }
-                        let _ = ready_tx.send(Ok(sample_rate));
+                        let _ = ready_tx.send(Ok((sample_rate, name)));
                         while !thread_stop.load(Ordering::Relaxed) {
                             std::thread::park_timeout(std::time::Duration::from_millis(250));
                         }
@@ -62,7 +82,7 @@ impl AudioDevice {
             })
             .map_err(|e| DeviceError::Cpal(e.to_string()))?;
 
-        let sample_rate = ready_rx
+        let (sample_rate, device_name) = ready_rx
             .recv()
             .map_err(|_| DeviceError::Cpal("audio thread died".into()))??;
 
@@ -70,13 +90,20 @@ impl AudioDevice {
             producer: Mutex::new(producer),
             shared,
             stop,
+            failed,
             thread: Some(thread),
             sample_rate,
+            device_name,
         })
     }
 
     pub fn shared(&self) -> &Arc<Shared> {
         &self.shared
+    }
+
+    /// True once the stream reported an error (e.g. the device went away).
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
     }
 
     pub fn send(&self, cmd: EngineCommand) -> Result<(), DeviceError> {
@@ -99,9 +126,11 @@ fn build_stream(
     consumer: rtrb::Consumer<EngineCommand>,
     shared: Arc<Shared>,
     master: MasterSettings,
-) -> Result<(cpal::Stream, u32), DeviceError> {
+    failed: Arc<AtomicBool>,
+) -> Result<(cpal::Stream, u32, String), DeviceError> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or(DeviceError::NoDevice)?;
+    let name = device_name(&device);
     let config = device
         .default_output_config()
         .map_err(|e| DeviceError::Cpal(e.to_string()))?;
@@ -112,13 +141,13 @@ fn build_stream(
     let engine = Engine::new(sample_rate as f32, shared, &master);
 
     let stream = match format {
-        SampleFormat::F32 => make_stream::<f32>(&device, &stream_config, channels, engine, consumer),
-        SampleFormat::I16 => make_stream::<i16>(&device, &stream_config, channels, engine, consumer),
-        SampleFormat::U16 => make_stream::<u16>(&device, &stream_config, channels, engine, consumer),
-        SampleFormat::I32 => make_stream::<i32>(&device, &stream_config, channels, engine, consumer),
+        SampleFormat::F32 => make_stream::<f32>(&device, &stream_config, channels, engine, consumer, failed),
+        SampleFormat::I16 => make_stream::<i16>(&device, &stream_config, channels, engine, consumer, failed),
+        SampleFormat::U16 => make_stream::<u16>(&device, &stream_config, channels, engine, consumer, failed),
+        SampleFormat::I32 => make_stream::<i32>(&device, &stream_config, channels, engine, consumer, failed),
         other => return Err(DeviceError::Cpal(format!("unsupported sample format {other:?}"))),
     }?;
-    Ok((stream, sample_rate))
+    Ok((stream, sample_rate, name))
 }
 
 fn make_stream<T>(
@@ -127,6 +156,7 @@ fn make_stream<T>(
     channels: usize,
     mut engine: Engine,
     mut consumer: rtrb::Consumer<EngineCommand>,
+    failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, DeviceError>
 where
     T: SizedSample + cpal::FromSample<f32>,
@@ -158,7 +188,10 @@ where
                     }
                 }
             },
-            |err| log::error!("audio stream error: {err}"),
+            move |err| {
+                log::error!("audio stream error: {err}");
+                failed.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| DeviceError::Cpal(e.to_string()))
