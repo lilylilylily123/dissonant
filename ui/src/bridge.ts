@@ -14,6 +14,7 @@ import type {
   Snapshot,
   Track,
   SongPattern,
+  TrackParam,
 } from "./types";
 import { uuid } from "./types";
 import { normalize, progression, STARTERS } from "./theory";
@@ -33,7 +34,8 @@ export interface Bridge {
   stop(): Promise<void>;
   seek(beat: number): Promise<void>;
   setHearChords(on: boolean): Promise<void>;
-  audition(trackId: string, pitch: number, velocity?: number): Promise<void>;
+  /** `seconds` is how long the note is held before its automatic release. */
+  audition(trackId: string, pitch: number, velocity?: number, seconds?: number): Promise<void>;
   auditionOff(trackId: string, pitch: number): Promise<void>;
   audioStatus(): Promise<AudioStatus>;
   restartAudio(): Promise<AudioStatus>;
@@ -67,7 +69,7 @@ async function tauriBridge(): Promise<Bridge> {
     stop: () => invoke("transport_stop"),
     seek: (beat) => invoke("transport_seek", { beat }),
     setHearChords: (on) => invoke("set_hear_chords", { on }),
-    audition: (trackId, pitch, velocity = 100) => invoke("audition", { trackId, pitch, velocity }),
+    audition: (trackId, pitch, velocity = 100, seconds) => invoke("audition", { trackId, pitch, velocity, seconds }),
     auditionOff: (trackId, pitch) => invoke("audition_off", { trackId, pitch }),
     audioStatus: () => invoke<AudioStatus>("audio_status"),
     restartAudio: () => invoke<AudioStatus>("restart_audio"),
@@ -104,126 +106,177 @@ async function tauriBridge(): Promise<Bridge> {
 
 // ─── Browser mock ──────────────────────────────────────────────────────────────────────────
 
-function starterModel(): ProjectModel {
-  const melody: Track = {
+/**
+ * `dissonant_core::document::EditError`. Over Tauri IPC `apply` maps the error with
+ * `to_string`, so `invoke` rejects with the bare message — the mock rejects with the same
+ * value so a rejected command looks identical in both bridges.
+ */
+const NO_SUCH_TRACK = "no such track";
+const NO_SUCH_PATTERN = "no such pattern";
+const LAST_TRACK = "a project needs at least one track";
+const LAST_PATTERN = "a project needs at least one pattern";
+const INVALID_VALUE = "invalid value";
+
+function fail(message: string): never {
+  // A plain string, not an `Error`: that is what Tauri's `invoke` rejects with.
+  throw message;
+}
+
+const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
+const allFinite = (...xs: number[]) => xs.every((x) => Number.isFinite(x));
+
+/** `TrackParam` ranges, from `apply_to`'s `SetTrackParam` arm. */
+const TRACK_PARAM_RANGE: Record<TrackParam, [number, number]> = {
+  volume: [0, 1.5],
+  reverbSend: [0, 1],
+  tone: [200, 20_000],
+  pan: [-1, 1],
+};
+
+function newTrack(isDrum: boolean, name: string): Track {
+  return {
     id: uuid(),
-    name: "melody",
+    name,
     voice: "saw",
     muted: false,
     soloed: false,
-    isDrum: false,
+    isDrum,
     volume: 1,
     reverbSend: 0,
     tone: 18000,
     pan: 0,
     color: null,
   };
-  const drums: Track = { ...melody, id: uuid(), name: "drums", isDrum: true };
-  const pattern: SongPattern = {
-    id: uuid(),
-    name: "pattern 1",
-    lengthBeats: 16,
-    chords: { chords: progression([0, 3, 4, 5], 0, "major", 16) },
-    notesByTrack: {},
-  };
+}
+
+function newPattern(name: string): SongPattern {
+  return { id: uuid(), name, lengthBeats: 16, chords: { chords: [] }, notesByTrack: {} };
+}
+
+/** `ProjectModel::empty()`: one melody track, one empty pattern, no key, nothing arranged. */
+function emptyModel(): ProjectModel {
   return {
     schemaVersion: 3,
     tempo: 120,
     key: { rootPitchClass: null, scale: "major", isLocked: false },
-    tracks: [melody, drums],
-    patterns: [pattern],
-    arrangement: [pattern.id],
+    tracks: [newTrack(false, "melody")],
+    patterns: [newPattern("pattern 1")],
+    arrangement: [],
     master: { gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 },
   };
+}
+
+/** `ProjectModel::starter()`: `empty()` plus a I–IV–V–vi progression, a drum track and a song. */
+function starterModel(): ProjectModel {
+  const m = emptyModel();
+  m.patterns[0].chords = { chords: progression([0, 3, 4, 5], 0, "major", 16) };
+  m.tracks.push(newTrack(true, "drums"));
+  m.arrangement = [m.patterns[0].id];
+  return m;
+}
+
+/**
+ * `NoteEvent::sanitized`. Pitch and velocity are `i32` in Rust and every number crosses the IPC
+ * boundary as JSON, so a non-finite or fractional value is rejected outright rather than
+ * silently stored — in the desktop app serde would refuse the whole payload.
+ */
+function sanitizeNote(n: NoteEvent): NoteEvent {
+  if (!allFinite(n.startBeat, n.lengthBeats) || !Number.isInteger(n.pitch) || !Number.isInteger(n.velocity)) {
+    fail(INVALID_VALUE);
+  }
+  return {
+    ...n,
+    pitch: clamp(n.pitch, 0, 127),
+    velocity: clamp(n.velocity, 1, 127),
+    startBeat: Math.max(0, n.startBeat),
+    lengthBeats: Math.max(1 / 64, n.lengthBeats),
+  };
+}
+
+/** `ProjectModel::normalized`, run on anything read back from storage. */
+function normalizedModel(m: ProjectModel): ProjectModel {
+  m.schemaVersion = 3;
+  if (m.tracks.length === 0) m.tracks = [newTrack(false, "melody")];
+  if (m.patterns.length === 0) m.patterns = [newPattern("pattern 1")];
+  for (const p of m.patterns) {
+    for (const notes of Object.values(p.notesByTrack)) {
+      for (let i = 0; i < notes.length; i++) notes[i] = sanitizeNote(notes[i]);
+    }
+  }
+  m.arrangement = m.arrangement.filter((id) => m.patterns.some((p) => p.id === id));
+  return m;
 }
 
 function clone<T>(x: T): T {
   return JSON.parse(JSON.stringify(x));
 }
 
+/**
+ * Mirrors `apply_to` in crates/dissonant-core/src/document.rs: same validation, same clamping,
+ * same errors. It mutates a throwaway clone, so a thrown error leaves the model untouched —
+ * exactly like the Rust version, which discards `next` on `Err`.
+ */
 function reduce(m: ProjectModel, c: Command): void {
-  const track = (id: string) => m.tracks.find((t) => t.id === id);
-  const pattern = (id: string) => m.patterns.find((p) => p.id === id);
+  const track = (id: string) => m.tracks.find((t) => t.id === id) ?? fail(NO_SUCH_TRACK);
+  const pattern = (id: string) => m.patterns.find((p) => p.id === id) ?? fail(NO_SUCH_PATTERN);
   switch (c.type) {
     case "setTempo":
-      m.tempo = Math.min(300, Math.max(20, c.bpm));
+      if (!allFinite(c.bpm)) fail(INVALID_VALUE);
+      m.tempo = clamp(c.bpm, 20, 300);
       break;
     case "setKey":
-      m.key = c.key;
+      m.key = { ...c.key };
       break;
-    case "addTrack": {
-      const t: Track = {
-        id: uuid(),
-        name: c.isDrum ? "drums" : `track ${m.tracks.length + 1}`,
-        voice: "saw",
-        muted: false,
-        soloed: false,
-        isDrum: c.isDrum,
-        volume: 1,
-        reverbSend: 0,
-        tone: 18000,
-        pan: 0,
-        color: null,
-      };
-      m.tracks.push(t);
+    case "addTrack":
+      m.tracks.push(newTrack(c.isDrum, c.isDrum ? "drums" : `track ${m.tracks.length + 1}`));
+      break;
+    case "setTrackColor":
+      if (c.color !== null && !/^#[0-9a-f]{6}$/i.test(c.color)) fail(INVALID_VALUE);
+      track(c.id).color = c.color === null ? null : c.color.toLowerCase();
+      break;
+    case "deleteTrack": {
+      if (m.tracks.length <= 1) fail(LAST_TRACK);
+      const before = m.tracks.length;
+      m.tracks = m.tracks.filter((t) => t.id !== c.id);
+      if (m.tracks.length === before) fail(NO_SUCH_TRACK);
+      for (const p of m.patterns) delete p.notesByTrack[c.id];
       break;
     }
-    case "setTrackColor": {
-      const t = track(c.id);
-      if (t) t.color = c.color;
+    case "renameTrack":
+      track(c.id).name = c.name;
       break;
-    }
-    case "deleteTrack":
-      if (m.tracks.length > 1) {
-        m.tracks = m.tracks.filter((t) => t.id !== c.id);
-        for (const p of m.patterns) delete p.notesByTrack[c.id];
-      }
+    case "setTrackMuted":
+      track(c.id).muted = c.muted;
       break;
-    case "renameTrack": {
-      const t = track(c.id);
-      if (t) t.name = c.name;
+    case "setTrackSoloed":
+      track(c.id).soloed = c.soloed;
       break;
-    }
-    case "setTrackMuted": {
-      const t = track(c.id);
-      if (t) t.muted = c.muted;
-      break;
-    }
-    case "setTrackSoloed": {
-      const t = track(c.id);
-      if (t) t.soloed = c.soloed;
-      break;
-    }
     case "moveTrack": {
       const i = m.tracks.findIndex((t) => t.id === c.id);
+      if (i < 0) fail(NO_SUCH_TRACK);
       const j = c.up ? i - 1 : i + 1;
-      if (i >= 0 && j >= 0 && j < m.tracks.length) [m.tracks[i], m.tracks[j]] = [m.tracks[j], m.tracks[i]];
+      if (j >= 0 && j < m.tracks.length) [m.tracks[i], m.tracks[j]] = [m.tracks[j], m.tracks[i]];
       break;
     }
-    case "setTrackVoice": {
-      const t = track(c.id);
-      if (t) t.voice = c.voice;
+    case "setTrackVoice":
+      track(c.id).voice = c.voice;
       break;
-    }
     case "setTrackParam": {
-      const t = track(c.id);
-      if (t) t[c.param] = c.value;
+      if (!allFinite(c.value)) fail(INVALID_VALUE);
+      const [lo, hi] = TRACK_PARAM_RANGE[c.param];
+      track(c.id)[c.param] = clamp(c.value, lo, hi);
       break;
     }
     case "addPattern": {
+      const p = newPattern(`pattern ${m.patterns.length + 1}`);
       const root = m.key.rootPitchClass ?? 0;
-      m.patterns.push({
-        id: uuid(),
-        name: `pattern ${m.patterns.length + 1}`,
-        lengthBeats: 16,
-        chords: { chords: progression(STARTERS[0].degrees, root, m.key.scale, 16) },
-        notesByTrack: {},
-      });
+      p.chords = { chords: progression(STARTERS[0].degrees, root, m.key.scale, p.lengthBeats) };
+      m.patterns.push(p);
       break;
     }
     case "duplicatePattern": {
       const i = m.patterns.findIndex((p) => p.id === c.id);
-      if (i < 0) break;
+      if (i < 0) fail(NO_SUCH_PATTERN);
       const copy = clone(m.patterns[i]);
       copy.id = uuid();
       copy.name = `${copy.name} copy`;
@@ -232,33 +285,27 @@ function reduce(m: ProjectModel, c: Command): void {
       m.patterns.splice(i + 1, 0, copy);
       break;
     }
-    case "deletePattern":
-      if (m.patterns.length > 1) {
-        m.patterns = m.patterns.filter((p) => p.id !== c.id);
-        m.arrangement = m.arrangement.filter((id) => id !== c.id);
-      }
-      break;
-    case "renamePattern": {
-      const p = pattern(c.id);
-      if (p && c.name.trim()) p.name = c.name;
+    case "deletePattern": {
+      if (m.patterns.length <= 1) fail(LAST_PATTERN);
+      const before = m.patterns.length;
+      m.patterns = m.patterns.filter((p) => p.id !== c.id);
+      if (m.patterns.length === before) fail(NO_SUCH_PATTERN);
+      m.arrangement = m.arrangement.filter((id) => id !== c.id);
       break;
     }
-    case "setPatternLength": {
-      const p = pattern(c.id);
-      if (p) p.lengthBeats = Math.max(1, c.beats);
+    case "renamePattern":
+      if (!c.name.trim()) fail(INVALID_VALUE);
+      pattern(c.id).name = c.name;
       break;
-    }
+    case "setPatternLength":
+      if (!allFinite(c.beats) || c.beats < 1) fail(INVALID_VALUE);
+      pattern(c.id).lengthBeats = c.beats;
+      break;
     case "setNotes": {
+      track(c.trackId); // Rust checks the track before the pattern.
       const p = pattern(c.patternId);
-      if (!p) break;
       const notes: NoteEvent[] = c.notes
-        .map((n) => ({
-          ...n,
-          pitch: Math.min(127, Math.max(0, n.pitch)),
-          velocity: Math.min(127, Math.max(1, n.velocity)),
-          startBeat: Math.max(0, n.startBeat),
-          lengthBeats: Math.max(1 / 64, n.lengthBeats),
-        }))
+        .map(sanitizeNote)
         .sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
       if (notes.length === 0) delete p.notesByTrack[c.trackId];
       else p.notesByTrack[c.trackId] = notes;
@@ -266,7 +313,6 @@ function reduce(m: ProjectModel, c: Command): void {
     }
     case "setChords": {
       const p = pattern(c.patternId);
-      if (!p) break;
       const chords: ChordEvent[] = c.chords
         .filter((ch) => ch.lengthBeats > 0 && ch.startBeat >= 0)
         .map((ch) => ({ ...ch, pitchClasses: [...new Set(ch.pitchClasses.map(normalize))].sort((a, b) => a - b) }))
@@ -277,18 +323,39 @@ function reduce(m: ProjectModel, c: Command): void {
     case "setArrangement":
       m.arrangement = c.arrangement.filter((id) => m.patterns.some((p) => p.id === id));
       break;
-    case "setMaster":
-      m.master = { ...c.master } as MasterSettings;
+    case "setMaster": {
+      const v = c.master;
+      if (!allFinite(v.gain, v.reverbWet, v.lowCutHz, v.highCutHz, v.lowEq, v.midEq, v.highEq)) fail(INVALID_VALUE);
+      const master: MasterSettings = {
+        gain: clamp(v.gain, 0, 1.5),
+        reverbWet: clamp(v.reverbWet, 0, 1),
+        lowCutHz: clamp(v.lowCutHz, 10, 2_000),
+        highCutHz: clamp(v.highCutHz, 500, 20_000),
+        lowEq: clamp(v.lowEq, 0, 2),
+        midEq: clamp(v.midEq, 0, 2),
+        highEq: clamp(v.highEq, 0, 2),
+      };
+      m.master = master;
       break;
+    }
   }
 }
+
+/** `document::MAX_UNDO`. */
+const MAX_UNDO = 200;
+
+/** The mock's stand-in for the filesystem: one slot, written by save, read by open. */
+const STORAGE_KEY = "dissonant.mock.project";
 
 function mockBridge(): Bridge {
   let model = starterModel();
   const undo: ProjectModel[] = [];
   const redo: ProjectModel[] = [];
   let pending: ProjectModel | null = null;
-  let dirty = false;
+  // Mirrors Document's save point: dirty is "differs from what was saved", not a sticky flag,
+  // so undoing back to the saved state (or a round-trip slider drag) leaves the project clean.
+  // `Document::new` takes a save point immediately, so a fresh project is clean until edited.
+  let saved: string | null = JSON.stringify(model);
   let path: string | null = null;
   let mode: PlayMode = "pattern";
   let patternId: string | null = null;
@@ -297,7 +364,13 @@ function mockBridge(): Bridge {
   let last = performance.now();
   const listeners = new Set<(e: PlayheadEvent) => void>();
 
-  const snapshot = (): Snapshot => ({ model: clone(model), canUndo: undo.length > 0 || pending !== null, canRedo: redo.length > 0, dirty, path });
+  const snapshot = (): Snapshot => ({
+    model: clone(model),
+    canUndo: undo.length > 0 || (pending !== null && JSON.stringify(pending) !== JSON.stringify(model)),
+    canRedo: redo.length > 0,
+    dirty: saved !== JSON.stringify(model),
+    path,
+  });
 
   const loopLength = () => {
     if (mode === "song" && model.arrangement.length > 0) {
@@ -323,26 +396,45 @@ function mockBridge(): Bridge {
 
   // A tiny WebAudio blip so placing notes gives feedback in the browser mock.
   let ctx: AudioContext | null = null;
-  const blip = (pitch: number, velocity: number) => {
+  const blip = (pitch: number, velocity: number, seconds = 0.25) => {
     try {
       ctx ??= new AudioContext();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
+      const hold = Math.min(4, Math.max(0.12, seconds));
       osc.type = "sawtooth";
       osc.frequency.value = 440 * Math.pow(2, (pitch - 69) / 12);
       gain.gain.setValueAtTime(0.0001, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.15 * (velocity / 127), ctx.currentTime + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+      gain.gain.setValueAtTime(0.15 * (velocity / 127), ctx.currentTime + hold);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + hold + 0.08);
       osc.connect(gain).connect(ctx.destination);
       osc.start();
-      osc.stop(ctx.currentTime + 0.55);
+      osc.stop(ctx.currentTime + hold + 0.1);
     } catch {
       /* no audio in this browser */
     }
   };
 
+  /** `Document::push_undo` — the Rust history is capped at `MAX_UNDO` snapshots. */
+  const pushUndo = (snap: ProjectModel) => {
+    undo.push(snap);
+    if (undo.length > MAX_UNDO) undo.shift();
+  };
+
+  /** `Document::replace` — new/open install a model and drop the whole history, pending included. */
+  const replace = (next: ProjectModel, to: string | null) => {
+    model = next;
+    undo.length = 0;
+    redo.length = 0;
+    pending = null;
+    path = to;
+    saved = JSON.stringify(model);
+    beat = 0;
+  };
+
   const commitGesture = () => {
-    if (pending && JSON.stringify(pending) !== JSON.stringify(model)) undo.push(pending);
+    if (pending && JSON.stringify(pending) !== JSON.stringify(model)) pushUndo(pending);
     pending = null;
   };
 
@@ -357,11 +449,10 @@ function mockBridge(): Bridge {
       if (transient) pending ??= before;
       else {
         commitGesture();
-        undo.push(before);
+        pushUndo(before);
       }
       redo.length = 0;
       model = next;
-      dirty = true;
       return snapshot();
     },
     commitGesture: async () => {
@@ -374,36 +465,33 @@ function mockBridge(): Bridge {
       if (prev) {
         redo.push(model);
         model = prev;
-        dirty = true;
       }
       return snapshot();
     },
     redo: async () => {
+      commitGesture();
       const next = redo.pop();
       if (next) {
-        undo.push(model);
+        pushUndo(model);
         model = next;
-        dirty = true;
       }
       return snapshot();
     },
-    newProject: async () => {
-      model = starterModel();
-      undo.length = 0;
-      redo.length = 0;
-      dirty = false;
-      path = null;
-      beat = 0;
+    newProject: async (starter = true) => {
+      replace(starter ? starterModel() : emptyModel(), null);
       return snapshot();
     },
     openProject: async (p) => {
-      path = p;
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (!stored) fail(`could not read ${p}`);
+      replace(normalizedModel(JSON.parse(stored) as ProjectModel), p);
       return snapshot();
     },
     saveProject: async (p) => {
-      if (p) path = p;
-      dirty = false;
-      localStorage.setItem("dissonant.mock.project", JSON.stringify(model));
+      const target = p ?? path ?? fail("no file path yet — use Save As");
+      path = target;
+      saved = JSON.stringify(model);
+      localStorage.setItem(STORAGE_KEY, saved);
       return snapshot();
     },
     setPlaybackContext: async (m, pid) => {
@@ -422,7 +510,7 @@ function mockBridge(): Bridge {
       beat = Math.max(0, b);
     },
     setHearChords: async () => {},
-    audition: async (_t, pitch, velocity = 100) => blip(pitch, velocity),
+    audition: async (_t, pitch, velocity = 100, seconds) => blip(pitch, velocity, seconds),
     auditionOff: async () => {},
     audioStatus: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
     restartAudio: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
