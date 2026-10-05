@@ -213,6 +213,20 @@ export function strumNotes(notes: NoteEvent[], ids: Set<string>, offset: number)
   });
 }
 
+/**
+ * Time-stretch the selection by `factor` around its first note (2 = half speed, 0.5 = double
+ * speed). Starts and lengths scale together; lengths never drop below the grid floor.
+ */
+export function scaleNotes(notes: NoteEvent[], ids: Set<string>, factor: number, minLength = MIN_LENGTH): NoteEvent[] {
+  const target = sel(notes, ids);
+  if (!target.length || !(factor > 0) || factor === 1) return notes;
+  const origin = Math.min(...target.map((n) => n.startBeat));
+  const set = new Set(target.map((n) => n.id));
+  return notes.map((n) =>
+    set.has(n.id) ? { ...n, startBeat: origin + (n.startBeat - origin) * factor, lengthBeats: Math.max(minLength, n.lengthBeats * factor) } : n,
+  );
+}
+
 /** Split each note into `grid`-length pieces. */
 export function chopNotes(notes: NoteEvent[], ids: Set<string>, grid: number): NoteEvent[] {
   const target = new Set(sel(notes, ids).map((n) => n.id));

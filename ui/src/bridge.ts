@@ -35,8 +35,10 @@ export interface Bridge {
   openProject(path: string): Promise<Snapshot>;
   saveProject(path?: string): Promise<Snapshot>;
   setPlaybackContext(mode: PlayMode, patternId: string | null): Promise<void>;
-  play(): Promise<void>;
+  /** Start playing; with `countInBars` the metronome counts first and the transport starts after. */
+  play(countInBars?: number): Promise<void>;
   stop(): Promise<void>;
+  setMetronome(on: boolean, volume?: number): Promise<void>;
   seek(beat: number): Promise<void>;
   setHearChords(on: boolean): Promise<void>;
   audition(trackId: string, pitch: number, velocity?: number): Promise<void>;
@@ -119,8 +121,9 @@ async function tauriBridge(): Promise<Bridge> {
     openProject: (path) => invoke<Snapshot>("open_project", { path }),
     saveProject: (path) => invoke<Snapshot>("save_project", { path: path ?? null }),
     setPlaybackContext: (mode, patternId) => invoke("set_playback_context", { mode, patternId }),
-    play: () => invoke("transport_play"),
+    play: (countInBars) => invoke("transport_play", { countInBars: countInBars ?? null }),
     stop: () => invoke("transport_stop"),
+    setMetronome: (on, volume) => invoke("set_metronome", { on, volume: volume ?? null }),
     seek: (beat) => invoke("transport_seek", { beat }),
     setHearChords: (on) => invoke("set_hear_chords", { on }),
     audition: (trackId, pitch, velocity = 100) => invoke("audition", { trackId, pitch, velocity }),
@@ -384,6 +387,10 @@ function reduce(m: ProjectModel, c: Command): void {
     case "setTimeSignature":
       m.timeSignature = { numerator: c.numerator, denominator: c.denominator };
       break;
+    case "setSwing":
+      m.swing = Math.min(75, Math.max(50, c.swing));
+      m.swingGrid = c.grid === 0.25 ? 0.25 : 0.5;
+      break;
   }
 }
 
@@ -584,6 +591,7 @@ function mockBridge(): Bridge {
       playing = true;
       last = performance.now();
     },
+    setMetronome: async () => {},
     stop: async () => {
       playing = false;
     },

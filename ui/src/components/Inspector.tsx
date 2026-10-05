@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { beatsPerBar, dbText, effectiveKey, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { chordAt, explainNote, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
-import { arpeggiateNotes, chopNotes, humanizeNotes, legatoNotes, quantizeNotes, resolveTargets, strumNotes } from "../noteEditing";
+import { arpeggiateNotes, chopNotes, humanizeNotes, legatoNotes, quantizeNotes, resolveTargets, scaleNotes, strumNotes } from "../noteEditing";
 import { DRUM_KIT, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
 import { hz, Knob, lin, log, panText, pct } from "./Knob";
 
@@ -348,6 +348,8 @@ function TransformGrid() {
     ["strum", "offset the notes of each stack, low to high", () => apply(strumNotes(notes, ids, grid / 4), "strum")],
     ["chop", "split notes into grid-length pieces", () => apply(chopNotes(notes, ids, grid), "chop")],
     ["arp ?", "random order", () => apply(arpeggiateNotes(notes, ids, grid, "random"), "arpeggiate")],
+    ["×2 slower", "stretch the selection to twice its length (half speed)", () => apply(scaleNotes(notes, ids, 2, grid / 2), "stretch notes")],
+    ["½ faster", "squeeze the selection to half its length (double speed)", () => apply(scaleNotes(notes, ids, 0.5, grid / 2), "squeeze notes")],
   ];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>

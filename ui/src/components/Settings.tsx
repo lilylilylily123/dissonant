@@ -171,6 +171,22 @@ function AudioTab() {
         <button onClick={() => s.testTone()} disabled={!live?.running && !!s.audio}>test tone</button>
         <button onClick={() => s.restartAudio()}>restart engine</button>
       </Row>
+      <div className="sdiv" />
+      <div className="scap">metronome</div>
+      <Row label="click">
+        <Toggle on={s.settings.metronome.on} onChange={(v) => s.updateSettings("metronome", { on: v })} />
+        <span className="k">M in the transport toggles it too</span>
+      </Row>
+      <Row label="volume">
+        <input type="range" min={0} max={1} step={0.05} value={s.settings.metronome.volume} onChange={(e) => s.updateSettings("metronome", { volume: Number(e.target.value) })} style={{ width: 120 }} />
+        <span className="k mono">{Math.round(s.settings.metronome.volume * 100)}%</span>
+      </Row>
+      <Row label="count-in" hint="bars of click before the transport starts when record is armed">
+        <Seg value={s.settings.metronome.countInBars} options={[[0, "off"], [1, "1 bar"], [2, "2 bars"]]} onChange={(v) => s.updateSettings("metronome", { countInBars: v })} />
+      </Row>
+      <Row label="pre-roll" hint="back up this many bars before the playhead when record is armed, so the first note is not clipped">
+        <Seg value={s.settings.metronome.preRollBars} options={[[0, "off"], [1, "1 bar"], [2, "2 bars"]]} onChange={(v) => s.updateSettings("metronome", { preRollBars: v })} />
+      </Row>
     </>
   );
 }

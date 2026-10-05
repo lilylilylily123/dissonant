@@ -2,7 +2,7 @@
 
 use crate::channel::{Channel, Master};
 use crate::synth::{PolySynth, VoicePreset};
-use dissonant_core::{MasterSettings, Sequence, Tempo};
+use dissonant_core::{swing_warp, MasterSettings, Sequence, Tempo};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,6 +25,8 @@ pub struct Shared {
     load: AtomicU32,
     /// Callback gaps detected since the stream started.
     xruns: AtomicU32,
+    /// Beats of count-in still to go (f32 bits); 0 when not counting in.
+    count_in: AtomicU32,
 }
 
 impl Default for Shared {
@@ -38,6 +40,7 @@ impl Default for Shared {
             block_frames: AtomicU32::new(0),
             load: AtomicU32::new(0),
             xruns: AtomicU32::new(0),
+            count_in: AtomicU32::new(0),
         }
     }
 }
@@ -81,6 +84,10 @@ impl Shared {
     pub fn note_xrun(&self) {
         self.xruns.fetch_add(1, Ordering::Relaxed);
     }
+    /// Beats of count-in left before the transport starts (0 = not counting in).
+    pub fn count_in_beats(&self) -> f32 {
+        f32::from_bits(self.count_in.load(Ordering::Relaxed))
+    }
 }
 
 /// Messages from the application to the audio thread.
@@ -107,6 +114,22 @@ pub enum EngineCommand {
     AuditionOff { track_id: Uuid, pitch: u8 },
     /// A short sine on the master bus, for checking the output device from Settings.
     TestTone,
+    /// Click on every beat (accented on the bar) while playing; `volume` 0…1.
+    SetMetronome { on: bool, volume: f32 },
+    /// Click through `bars` bars with the transport held, then play.
+    PlayWithCountIn { bars: u32 },
+}
+
+/// One sounding metronome click: a short decaying sine.
+#[derive(Debug, Clone, Copy)]
+struct Click {
+    /// Sample offset within the current block at which it starts (0 once running).
+    start: usize,
+    phase: f32,
+    samples_left: usize,
+    total: usize,
+    freq: f32,
+    gain: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,6 +145,7 @@ enum EventKind {
     ChordOn { pitch: u8 },
     ChordOff { pitch: u8 },
     ReleaseAll,
+    Click { accent: bool },
 }
 
 struct Audition {
@@ -151,6 +175,13 @@ pub struct Engine {
     auditions: Vec<Audition>,
     /// Samples of test tone left to play, and its phase.
     test_tone: (usize, f32),
+    metronome: bool,
+    metronome_volume: f32,
+    clicks: Vec<Click>,
+    /// Count-in: total samples and samples elapsed; `None` when not counting in.
+    count_in: Option<(usize, usize)>,
+    /// Samples into the current block at which the transport (re)starts; 0 normally.
+    late_start: usize,
 }
 
 impl Engine {
@@ -176,7 +207,50 @@ impl Engine {
             sounding_chord: None,
             auditions: Vec::with_capacity(32),
             test_tone: (0, 0.0),
+            metronome: false,
+            metronome_volume: 0.6,
+            clicks: Vec::with_capacity(8),
+            count_in: None,
+            late_start: 0,
         }
+    }
+
+    /// Queue a click at `offset` samples into the current block.
+    fn click(&mut self, offset: usize, accent: bool) {
+        if self.clicks.len() >= 8 {
+            self.clicks.remove(0);
+        }
+        let total = (self.sample_rate * if accent { 0.045 } else { 0.03 }) as usize;
+        self.clicks.push(Click {
+            start: offset,
+            phase: 0.0,
+            samples_left: total,
+            total,
+            freq: if accent { 1760.0 } else { 1320.0 },
+            gain: self.metronome_volume * if accent { 0.5 } else { 0.32 },
+        });
+    }
+
+    /// Mix the pending clicks into an interleaved stereo block (after the master chain).
+    fn render_clicks(&mut self, out: &mut [f32]) {
+        let frames = out.len() / 2;
+        for c in &mut self.clicks {
+            let from = c.start.min(frames);
+            for i in from..frames {
+                if c.samples_left == 0 {
+                    break;
+                }
+                let t = 1.0 - c.samples_left as f32 / c.total as f32;
+                let env = (1.0 - t).powi(3);
+                let s = c.phase.sin() * c.gain * env;
+                out[2 * i] += s;
+                out[2 * i + 1] += s;
+                c.phase += 2.0 * std::f32::consts::PI * c.freq / self.sample_rate;
+                c.samples_left -= 1;
+            }
+            c.start = 0;
+        }
+        self.clicks.retain(|c| c.samples_left > 0);
     }
 
     pub fn shared(&self) -> &Arc<Shared> {
@@ -194,11 +268,28 @@ impl Engine {
     pub fn handle(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::Play => {
+                self.count_in = None;
                 self.playing = true;
             }
             EngineCommand::Stop => {
                 self.playing = false;
+                self.count_in = None;
                 self.release_all();
+            }
+            EngineCommand::SetMetronome { on, volume } => {
+                self.metronome = on;
+                self.metronome_volume = volume.clamp(0.0, 1.0);
+            }
+            EngineCommand::PlayWithCountIn { bars } => {
+                let beats = bars as f64 * self.sequence.beats_per_bar.max(1.0);
+                let total = (beats * self.tempo.samples_per_beat(self.sample_rate as f64)) as usize;
+                if total == 0 {
+                    self.playing = true;
+                } else {
+                    self.playing = false;
+                    self.release_all();
+                    self.count_in = Some((total, 0));
+                }
             }
             EngineCommand::Seek { beat } => {
                 self.release_all();
@@ -256,6 +347,7 @@ impl Engine {
                 self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
             EngineCommand::TestTone => self.test_tone = ((self.sample_rate * 0.6) as usize, 0.0),
+
         }
         self.publish();
     }
@@ -336,6 +428,11 @@ impl Engine {
         }
         self.shared.master_peak[0].store(self.master.peak_l.to_bits(), Ordering::Relaxed);
         self.shared.master_peak[1].store(self.master.peak_r.to_bits(), Ordering::Relaxed);
+        let left = match self.count_in {
+            Some((total, done)) => ((total - done) as f64 / self.tempo.samples_per_beat(self.sample_rate as f64)) as f32,
+            None => 0.0,
+        };
+        self.shared.count_in.store(left.to_bits(), Ordering::Relaxed);
     }
 
     /// Render one block of interleaved stereo. `out.len()` must be even.
@@ -348,6 +445,7 @@ impl Engine {
         self.mix_l[..frames].fill(0.0);
         self.mix_r[..frames].fill(0.0);
 
+        self.tick_count_in(frames);
         self.collect_events(frames);
         self.tick_auditions(frames);
 
@@ -361,7 +459,10 @@ impl Engine {
                 cursor = next;
             }
             while let Some(e) = self.events.get(ev_idx).filter(|e| e.offset.min(frames) <= cursor) {
-                self.fire(e.kind);
+                match e.kind {
+                    EventKind::Click { accent } => self.click(cursor, accent),
+                    kind => self.fire(kind),
+                }
                 ev_idx += 1;
             }
         }
@@ -391,11 +492,41 @@ impl Engine {
             out[2 * i] = l[i];
             out[2 * i + 1] = r[i];
         }
+        if !self.clicks.is_empty() {
+            self.render_clicks(out);
+        }
 
         if self.playing {
-            self.position = self.advance(self.position, frames);
+            self.position = self.advance(self.position, frames - self.late_start.min(frames));
         }
+        self.late_start = 0;
         self.publish();
+    }
+
+    /// While counting in: click on each beat boundary inside this block and, when the count
+    /// runs out, start the transport at the exact sample (the remainder of the block plays).
+    fn tick_count_in(&mut self, frames: usize) {
+        let Some((total, done)) = self.count_in else { return };
+        let spb = self.tempo.samples_per_beat(self.sample_rate as f64);
+        let bpb = self.sequence.beats_per_bar.max(1.0).round() as usize;
+        let end = (done + frames).min(total);
+        // Beat boundaries at k·spb for integer k in [done, end).
+        let mut k = (done as f64 / spb).ceil() as usize;
+        while (k as f64 * spb) < end as f64 {
+            let at = (k as f64 * spb).round() as usize;
+            if at >= done {
+                self.click(at - done, k.is_multiple_of(bpb));
+            }
+            k += 1;
+        }
+        if end >= total {
+            self.count_in = None;
+            self.playing = true;
+            // The transport starts `total - done` samples into this block.
+            self.late_start = total - done;
+        } else {
+            self.count_in = Some((total, end));
+        }
     }
 
     fn render_range(&mut self, from: usize, to: usize) {
@@ -448,6 +579,7 @@ impl Engine {
                 self.chord_bed.all_notes_off();
                 self.sounding_chord = None;
             }
+            EventKind::Click { .. } => {}
         }
     }
 
@@ -469,19 +601,20 @@ impl Engine {
             return;
         }
         let spb = self.tempo.samples_per_beat(self.sample_rate as f64);
-        let block_beats = frames as f64 / spb;
+        let base = self.late_start.min(frames);
+        let block_beats = (frames - base) as f64 / spb;
         let (loop_start, loop_end) = self.loop_bounds();
         let start = self.position;
         let end = start + block_beats;
 
         if self.looping && loop_end > loop_start && end >= loop_end && start < loop_end {
             // Two segments: [start, loop_end) then [loop_start, …), with a release at the seam.
-            let seam = ((loop_end - start) * spb).round() as usize;
-            self.collect_segment(start, loop_end, 0, spb);
+            let seam = base + ((loop_end - start) * spb).round() as usize;
+            self.collect_segment(start, loop_end, base, spb);
             self.events.push(Event { offset: seam.min(frames), kind: EventKind::ReleaseAll });
             self.collect_segment(loop_start, loop_start + (end - loop_end), seam, spb);
         } else {
-            self.collect_segment(start, end, 0, spb);
+            self.collect_segment(start, end, base, spb);
         }
         self.events.sort_by_key(|e| e.offset);
     }
@@ -490,14 +623,25 @@ impl Engine {
         let any_solo = self.sequence.any_solo();
         let seq = Arc::clone(&self.sequence);
         let offset_of = |beat: f64| base_offset + ((beat - from) * spb).round().max(0.0) as usize;
+        let swing = |beat: f64| swing_warp(beat, seq.swing, seq.swing_grid);
+
+        if self.metronome {
+            let bpb = seq.beats_per_bar.max(1.0);
+            let mut b = from.ceil();
+            while b < to {
+                let accent = (b % bpb).abs() < 1e-9;
+                self.events.push(Event { offset: offset_of(b), kind: EventKind::Click { accent } });
+                b += 1.0;
+            }
+        }
 
         for (ti, track) in seq.tracks.iter().enumerate() {
             if !track.audible(any_solo) {
                 continue;
             }
             for note in &track.notes {
-                let s = note.start_beat;
-                let e = note.end_beat().min(seq.length_beats);
+                let s = swing(note.start_beat);
+                let e = swing(note.end_beat()).min(seq.length_beats);
                 if s >= from && s < to {
                     self.events.push(Event {
                         offset: offset_of(s),
@@ -697,6 +841,57 @@ mod tests {
         let left = render(&mut e, 44_100 * 2, 512);
         assert!(left[..4000].iter().any(|s| s.abs() > 0.01));
         assert!(left[70_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn swing_delays_the_offbeat_only() {
+        let mut model = ProjectModel::empty();
+        model.tracks[0].voice = "sine".into();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        model.patterns[0].length_beats = 4.0;
+        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.5, 0.25, 69)]);
+        model.swing = 200.0 / 3.0; // triplet feel: the "and" of 1 lands at 2/3 beat
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(seq));
+        e.handle(EngineCommand::Play);
+        let left = render(&mut e, 30_000, 512);
+        let onset = first_onset(&left).unwrap() as i64;
+        let expected = (22_050.0 * 2.0 / 3.0) as i64;
+        assert!((onset - expected).abs() <= 2, "onset {onset} vs {expected}");
+    }
+
+    #[test]
+    fn metronome_clicks_on_beats_and_count_in_holds_the_transport() {
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(sequence_with_note(1.0, 1.0, 16.0)));
+        e.handle(EngineCommand::SetMetronome { on: true, volume: 1.0 });
+        e.handle(EngineCommand::Play);
+        let left = render(&mut e, 22_050 + 100, 256);
+        // A click at beat 0 (sample 0) and another at beat 1 (sample 22050).
+        assert!(left[..50].iter().any(|s| s.abs() > 1e-4), "click on beat 0");
+        assert!(left[2_500..21_000].iter().all(|s| s.abs() < 1e-4), "silence between clicks (note starts at beat 1)");
+        assert!(left[22_050..22_100].iter().any(|s| s.abs() > 1e-4), "click on beat 1");
+
+        // Count-in: one bar (4 beats = 88200 samples) of clicks, then the transport starts.
+        let shared = Arc::new(Shared::default());
+        let mut e = Engine::new(SR, shared.clone(), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(sequence_with_note(0.0, 1.0, 16.0)));
+        e.handle(EngineCommand::SetMetronome { on: false, volume: 1.0 });
+        e.handle(EngineCommand::PlayWithCountIn { bars: 1 });
+        assert!(!e.is_playing());
+        let half = render(&mut e, 44_100, 1000);
+        assert!(shared.count_in_beats() > 1.9 && shared.count_in_beats() < 2.1, "{}", shared.count_in_beats());
+        assert_eq!(e.position(), 0.0, "transport held during count-in");
+        assert!(half[..50].iter().any(|s| s.abs() > 1e-4), "count-in clicks even with the metronome off");
+        let rest = render(&mut e, 44_100 + 2_000, 1000);
+        assert!(e.is_playing());
+        assert_eq!(shared.count_in_beats(), 0.0);
+        // The note at beat 0 starts exactly when the count-in ends (sample 88200 overall).
+        let onset = first_onset(&rest[44_100 - 10..]).unwrap() + 44_100 - 10;
+        assert!((onset as i64 - 44_100).abs() <= 2, "onset {onset}");
+        // Position advanced only for the part of the block after the start.
+        assert!((e.position() - 2_000.0 / 22_050.0).abs() < 1e-6, "{}", e.position());
     }
 
     #[test]

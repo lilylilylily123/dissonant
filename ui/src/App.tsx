@@ -76,6 +76,8 @@ export default function App() {
         s.toggleLooping();
       } else if (!mod && s.liveKeyboard === "off" && k === "r") {
         s.toggleRecord();
+      } else if (!mod && s.liveKeyboard === "off" && k === "m") {
+        s.toggleMetronome();
       }
     };
     window.addEventListener("keydown", onKey);

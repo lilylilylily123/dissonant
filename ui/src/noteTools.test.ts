@@ -7,17 +7,39 @@ import {
   magnetPitch,
   quantizeNotes,
   resolveTargets,
+  scaleNotes,
   seededRng,
   stampChord,
   strumNotes,
 } from "./noteEditing";
 import { explainNote, progression, tierMap } from "./theory";
-import type { NoteEvent } from "./types";
+import { swingWarp, type NoteEvent } from "./types";
 
 const n = (id: string, start: number, len: number, pitch: number, velocity = 100): NoteEvent => ({ id, startBeat: start, lengthBeats: len, pitch, velocity });
 const all = new Set<string>();
 
+describe("swing warp", () => {
+  it("delays off-subdivisions, keeps downbeats, and is the identity at 50", () => {
+    expect(swingWarp(0.5, 50, 0.5)).toBe(0.5);
+    expect(swingWarp(0.5, 200 / 3, 0.5)).toBeCloseTo(2 / 3, 9);
+    expect(swingWarp(1, 66, 0.5)).toBe(1);
+    expect(swingWarp(0.25, 75, 0.25)).toBeCloseTo(0.375, 9);
+    expect(swingWarp(0.5, 90, 0.5)).toBe(0.5);
+  });
+});
+
 describe("transform tools", () => {
+  it("scales a selection around its first note", () => {
+    const notes = [n("a", 1, 0.5, 60), n("b", 2, 0.5, 62), n("c", 4, 1, 64)];
+    const out = scaleNotes(notes, new Set(["a", "b"]), 2);
+    expect(out[0]).toMatchObject({ startBeat: 1, lengthBeats: 1 });
+    expect(out[1]).toMatchObject({ startBeat: 3, lengthBeats: 1 });
+    expect(out[2]).toBe(notes[2]);
+    const back = scaleNotes(out, new Set(["a", "b"]), 0.5);
+    expect(back[1]).toMatchObject({ startBeat: 2, lengthBeats: 0.5 });
+    expect(scaleNotes(notes, all, 1)).toBe(notes);
+  });
+
   it("quantizes starts and lengths to the grid, with strength", () => {
     const out = quantizeNotes([n("a", 0.3, 0.6, 60)], all, 0.5);
     expect(out[0]).toMatchObject({ startBeat: 0.5, lengthBeats: 0.5 });

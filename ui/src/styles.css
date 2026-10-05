@@ -341,8 +341,9 @@ select {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
+  gap: 10px;
+  padding: 0 10px;
+  overflow: hidden;
   background: var(--bg-transport);
   border-bottom: 1px solid var(--line-1);
 }
@@ -366,6 +367,18 @@ select {
   background: var(--bg-inactive);
   cursor: pointer;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+.transport input[type="range"] {
+  height: 4px;
+  accent-color: var(--accent);
+  margin: 0;
+}
+.transport .tgroup {
+  flex: none;
+}
+.transport .mastermeter {
+  flex: none;
 }
 .seg > div.on {
   color: var(--on-accent);
@@ -496,7 +509,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  width: 150px;
+  width: 130px;
 }
 .mastermeter .hdr {
   display: flex;

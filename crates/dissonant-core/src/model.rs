@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// A diatonic scale family. Expanded later (modes, harmonic minor, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -429,6 +429,20 @@ pub struct ProjectModel {
     pub master: MasterSettings,
     #[serde(default)]
     pub time_signature: TimeSignature,
+    /// Global swing: 50 = straight, 66.7 = triplet feel, 75 = hard shuffle. See
+    /// [`crate::tempo::swing_warp`].
+    #[serde(default = "default_swing")]
+    pub swing: f64,
+    /// The subdivision swing acts on, in beats (0.5 = eighths, 0.25 = sixteenths).
+    #[serde(default = "default_swing_grid")]
+    pub swing_grid: f64,
+}
+
+fn default_swing() -> f64 {
+    50.0
+}
+fn default_swing_grid() -> f64 {
+    0.5
 }
 
 impl Default for ProjectModel {
@@ -451,6 +465,8 @@ impl ProjectModel {
             arrangement: vec![],
             master: MasterSettings::default(),
             time_signature: TimeSignature::default(),
+            swing: default_swing(),
+            swing_grid: default_swing_grid(),
         }
     }
 
@@ -537,6 +553,13 @@ impl ProjectModel {
             }
         }
         self.arrangement.clear();
+        if !self.swing.is_finite() {
+            self.swing = default_swing();
+        }
+        self.swing = self.swing.clamp(50.0, 75.0);
+        if !(self.swing_grid == 0.5 || self.swing_grid == 0.25) {
+            self.swing_grid = default_swing_grid();
+        }
         self.clips.retain(|c| pattern_ids.contains(&c.pattern_id) && c.length_beats > 0.0 && c.start_beat >= 0.0);
         self.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
         self.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));

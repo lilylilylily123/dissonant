@@ -43,6 +43,8 @@ interface State {
   bottomPanel: BottomPanel;
   playhead: number;
   playing: boolean;
+  /** Beats of count-in left (0 = none). */
+  countIn: number;
   masterPeak: [number, number];
   trackPeaks: number[];
   audio: AudioStatus | null;
@@ -80,6 +82,7 @@ interface State {
   setBottomPanel(p: BottomPanel): void;
   play(): void;
   stop(): void;
+  toggleMetronome(): void;
   togglePlay(): void;
   rewind(): void;
   seek(beat: number): void;
@@ -221,6 +224,7 @@ export const useStore = create<State>((set, get) => {
     bottomPanel: "devices",
     playhead: 0,
     playing: false,
+    countIn: 0,
     masterPeak: [0, 0],
     trackPeaks: [],
     audio: null,
@@ -251,7 +255,7 @@ export const useStore = create<State>((set, get) => {
       applySnapshot(await b.getState());
       await syncPlayback();
       await b.setLiveTrack(get().selectedTrackId);
-      b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks }));
+      b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks, countIn: e.countIn ?? 0 }));
       b.onDocument((snap) => applySnapshot(snap));
       b.onMidiActivity(() => set({ midiActivityAt: performance.now() }));
       b.onCloseRequested(() => void get().requestClose());
@@ -347,10 +351,22 @@ export const useStore = create<State>((set, get) => {
     },
 
     play() {
-      void getBridge().then((b) => b.play());
+      const { armed, settings, playhead, snapshot } = get();
+      const m = settings.metronome;
+      void getBridge().then(async (b) => {
+        if (armed && m.preRollBars > 0) {
+          const bpb = bpbOf(snapshot?.model.timeSignature);
+          await b.seek(Math.max(0, playhead - m.preRollBars * bpb));
+        }
+        await b.play(armed ? m.countInBars : 0);
+      });
     },
     stop() {
       void getBridge().then((b) => b.stop());
+    },
+    toggleMetronome() {
+      const on = !get().settings.metronome.on;
+      void get().updateSettings("metronome", { on });
     },
     togglePlay() {
       if (get().playing) get().stop();
@@ -365,13 +381,19 @@ export const useStore = create<State>((set, get) => {
 
     tapTempo() {
       const now = performance.now();
-      taps = taps.filter((t) => now - t < 3000);
+      // A pause of 3 s starts a new run; only the last 8 taps count.
+      taps = taps.filter((t) => now - t < 3000).slice(-7);
       taps.push(now);
       if (taps.length >= 2) {
         const intervals = taps.slice(1).map((t, i) => t - taps[i]);
         const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-        const bpm = Math.round(60000 / avg);
-        if (bpm >= 20 && bpm <= 300) void get().dispatch({ type: "setTempo", bpm });
+        const bpm = Math.round((60000 / avg) * 10) / 10;
+        if (bpm >= 20 && bpm <= 300) {
+          void get().dispatch({ type: "setTempo", bpm }, false, "tap tempo");
+          get().showToast(`tap · ${bpm.toFixed(1)} bpm (${taps.length} taps)`);
+        }
+      } else {
+        get().showToast("tap · keep tapping…");
       }
     },
 
@@ -600,6 +622,7 @@ export const useStore = create<State>((set, get) => {
       const next: Settings = { ...get().settings, [section]: { ...get().settings[section], ...patch } };
       set({ settings: next });
       if (section === "appearance") applyAppearance(next.appearance);
+      if (section === "metronome") void b.setMetronome(next.metronome.on, next.metronome.volume);
       try {
         const audio = await b.setSettings(next);
         if (b.isTauri) set({ audio });

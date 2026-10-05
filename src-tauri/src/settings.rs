@@ -13,6 +13,33 @@ pub struct Settings {
     pub editing: EditingSettings,
     pub export: ExportSettings,
     pub appearance: AppearanceSettings,
+    pub metronome: MetronomeSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MetronomeSettings {
+    pub on: bool,
+    /// 0…1
+    pub volume: f32,
+    /// Bars of click before recording starts (0 = none).
+    pub count_in_bars: u32,
+    /// Bars to back up before the playhead when recording starts (0 = none).
+    pub pre_roll_bars: u32,
+    /// Click during ordinary playback too, not only while record-armed.
+    pub during_playback: bool,
+}
+
+impl Default for MetronomeSettings {
+    fn default() -> Self {
+        MetronomeSettings {
+            on: false,
+            volume: 0.6,
+            count_in_bars: 1,
+            pre_roll_bars: 0,
+            during_playback: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -288,6 +315,13 @@ impl Settings {
         if !ok(&p.accent) {
             p.accent = "#b48cff".into();
         }
+        let mt = &mut self.metronome;
+        if !mt.volume.is_finite() {
+            mt.volume = 0.6;
+        }
+        mt.volume = mt.volume.clamp(0.0, 1.0);
+        mt.count_in_bars = mt.count_in_bars.min(4);
+        mt.pre_roll_bars = mt.pre_roll_bars.min(4);
         self
     }
 }

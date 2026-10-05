@@ -53,6 +53,11 @@ pub struct Sequence {
     pub chords: ChordTrack,
     pub length_beats: f64,
     pub tempo_bpm: f64,
+    /// Swing percent (50 = none) and grid, applied by the scheduler to note starts and ends.
+    pub swing: f64,
+    pub swing_grid: f64,
+    /// Quarter-note beats per bar, for the metronome accent.
+    pub beats_per_bar: f64,
 }
 
 impl Sequence {
@@ -68,6 +73,9 @@ impl Sequence {
             chords: pattern.chords.clone(),
             length_beats: pattern.length_beats.max(1.0),
             tempo_bpm: model.tempo,
+            swing: model.swing,
+            swing_grid: model.swing_grid,
+            beats_per_bar: model.time_signature.beats_per_bar(),
         })
     }
 
@@ -89,6 +97,9 @@ impl Sequence {
             chords: Arrangement::flattened_chords(&model.patterns, &model.clips),
             length_beats: if total > 0.0 { total } else { fallback },
             tempo_bpm: model.tempo,
+            swing: model.swing,
+            swing_grid: model.swing_grid,
+            beats_per_bar: model.time_signature.beats_per_bar(),
         }
     }
 

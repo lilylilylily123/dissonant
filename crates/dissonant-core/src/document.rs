@@ -55,6 +55,8 @@ pub enum Command {
     RemoveSection { id: Uuid },
     SetMaster { master: MasterSettings },
     SetTimeSignature { numerator: u32, denominator: u32 },
+    /// Global swing in percent (50–75) and its grid in beats (0.5 or 0.25).
+    SetSwing { swing: f64, grid: f64 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -285,6 +287,7 @@ impl Command {
             RemoveSection { .. } => "remove section",
             SetMaster { .. } => "change master",
             SetTimeSignature { .. } => "set time signature",
+            SetSwing { .. } => "set swing",
         }
         .to_string()
     }
@@ -494,6 +497,13 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 return Err(EditError::InvalidValue);
             }
             m.time_signature = crate::model::TimeSignature { numerator, denominator };
+        }
+        SetSwing { swing, grid } => {
+            if !swing.is_finite() || !(grid == 0.5 || grid == 0.25) {
+                return Err(EditError::InvalidValue);
+            }
+            m.swing = swing.clamp(50.0, 75.0);
+            m.swing_grid = grid;
         }
         SetMaster { master } => {
             let v = [
@@ -760,6 +770,15 @@ mod tests {
         d.restore(ProjectModel::starter(), None);
         assert!(d.is_dirty());
         assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn swing_is_validated() {
+        let mut d = doc();
+        d.apply(Command::SetSwing { swing: 90.0, grid: 0.25 }, false).unwrap();
+        assert_eq!(d.model().swing, 75.0);
+        assert_eq!(d.model().swing_grid, 0.25);
+        assert_eq!(d.apply(Command::SetSwing { swing: 60.0, grid: 0.3 }, false), Err(EditError::InvalidValue));
     }
 
     #[test]

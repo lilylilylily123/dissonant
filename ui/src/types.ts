@@ -114,6 +114,23 @@ export interface ProjectModel {
   sections: Section[];
   master: MasterSettings;
   timeSignature?: TimeSignature;
+  /** 50 = straight … 75 = hard shuffle. */
+  swing?: number;
+  /** 0.5 (eighths) or 0.25 (sixteenths). */
+  swingGrid?: number;
+}
+
+/**
+ * Swing as a piecewise-linear warp of the beat line (mirrors `dissonant_core::tempo::swing_warp`):
+ * the second half of each `2·grid` pair is pushed so it lands at `2·grid·swing/100`.
+ */
+export function swingWarp(beat: number, swing: number, grid: number): number {
+  if (!(grid > 0) || !(swing > 50) || swing > 75) return beat;
+  const pair = 2 * grid;
+  const late = (pair * swing) / 100;
+  const base = Math.floor(beat / pair) * pair;
+  const u = beat - base;
+  return base + (u <= grid ? u * (late / grid) : late + (u - grid) * ((pair - late) / grid));
 }
 
 export function songLength(m: ProjectModel): number {
@@ -183,13 +200,16 @@ export type Command =
   | { type: "updateSection"; section: Section }
   | { type: "removeSection"; id: string }
   | { type: "setMaster"; master: MasterSettings }
-  | { type: "setTimeSignature"; numerator: number; denominator: number };
+  | { type: "setTimeSignature"; numerator: number; denominator: number }
+  | { type: "setSwing"; swing: number; grid: number };
 
 export interface PlayheadEvent {
   beat: number;
   playing: boolean;
   masterPeak: [number, number];
   trackPeaks: number[];
+  /** Beats of count-in left; 0 when not counting in. */
+  countIn?: number;
 }
 
 export interface AudioStatus {
@@ -241,6 +261,7 @@ export interface Settings {
   };
   export: { sampleRate: number; bitDepth: 16 | 24 | 32; dither: boolean; normalize: boolean; normalizeDb: number; tailSeconds: number };
   appearance: { uiScale: number; rowHeight: number; reducedMotion: boolean; tierColors: TierColors; accent: string };
+  metronome: { on: boolean; volume: number; countInBars: number; preRollBars: number; duringPlayback: boolean };
 }
 
 export const DEFAULT_TIER_COLORS: TierColors = { chordTone: "#3dffb0", tension: "#ff9d2a", dissonance: "#ff3b30" };
@@ -270,6 +291,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   export: { sampleRate: 44100, bitDepth: 16, dither: true, normalize: false, normalizeDb: -1, tailSeconds: 1.5 },
   appearance: { uiScale: 1, rowHeight: 18, reducedMotion: false, tierColors: DEFAULT_TIER_COLORS, accent: "#b48cff" },
+  metronome: { on: false, volume: 0.6, countInBars: 1, preRollBars: 0, duringPlayback: true },
 };
 
 /** Deep-merge a (possibly partial / older) settings object over the defaults. */
@@ -281,6 +303,7 @@ export function withDefaults(s: Partial<Settings> | null | undefined): Settings 
     editing: { ...d.editing, ...(s?.editing ?? {}), defaultTimeSignature: { ...d.editing.defaultTimeSignature, ...(s?.editing?.defaultTimeSignature ?? {}) } },
     export: { ...d.export, ...(s?.export ?? {}) },
     appearance: { ...d.appearance, ...(s?.appearance ?? {}), tierColors: { ...d.appearance.tierColors, ...(s?.appearance?.tierColors ?? {}) } },
+    metronome: { ...d.metronome, ...(s?.metronome ?? {}) },
   };
 }
 

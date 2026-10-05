@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { GRID_OPTIONS, peakDb, selectedPattern, useStore } from "../store";
+import { useEffect, useRef, useState } from "react";
+import { peakDb, selectedPattern, useStore } from "../store";
 import { TIME_SIGNATURES } from "../types";
 import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
@@ -15,6 +15,10 @@ export function Transport() {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmText, setBpmText] = useState(model.tempo.toFixed(3));
   useEffect(() => setBpmText(model.tempo.toFixed(3)), [model.tempo]);
+  const bpmDrag = useRef<{ y0: number; bpm0: number; moved: boolean } | null>(null);
+  const setTempo = (bpm: number, transient = false) => void s.dispatch({ type: "setTempo", bpm: Math.min(300, Math.max(20, bpm)) }, transient, "set tempo");
+  const swing = model.swing ?? 50;
+  const swingGrid = model.swingGrid ?? 0.5;
 
   // Position: BBB.B.SS (bar . beat . sixteenth) and MM:SS.mmm
   const beat = s.playhead;
@@ -37,7 +41,7 @@ export function Transport() {
 
   const commitBpm = () => {
     const v = parseFloat(bpmText);
-    if (Number.isFinite(v)) void s.dispatch({ type: "setTempo", bpm: Math.min(300, Math.max(20, v)) });
+    if (Number.isFinite(v)) setTempo(v);
     setEditingBpm(false);
   };
 
@@ -87,13 +91,30 @@ export function Transport() {
             <path d="M3 4 H12 L10 2 M13 8 H4 L6 10" stroke={s.looping ? "#b48cff" : "#9a9aa4"} strokeWidth="1.6" fill="none" />
           </svg>
         </button>
+        <button
+          className="tbtn"
+          style={s.settings.metronome.on ? { background: "var(--accent-bg)", borderColor: "var(--accent-border)" } : undefined}
+          onClick={() => s.toggleMetronome()}
+          title={`metronome (M) · count-in ${s.settings.metronome.countInBars} bar${s.settings.metronome.countInBars === 1 ? "" : "s"} when recording · volume and pre-roll in Settings → audio`}
+        >
+          <svg width="12" height="14" viewBox="0 0 12 14">
+            <path d="M3 13 L5 1 H7 L9 13 Z" fill="none" stroke={s.settings.metronome.on ? "#b48cff" : "#9a9aa4"} strokeWidth="1.4" />
+            <path d="M6 10 L9.5 3" stroke={s.settings.metronome.on ? "#b48cff" : "#9a9aa4"} strokeWidth="1.4" />
+          </svg>
+        </button>
       </div>
       <div className="lcd">
         <div className="tgroup">
-          <span className="big">
-            {pad(bar, 3)}.{bib}.{pad(six, 2)}
-          </span>
-          <span className="micro">bar · beat · 16th</span>
+          {s.countIn > 0 ? (
+            <span className="big" style={{ color: "var(--rec-text)" }} title="count-in">
+              {Math.ceil(s.countIn)}
+            </span>
+          ) : (
+            <span className="big">
+              {pad(bar, 3)}.{bib}.{pad(six, 2)}
+            </span>
+          )}
+          <span className="micro">{s.countIn > 0 ? "count-in" : "bar · beat · 16th"}</span>
         </div>
         <div style={{ width: 1, height: 28, background: "var(--line-0)" }} />
         <div className="tgroup">
@@ -103,7 +124,7 @@ export function Transport() {
           <span className="micro">min:sec.ms</span>
         </div>
       </div>
-      <div className="lcd" style={{ padding: "0 10px", gap: 10 }}>
+      <div className="lcd" style={{ padding: "0 8px", gap: 8 }}>
         <div className="tgroup">
           {editingBpm ? (
             <input
@@ -116,24 +137,90 @@ export function Transport() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") commitBpm();
                 if (e.key === "Escape") setEditingBpm(false);
+                if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                  e.preventDefault();
+                  const base = parseFloat(bpmText);
+                  const d = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 10 : 1);
+                  const next = Math.min(300, Math.max(20, (Number.isFinite(base) ? Math.round(base) : model.tempo) + d));
+                  setBpmText(next.toFixed(3));
+                  setTempo(next);
+                }
               }}
             />
           ) : (
             <span
               className="bpm"
-              onClick={() => (setBpmText(model.tempo.toFixed(3)), setEditingBpm(true))}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                bpmDrag.current = { y0: e.clientY, bpm0: model.tempo, moved: false };
+                (e.target as HTMLElement).setPointerCapture(e.pointerId);
+              }}
+              onPointerMove={(e) => {
+                const d = bpmDrag.current;
+                if (!d) return;
+                const dy = d.y0 - e.clientY;
+                if (!d.moved && Math.abs(dy) < 3) return;
+                d.moved = true;
+                // 1 bpm per 2 px; ⇧ for fine 0.1 bpm steps.
+                const step = e.shiftKey ? 0.1 : 1;
+                setTempo(Math.round((d.bpm0 + (dy / 2) * step) / step) * step, true);
+              }}
+              onPointerUp={() => {
+                const d = bpmDrag.current;
+                bpmDrag.current = null;
+                if (!d) return;
+                if (d.moved) void s.commitGesture();
+                else (setBpmText(model.tempo.toFixed(3)), setEditingBpm(true));
+              }}
+              onDoubleClick={() => setTempo(s.settings.editing.defaultTempo)}
               onWheel={(e) => {
                 e.preventDefault();
-                void s.dispatch({ type: "setTempo", bpm: Math.round(model.tempo) + (e.deltaY < 0 ? 1 : -1) });
+                setTempo(Math.round(model.tempo) + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 10 : 1));
               }}
-              title="click to type · scroll to nudge"
+              title="click to type (↑↓ ±1, ⇧ ±10) · drag up/down · scroll to nudge · double-click resets"
             >
               {model.tempo.toFixed(3)}
             </span>
           )}
           <span className="micro">bpm</span>
         </div>
-        <button className="chip tiny" onClick={() => s.tapTempo()} title="tap tempo">tap</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <button className="chip tiny" onClick={() => s.tapTempo()} title="tap tempo (averages the last 8 taps)">tap</button>
+          <div className="row" style={{ gap: 2 }}>
+            <button className="chip tiny" onClick={() => setTempo(model.tempo / 2)} title="half time">÷2</button>
+            <button className="chip tiny" onClick={() => setTempo(model.tempo * 2)} title="double time">×2</button>
+          </div>
+        </div>
+        <div className="tgroup" title="swing: delays every second eighth (or sixteenth). 50 = straight · 67 = triplet feel · 75 = hard shuffle">
+          <span className="row" style={{ gap: 3 }}>
+            <span
+              className="mono"
+              style={{ color: swing > 50 ? "var(--accent)" : "var(--text-4)", cursor: "ns-resize", minWidth: 22, textAlign: "right" }}
+              onWheel={(e) => {
+                e.preventDefault();
+                void s.dispatch({ type: "setSwing", swing: Math.round(swing) + (e.deltaY < 0 ? 1 : -1), grid: swingGrid }, false, "set swing");
+              }}
+              onDoubleClick={() => s.dispatch({ type: "setSwing", swing: 50, grid: swingGrid })}
+            >
+              {Math.round(swing)}
+            </span>
+            <input
+              type="range"
+              min={50}
+              max={75}
+              step={1}
+              value={Math.round(swing)}
+              style={{ width: 44 }}
+              onChange={(e) => void s.dispatch({ type: "setSwing", swing: Number(e.target.value), grid: swingGrid }, true, "set swing")}
+              onPointerUp={() => void s.commitGesture()}
+            />
+            <select value={swingGrid} onChange={(e) => s.dispatch({ type: "setSwing", swing, grid: Number(e.target.value) })} style={{ height: 16, padding: "0 12px 0 3px", fontSize: 9 }}>
+              <option value={0.5}>8th</option>
+              <option value={0.25}>16th</option>
+            </select>
+          </span>
+          <span className="micro">swing</span>
+        </div>
       </div>
       <div className="grid22">
         <span className="k">sig</span>
@@ -175,35 +262,14 @@ export function Transport() {
           )}
         </span>
       </div>
-      <div className="grid22">
-        <span className="k">grid</span>
-        <span className="v">
-          <select value={s.noteLength} onChange={(e) => s.setNoteLength(parseFloat(e.target.value))} style={{ height: 18, padding: "0 14px 0 4px" }}>
-            {GRID_OPTIONS.map(([l, v]) => (
-              <option key={l} value={v}>{l}</option>
-            ))}
-          </select>
-        </span>
-        <span className="k">zoom</span>
-        <span className="v">
-          <button className="ico" onClick={() => s.setZoom(s.zoom / 1.25)}>−</button>
-          <span>{Math.round(s.zoom * 100)}%</span>
-          <button className="ico" onClick={() => s.setZoom(s.zoom * 1.25)}>+</button>
-        </span>
-      </div>
       <span className="spacer" />
       <div className="row" style={{ gap: 3 }}>
         <div className="seg" title="play the selected track from your computer keyboard · tier: home row = chord tones, top row = tensions, following the playhead · chrom: Z/Q rows chromatic · −/+ octave">
-          <div className={s.liveKeyboard === "off" ? "on" : ""} onClick={() => s.setLiveKeyboard("off")}>keys off</div>
+          <div className={s.liveKeyboard === "off" ? "on" : ""} onClick={() => s.setLiveKeyboard("off")}>keys</div>
           <div className={s.liveKeyboard === "tier" ? "on" : ""} onClick={() => s.setLiveKeyboard("tier")}>tier</div>
           <div className={s.liveKeyboard === "chromatic" ? "on" : ""} onClick={() => s.setLiveKeyboard("chromatic")}>chrom</div>
         </div>
         <MidiChip />
-      </div>
-      <div className="row" style={{ gap: 3 }}>
-        <button className={`chip${s.highlightRows ? " on" : ""}`} onClick={() => s.toggleHighlight()} title="tint piano-roll rows by how each note fits the chord under the playhead">tiers</button>
-        <button className={`chip${s.showLandscape ? " on" : ""}`} onClick={() => s.toggleLandscape()} title="harmonic map: color every beat of the roll by its fit against the chord there">map</button>
-        <button className={`chip${s.hearChords ? " on" : ""}`} onClick={() => s.toggleHearChords()} title="hear the chord track as a pad bed">chords</button>
       </div>
       <div className="mastermeter">
         <div className="hdr">

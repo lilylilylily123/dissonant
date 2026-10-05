@@ -34,6 +34,8 @@ struct PlaybackContext {
     /// Mirrors of engine transport settings, re-sent when the audio device restarts.
     looping: bool,
     loop_region: Option<(f64, f64)>,
+    metronome: bool,
+    metronome_volume: f32,
 }
 
 impl Default for PlaybackContext {
@@ -45,6 +47,8 @@ impl Default for PlaybackContext {
             live_track: None,
             looping: true,
             loop_region: None,
+            metronome: false,
+            metronome_volume: 0.6,
         }
     }
 }
@@ -127,6 +131,8 @@ pub struct PlayheadEvent {
     pub playing: bool,
     pub master_peak: [f32; 2],
     pub track_peaks: Vec<f32>,
+    /// Beats of count-in left (0 when not counting in).
+    pub count_in: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,12 +244,13 @@ impl AppState {
 
     /// Re-send the transport settings the engine forgets when its device is rebuilt.
     fn resend_transport(&self) {
-        let (hear_chords, looping, loop_region) = {
+        let (hear_chords, looping, loop_region, metronome, volume) = {
             let ctx = self.playback.lock().unwrap();
-            (ctx.hear_chords, ctx.looping, ctx.loop_region)
+            (ctx.hear_chords, ctx.looping, ctx.loop_region, ctx.metronome, ctx.metronome_volume)
         };
         self.send(EngineCommand::SetHearChords(hear_chords));
         self.send(EngineCommand::SetLooping(looping));
+        self.send(EngineCommand::SetMetronome { on: metronome, volume });
         match loop_region {
             Some((start, end)) => self.send(EngineCommand::SetLoop { start, end }),
             None => self.send(EngineCommand::ClearLoop),
@@ -631,9 +638,27 @@ fn set_playback_context(state: State<'_, AppState>, mode: PlayMode, pattern_id: 
     state.sync_engine();
 }
 
+/// Start playing. With `count_in_bars > 0` the metronome counts that many bars first and
+/// the transport starts on the downbeat after.
 #[tauri::command]
-fn transport_play(state: State<'_, AppState>) {
-    state.send(EngineCommand::Play);
+fn transport_play(state: State<'_, AppState>, count_in_bars: Option<u32>) {
+    match count_in_bars {
+        Some(bars) if bars > 0 => state.send(EngineCommand::PlayWithCountIn { bars }),
+        _ => state.send(EngineCommand::Play),
+    }
+}
+
+#[tauri::command]
+fn set_metronome(state: State<'_, AppState>, on: bool, volume: Option<f32>) {
+    let (on, volume) = {
+        let mut ctx = state.playback.lock().unwrap();
+        ctx.metronome = on;
+        if let Some(v) = volume {
+            ctx.metronome_volume = v.clamp(0.0, 1.0);
+        }
+        (ctx.metronome, ctx.metronome_volume)
+    };
+    state.send(EngineCommand::SetMetronome { on, volume });
 }
 
 #[tauri::command]
@@ -974,6 +999,14 @@ fn set_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) 
     if audio_changed {
         state.restart_audio();
     }
+    {
+        let mut ctx = state.playback.lock().unwrap();
+        ctx.metronome = settings.metronome.on;
+        ctx.metronome_volume = settings.metronome.volume;
+        let (on, volume) = (ctx.metronome, ctx.metronome_volume);
+        drop(ctx);
+        state.send(EngineCommand::SetMetronome { on, volume });
+    }
     if midi_changed {
         if let Some(name) = &settings.midi.default_input {
             let _ = open_midi(&app, &state, Some(name.clone()));
@@ -1031,10 +1064,11 @@ fn spawn_playhead_emitter(app: AppHandle) {
                         playing,
                         master_peak: [l, r],
                         track_peaks,
+                        count_in: shared.count_in_beats(),
                     }
                 };
                 let key = (payload.beat.to_bits(), payload.playing);
-                if last == Some(key) && payload.master_peak == [0.0, 0.0] {
+                if last == Some(key) && payload.master_peak == [0.0, 0.0] && payload.count_in == 0.0 {
                     continue; // nothing moved; don't spam the webview
                 }
                 last = Some(key);
@@ -1130,8 +1164,15 @@ pub fn run() {
                 }
                 Err(e) => log::warn!("no app data dir: {e}"),
             }
+            {
+                let m = state.settings().metronome;
+                let mut ctx = state.playback.lock().unwrap();
+                ctx.metronome = m.on;
+                ctx.metronome_volume = m.volume;
+            }
             state.start_audio();
             state.sync_engine();
+            state.resend_transport();
             if let Some(name) = state.settings().midi.default_input {
                 if let Err(e) = open_midi(app.handle(), &state, Some(name)) {
                     log::info!("default MIDI input not opened: {e}");
@@ -1178,6 +1219,7 @@ pub fn run() {
             save_project,
             set_playback_context,
             transport_play,
+            set_metronome,
             transport_stop,
             transport_seek,
             set_hear_chords,

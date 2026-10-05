@@ -17,7 +17,7 @@ import {
   snapFloor,
   snapRound,
 } from "../noteEditing";
-import { mixHex, TIER_COLORS, trackColor, uuid, type NoteEvent, type Tier } from "../types";
+import { mixHex, swingWarp, TIER_COLORS, trackColor, uuid, type NoteEvent, type Tier } from "../types";
 import { BASE_BEAT_W, GUTTER } from "./ChordLane";
 
 // Geometry (from the handoff: 18px rows, 96px beats at 1×, 64px keyboard, 28px ruler)
@@ -98,6 +98,8 @@ export function PianoRoll() {
   const magnet = useStore((s) => s.magnet);
   const stamp = useStore((s) => s.stamp);
   const editing = useStore((s) => s.settings.editing);
+  const swing = useStore((s) => s.snapshot?.model.swing ?? 50);
+  const swingGrid = useStore((s) => s.snapshot?.model.swingGrid ?? 0.5);
   const appearance = useStore((s) => s.settings.appearance);
   const ROW_H = appearance.rowHeight;
   const defaultVelocity = editing.defaultVelocity;
@@ -227,7 +229,8 @@ export function PianoRoll() {
       }
     }
 
-    // Vertical grid: subdivision, beat, bar
+    // Vertical grid: subdivision, beat, bar. With swing on, the swung sub-lines are drawn
+    // where the notes will actually sound (accent-tinted), next to the straight grid.
     const sub = Math.min(noteLength, 1);
     for (let t = 0; t <= beats + 1e-9; t += sub) {
       const x = GUTTER + t * beatW;
@@ -235,6 +238,13 @@ export function PianoRoll() {
       const isBeat = Math.abs(t % 1) < 1e-9;
       ctx.fillStyle = isBar ? C.gridBar : isBeat ? C.gridBeat : C.gridSub;
       ctx.fillRect(Math.round(x), RULER_H, 1, gridH);
+      if (swing > 50 && !isBeat) {
+        const w = swingWarp(t, swing, swingGrid);
+        if (Math.abs(w - t) > 1e-6) {
+          ctx.fillStyle = "rgba(180,140,255,.22)";
+          ctx.fillRect(Math.round(GUTTER + w * beatW), RULER_H, 1, gridH);
+        }
+      }
     }
 
     // Ruler: loop bar (the pattern loops), bar + beat labels
@@ -421,7 +431,7 @@ export function PianoRoll() {
       ctx.fillStyle = "#b8b8c0";
       ctx.fillText(why, hx + 6, hy + 20);
     }
-  }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping, ROW_H, appearance]);
+  }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping, ROW_H, appearance, swing, swingGrid]);
 
   // ─── Velocity lane canvas ─────────────────────────────────────────────────────────────────
   useEffect(() => {
