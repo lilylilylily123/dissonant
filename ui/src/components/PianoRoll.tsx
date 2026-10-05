@@ -3,7 +3,9 @@ import { beatsPerBar, effectiveKey, selectedPattern, selectedTrack, selectedTrac
 import { chordAt, explainNote, midiName, tierMap } from "../theory";
 import {
   adjustVelocity,
+  duplicateBySpan,
   duplicateNotes,
+  glueNotes,
   magnetPitch,
   moveNotes,
   stampChord,
@@ -11,11 +13,15 @@ import {
   notesInRect,
   pasteNotes,
   placeNote,
+  rampVelocity,
   removeNotes,
   resizeNotes,
   selectionBounds,
   snapFloor,
   snapRound,
+  splitNotes,
+  stepSelection,
+  toggleMute,
 } from "../noteEditing";
 import { mixHex, swingWarp, TIER_COLORS, trackColor, uuid, type NoteEvent, type Tier } from "../types";
 import { BASE_BEAT_W, GUTTER } from "./ChordLane";
@@ -26,6 +32,8 @@ const HIGH = 96; // C7
 const RULER_H = 28;
 const EDGE_PX = 7;
 const VEL_H = 110;
+/** Grid used while ⌥ bypasses snap. */
+const FINE = 1 / 64;
 const BLACK = new Set([1, 3, 6, 8, 10]);
 
 const C = {
@@ -57,8 +65,9 @@ const noteSel = (t: Tier) => mixHex(TIER_COLORS[t], "#ffffff", 0.72);
 const tierColor = (t: Tier | null) => (t ? TIER_COLORS[t] : "#9a9aa4");
 
 type Drag =
-  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate" }
+  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate"; axis?: "x" | "y" | null }
   | { kind: "resize"; ids: Set<string>; anchor: NoteEvent; startX: number; base: NoteEvent[] }
+  | { kind: "ramp"; ids: Set<string>; b0: number; v0: number; base: NoteEvent[] }
   | { kind: "paint"; base: NoteEvent[] }
   | { kind: "erase"; base: NoteEvent[] }
   | { kind: "marquee"; x0: number; y0: number; x1: number; y1: number; baseSelection: Set<string> }
@@ -68,11 +77,16 @@ let clipboard: NoteEvent[] = [];
 
 /**
  * The piano roll. Modeless direct manipulation, FL-style:
- *  - click empty = place a note (and keep dragging to move it) · ⌥-drag empty = paint
- *  - drag a note = move (auditions pitch) · drag its right edge = resize · ⌥-drag = duplicate
- *  - shift-drag empty = marquee select · shift-click = toggle in selection
- *  - right-click / right-drag = erase · ruler click = seek · velocity lane: drag stems
- *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · arrows nudge (⇧ = octave / bar) · [ ] velocity · esc
+ *  - click empty = place a note (and keep dragging to move it) · brush on (or ⌥ in "paint"
+ *    mode) = paint · ⌥ in "no snap" mode = place / move / resize off the grid
+ *  - drag a note = move (auditions pitch; ⇧ constrains to one axis) · right edge = resize ·
+ *    ⌥-drag = duplicate
+ *  - shift/⌘-drag empty = marquee select · shift-click = toggle · double-click a key = select
+ *    that pitch (⌘: the pitch class) · Tab/⇧Tab = next/previous note
+ *  - right-click / right-drag = erase · ruler click = seek · velocity lane: drag stems, ⌥-drag
+ *    draws a ramp · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor
+ *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one
+ *    loop later · 0 mute · arrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] velocity · esc
  * Tiering is visual only — any note can be placed in any tier.
  */
 export function PianoRoll() {
@@ -97,6 +111,11 @@ export function PianoRoll() {
   const loopDrag = useRef<{ anchor: number } | null>(null);
   const magnet = useStore((s) => s.magnet);
   const stamp = useStore((s) => s.stamp);
+  const brush = useStore((s) => s.brush);
+  const follow = useStore((s) => s.follow);
+  const playing = useStore((s) => s.playing);
+  const selectionRequest = useStore((s) => s.selectionRequest);
+  const commitGesture = useStore((s) => s.commitGesture);
   const editing = useStore((s) => s.settings.editing);
   const swing = useStore((s) => s.snapshot?.model.swing ?? 50);
   const swingGrid = useStore((s) => s.snapshot?.model.swingGrid ?? 0.5);
@@ -151,12 +170,26 @@ export function PianoRoll() {
   useEffect(() => {
     setSelectedNoteIds([...selection]);
   }, [selection, setSelectedNoteIds]);
+  useEffect(() => {
+    if (selectionRequest) setSelection(new Set(selectionRequest.ids));
+  }, [selectionRequest]);
 
-  // Center on C4 initially; track viewport width for the velocity lane.
+  // Follow: page the view when the playhead leaves it.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !follow || !playing) return;
+    const px = GUTTER + playhead * beatW;
+    const left = el.scrollLeft;
+    const w = el.clientWidth;
+    if (px < left + GUTTER || px > left + w - 24) el.scrollLeft = Math.max(0, px - GUTTER - 16);
+  }, [playhead, follow, playing, beatW]);
+
+  // Track the viewport width for the velocity lane. (Centering on C4 happens in the canvas
+  // effect below, once the canvas has its height — a layout effect here would clamp to 0.)
+  const centered = useRef(false);
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = Math.max(0, yForPitch(60) - el.clientHeight / 2);
     const ro = new ResizeObserver(() => setViewW(el.clientWidth));
     ro.observe(el);
     setViewW(el.clientWidth);
@@ -176,6 +209,11 @@ export function PianoRoll() {
       canvas.height = Math.round(H * dpr);
       canvas.style.width = `${W}px`;
       canvas.style.height = `${H}px`;
+    }
+    if (!centered.current && scrollRef.current) {
+      centered.current = true;
+      const el = scrollRef.current;
+      el.scrollTop = Math.max(0, yForPitch(60) - el.clientHeight / 2);
     }
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -293,10 +331,19 @@ export function PianoRoll() {
       const w = Math.max(3, n.lengthBeats * beatW - 1);
       const h = ROW_H - 1;
       ctx.fillStyle = sel ? (t ? noteSel(t) : "#f0f0f4") : tierColor(t);
-      ctx.globalAlpha = sel ? 1 : velocityAlpha(n.velocity);
+      ctx.globalAlpha = n.muted ? 0.14 : sel ? 1 : velocityAlpha(n.velocity);
       roundRect(ctx, x, y, w, h, 2);
       ctx.fill();
       ctx.globalAlpha = 1;
+      if (n.muted) {
+        ctx.setLineDash([3, 2]);
+        ctx.strokeStyle = sel ? "#ffffff" : tierColor(t);
+        ctx.lineWidth = 1;
+        roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        continue;
+      }
       // Non-color tier cues
       if (t === "tension") {
         ctx.fillStyle = "rgba(4,20,13,.85)";
@@ -569,12 +616,12 @@ export function PianoRoll() {
       return;
     }
 
-    if (e.shiftKey) {
-      dragRef.current = { kind: "marquee", x0: x, y0: y, x1: x, y1: y, baseSelection: new Set(selection) };
+    if (e.shiftKey || e.metaKey || e.ctrlKey) {
+      dragRef.current = { kind: "marquee", x0: x, y0: y, x1: x, y1: y, baseSelection: new Set(e.shiftKey ? selection : []) };
       setPreview(notes);
       return;
     }
-    if (e.altKey) {
+    if (brush || (e.altKey && editing.altKey === "paint")) {
       const placed = placeNote(notes, beat, pitch, noteLength, noteLength, defaultVelocity);
       const base = placed ? [...notes, placed] : notes;
       if (placed) auditionPlace(pitch, placed.velocity);
@@ -582,6 +629,8 @@ export function PianoRoll() {
       setPreview(base);
       return;
     }
+    // ⌥ (no-snap mode): place exactly where the cursor is instead of on the grid.
+    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE : noteLength;
     if (stamp) {
       // Chord stamp: place the chord under the cursor as stacked notes, voiced upward.
       const chord = chordAt(chords, beat);
@@ -594,7 +643,7 @@ export function PianoRoll() {
       return;
     }
     const target = magnet ? magnetPitch(pitch, tierMap(beat, chords, key)) : pitch;
-    const placed = placeNote(notes, beat, target, noteLength, noteLength, defaultVelocity);
+    const placed = placeNote(notes, beat, target, noteLength, snapGrid, defaultVelocity);
     if (!placed) {
       setSelection(new Set());
       return;
@@ -623,12 +672,30 @@ export function PianoRoll() {
       setHover(x >= GUTTER && y >= RULER_H && beat < beats && pitch >= LOW && pitch <= HIGH ? { beat, pitch } : null);
       return;
     }
+    // Auto-scroll when dragging past the viewport's edges.
+    const el = scrollRef.current;
+    if (el && d.kind !== "velocity" && d.kind !== "ramp") {
+      const rect = el.getBoundingClientRect();
+      if (e.clientX > rect.right - 24) el.scrollLeft += 12;
+      else if (e.clientX < rect.left + GUTTER + 12) el.scrollLeft = Math.max(0, el.scrollLeft - 12);
+      if (e.clientY > rect.bottom - 24) el.scrollTop += 10;
+      else if (e.clientY < rect.top + RULER_H + 12) el.scrollTop = Math.max(0, el.scrollTop - 10);
+    }
+    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE : noteLength;
     switch (d.kind) {
       case "move": {
         const rawDelta = (x - d.startX) / beatW;
-        const newStart = snapRound(d.anchor.startBeat + rawDelta, noteLength);
-        const dBeats = newStart - d.anchor.startBeat;
+        const newStart = snapRound(d.anchor.startBeat + rawDelta, snapGrid);
+        let dBeats = newStart - d.anchor.startBeat;
         let dPitch = pitchForY(y) - pitchForY(d.startY);
+        // ⇧ constrains to the axis that moved first (time or pitch).
+        if (e.shiftKey) {
+          d.axis ??= Math.abs(x - d.startX) >= Math.abs(y - d.startY) ? "x" : "y";
+          if (d.axis === "x") dPitch = 0;
+          else dBeats = 0;
+        } else {
+          d.axis = null;
+        }
         if (magnet && d.ids.size === 1) {
           const want = magnetPitch(d.anchor.pitch + dPitch, tierMap(d.anchor.startBeat + dBeats, chords, key));
           dPitch = want - d.anchor.pitch;
@@ -644,8 +711,8 @@ export function PianoRoll() {
       }
       case "resize": {
         const rawDelta = (x - d.startX) / beatW;
-        const newLen = Math.max(noteLength, snapRound(d.anchor.lengthBeats + rawDelta, noteLength));
-        setPreview(resizeNotes(d.base, d.ids, newLen - d.anchor.lengthBeats, noteLength));
+        const newLen = Math.max(snapGrid, snapRound(d.anchor.lengthBeats + rawDelta, snapGrid));
+        setPreview(resizeNotes(d.base, d.ids, newLen - d.anchor.lengthBeats, snapGrid));
         break;
       }
       case "paint": {
@@ -677,9 +744,68 @@ export function PianoRoll() {
         break;
       }
       case "velocity":
+      case "ramp":
         break;
     }
   };
+
+  // Double-click a key: select every note at that pitch (⌘: the pitch class in every octave).
+  const onDoubleClick = (e: React.MouseEvent) => {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (x >= GUTTER || y < RULER_H) return;
+    const pitch = pitchForY(y);
+    const pc = ((pitch % 12) + 12) % 12;
+    const byClass = e.metaKey || e.ctrlKey;
+    setSelection(new Set(notes.filter((n) => (byClass ? ((n.pitch % 12) + 12) % 12 === pc : n.pitch === pitch)).map((n) => n.id)));
+  };
+
+  // ⌥-wheel transposes the selection (⌥⇧: octaves); ⌘-wheel zooms around the cursor; ⇧-wheel scrolls sideways.
+  // Attached natively (non-passive) because React's onWheel cannot preventDefault.
+  const wheelCommit = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onWheel = (e: WheelEvent) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (e.altKey && selection.size) {
+      e.preventDefault();
+      const step = (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 12 : 1);
+      const next = moveNotes(notes, selection, 0, step, { min: LOW, max: HIGH }, beats);
+      if (next !== notes && pattern && track) {
+        void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, true, "transpose notes");
+        if (wheelCommit.current) clearTimeout(wheelCommit.current);
+        wheelCommit.current = setTimeout(() => void commitGesture(), 400);
+      }
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const beatUnderCursor = (el.scrollLeft + cursorX - GUTTER) / beatW;
+      const nextZoom = Math.min(3, Math.max(0.25, zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+      setZoom(nextZoom);
+      const nextBeatW = BASE_BEAT_W * nextZoom;
+      requestAnimationFrame(() => {
+        el.scrollLeft = Math.max(0, beatUnderCursor * nextBeatW + GUTTER - cursorX);
+      });
+      return;
+    }
+    if (e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    }
+  };
+  const onWheelRef = useRef(onWheel);
+  onWheelRef.current = onWheel;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => onWheelRef.current(e);
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);
 
   const endDrag = () => {
     if (loopDrag.current) {
@@ -699,11 +825,19 @@ export function PianoRoll() {
   };
 
   // Velocity lane: drag a stem (or all selected stems) vertically.
+  const velAt = (y: number) => Math.round(Math.min(127, Math.max(1, ((VEL_H - 4 - y) / (VEL_H - 14)) * 127)));
   const onVelDown = (e: React.PointerEvent) => {
     const canvas = velRef.current!;
     const { x, y } = local(e, canvas);
     if (x < GUTTER || e.button !== 0) return;
     const beat = (x + scrollLeft - GUTTER) / beatW;
+    if (e.altKey) {
+      // Ramp: draw a line through the stems; selected notes only when there is a selection.
+      canvas.setPointerCapture(e.pointerId);
+      dragRef.current = { kind: "ramp", ids: new Set(selection), b0: beat, v0: velAt(y), base: notes };
+      setPreview(notes);
+      return;
+    }
     let best: NoteEvent | null = null;
     let bestDx = Infinity;
     for (const n of notes) {
@@ -731,7 +865,14 @@ export function PianoRoll() {
   };
   const onVelMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
-    if (!d || d.kind !== "velocity") return;
+    if (!d) return;
+    if (d.kind === "ramp") {
+      const { x, y } = local(e, velRef.current!);
+      const b1 = (x + scrollLeft - GUTTER) / beatW;
+      setPreview(rampVelocity(d.base, d.ids, d.b0, d.v0, b1, velAt(y)));
+      return;
+    }
+    if (d.kind !== "velocity") return;
     applyVelocityAt(local(e, velRef.current!).y);
   };
 
@@ -743,6 +884,27 @@ export function PianoRoll() {
 
     if (k === "Backspace" || k === "Delete") {
       if (selection.size) commit(removeNotes(notes, selection), "delete notes");
+    } else if (k === "Tab") {
+      const id = stepSelection(notes, selection, e.shiftKey ? -1 : 1);
+      if (id) {
+        setSelection(new Set([id]));
+        const n = notes.find((x) => x.id === id);
+        if (n) auditionPlace(n.pitch, n.velocity);
+      }
+    } else if (k === "0" && !mod) {
+      if (selection.size) commit(toggleMute(notes, selection), "mute notes");
+    } else if (mod && k.toLowerCase() === "e") {
+      // Split at the playhead; with nothing to split, fall through to the global export.
+      const next = splitNotes(notes, selection, playhead);
+      if (next === notes || next.length === notes.length) return;
+      commit(next, "split notes");
+    } else if (mod && k.toLowerCase() === "j") {
+      if (selection.size) commit(glueNotes(notes, selection), "glue notes");
+    } else if (mod && k.toLowerCase() === "b") {
+      if (!selection.size) return;
+      const { notes: next, newIds } = duplicateBySpan(notes, selection, beats);
+      commit(next, "duplicate to next loop");
+      setSelection(newIds);
     } else if (mod && k.toLowerCase() === "a") {
       setSelection(new Set(notes.map((n) => n.id)));
     } else if (mod && k.toLowerCase() === "c") {
@@ -768,7 +930,8 @@ export function PianoRoll() {
     } else if (k === "Escape") {
       setSelection(new Set());
     } else if (k.startsWith("Arrow") && selection.size) {
-      const dBeats = k === "ArrowLeft" ? -(e.shiftKey ? 4 : grid) : k === "ArrowRight" ? (e.shiftKey ? 4 : grid) : 0;
+      const step = e.altKey ? FINE : e.shiftKey ? bpb : grid;
+      const dBeats = k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0;
       const dPitch = k === "ArrowUp" ? (e.shiftKey ? 12 : 1) : k === "ArrowDown" ? -(e.shiftKey ? 12 : 1) : 0;
       commit(moveNotes(notes, selection, dBeats, dPitch, { min: LOW, max: HIGH }, beats), dPitch ? "transpose notes" : "nudge notes");
     } else if ((k === "[" || k === "]") && selection.size) {
@@ -797,16 +960,11 @@ export function PianoRoll() {
         tabIndex={0}
         onKeyDown={onKeyDown}
         onScroll={(e) => setScrollLeft((e.target as HTMLDivElement).scrollLeft)}
-        onWheel={(e) => {
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            setZoom(zoom * (e.deltaY < 0 ? 1.1 : 0.9));
-          }
-        }}
       >
         <canvas
           ref={canvasRef}
           onPointerDown={onPointerDown}
+          onDoubleClick={onDoubleClick}
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
@@ -844,6 +1002,8 @@ function dragLabel(d: Drag, before: NoteEvent[], after: NoteEvent[]): string {
       return "erase notes";
     case "velocity":
       return "change velocity";
+    case "ramp":
+      return "ramp velocity";
     case "marquee":
       return "edit notes";
   }

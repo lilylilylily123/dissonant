@@ -105,6 +105,9 @@ pub struct NoteEvent {
     /// stops nagging. Guidance, never a gate (R11).
     #[serde(default)]
     pub intentional: bool,
+    /// Kept in the pattern but skipped by the scheduler (drawn hollow).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
 }
 
 impl NoteEvent {
@@ -116,6 +119,7 @@ impl NoteEvent {
             pitch,
             velocity: default_velocity(),
             intentional: false,
+            muted: false,
         }
     }
 

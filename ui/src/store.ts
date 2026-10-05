@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, KeyState, MidiStatus, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, Track } from "./types";
+import type { AudioStatus, Command, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, Track } from "./types";
 import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
@@ -62,6 +62,12 @@ interface State {
   liveKeyboard: LiveKeyboard;
   magnet: boolean;
   stamp: boolean;
+  /** Brush: left-drag on empty space paints notes. */
+  brush: boolean;
+  /** Keep the playhead in view while playing. */
+  follow: boolean;
+  /** Something outside the roll (inspector, menu) asked for this selection. */
+  selectionRequest: { ids: string[]; nonce: number } | null;
 
   init(): Promise<void>;
   /** `label` names the edit in the Edit menu ("move notes"); defaults to the command's name. */
@@ -99,6 +105,11 @@ interface State {
   noteOff(pitch: number): void;
   toggleMagnet(): void;
   toggleStamp(): void;
+  toggleBrush(): void;
+  toggleFollow(): void;
+  requestSelection(ids: string[]): void;
+  /** Apply a pure edit to the selected track's notes in the selected pattern (ids = current selection). */
+  transformSelection(fn: (notes: NoteEvent[], ids: Set<string>) => NoteEvent[], label: string): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
   /** Open a known path (recent file, dropped file), asking about unsaved work first. */
@@ -242,6 +253,9 @@ export const useStore = create<State>((set, get) => {
     liveKeyboard: "off",
     magnet: false,
     stamp: false,
+    brush: false,
+    follow: true,
+    selectionRequest: null,
 
     async init() {
       const b = await getBridge();
@@ -452,6 +466,25 @@ export const useStore = create<State>((set, get) => {
     },
     toggleStamp() {
       set((s) => ({ stamp: !s.stamp }));
+    },
+    toggleBrush() {
+      set((s) => ({ brush: !s.brush }));
+    },
+    toggleFollow() {
+      set((s) => ({ follow: !s.follow }));
+    },
+    requestSelection(ids) {
+      set((s) => ({ selectionRequest: { ids, nonce: (s.selectionRequest?.nonce ?? 0) + 1 } }));
+    },
+    transformSelection(fn, label) {
+      const st = get();
+      const pattern = selectedPattern(st);
+      const track = selectedTrack(st);
+      if (!pattern || !track) return;
+      const notes = pattern.notesByTrack[track.id] ?? [];
+      const next = fn(notes, new Set(st.selectedNoteIds));
+      if (next === notes) return;
+      void st.dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
     },
 
     async newProject() {

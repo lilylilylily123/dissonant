@@ -59,6 +59,7 @@ impl Arrangement {
                     pitch: note.pitch,
                     velocity: note.velocity,
                     intentional: note.intentional,
+                    muted: note.muted,
                 });
             }
         }

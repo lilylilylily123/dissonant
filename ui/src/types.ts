@@ -26,6 +26,8 @@ export interface NoteEvent {
   velocity: number;
   /** The player marked this dissonance as deliberate. */
   intentional?: boolean;
+  /** Kept in the pattern but not played (drawn hollow). */
+  muted?: boolean;
 }
 
 export interface TimeSignature {

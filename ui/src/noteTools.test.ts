@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   arpeggiateNotes,
   chopNotes,
+  duplicateBySpan,
+  glueNotes,
   humanizeNotes,
+  invertNotes,
+  rampVelocity,
+  reverseNotes,
+  setLength,
+  splitNotes,
+  stepSelection,
+  toggleMute,
   legatoNotes,
   magnetPitch,
   quantizeNotes,
@@ -117,5 +126,51 @@ describe("magnet, resolve, explain", () => {
     expect(explainNote(70, chords, key, 0)).toContain("outside the key");
     expect(explainNote(60, [], key, 0)).toContain("is in C maj");
     expect(explainNote(60, [], { rootPitchClass: null, scale: "major", isLocked: false }, 0)).toContain("anything goes");
+  });
+});
+
+describe("roll editing commands", () => {
+  it("splits straddling notes at a beat and glues touching same-pitch notes", () => {
+    const notes = [n("a", 0, 2, 60), n("b", 0, 1, 62)];
+    const split = splitNotes(notes, all, 1);
+    expect(split.length).toBe(3);
+    expect(split[0]).toMatchObject({ id: "a", startBeat: 0, lengthBeats: 1 });
+    expect(split[1]).toMatchObject({ startBeat: 1, lengthBeats: 1, pitch: 60 });
+    expect(split[2]).toBe(notes[1]); // not straddling: untouched
+    const glued = glueNotes(split, all);
+    expect(glued.length).toBe(2);
+    expect(glued.find((x) => x.id === "a")).toMatchObject({ startBeat: 0, lengthBeats: 2 });
+    // A gap keeps notes apart.
+    expect(glueNotes([n("a", 0, 0.5, 60), n("b", 1, 0.5, 60)], all).length).toBe(2);
+  });
+
+  it("duplicates by span, reverses in time and inverts pitch", () => {
+    const notes = [n("a", 0, 1, 60), n("b", 1, 0.5, 64), n("c", 3, 1, 67)];
+    const dup = duplicateBySpan(notes, all, 4);
+    expect(dup.notes.length).toBe(6);
+    expect(dup.notes[3]).toMatchObject({ startBeat: 4, pitch: 60 });
+    const rev = reverseNotes(notes, all);
+    expect(rev.map((x) => x.startBeat)).toEqual([3, 2.5, 0]);
+    const inv = invertNotes(notes, all, { min: 0, max: 127 });
+    expect(inv.map((x) => x.pitch)).toEqual([67, 63, 60]);
+  });
+
+  it("sets length, toggles mute and ramps velocity", () => {
+    const notes = [n("a", 0, 1, 60), n("b", 1, 1, 62), n("c", 2, 1, 64), n("d", 5, 1, 65)];
+    expect(setLength(notes, new Set(["a"]), 0.25)[0].lengthBeats).toBe(0.25);
+    const muted = toggleMute(notes, new Set(["a", "b"]));
+    expect(muted[0].muted && muted[1].muted && !muted[2].muted).toBe(true);
+    expect(toggleMute(muted, new Set(["a", "b"]))[0].muted).toBe(false);
+    const ramp = rampVelocity(notes, all, 0, 20, 2, 120);
+    expect(ramp.map((x) => x.velocity)).toEqual([20, 70, 120, 100]);
+    expect(rampVelocity(notes, all, 2, 120, 0, 20)[0].velocity).toBe(20); // direction-agnostic
+  });
+
+  it("steps the selection through notes in time order", () => {
+    const notes = [n("b", 1, 1, 62), n("a", 0, 1, 60), n("c", 2, 1, 64)];
+    expect(stepSelection(notes, new Set(), 1)).toBe("a");
+    expect(stepSelection(notes, new Set(["a"]), 1)).toBe("b");
+    expect(stepSelection(notes, new Set(["c"]), 1)).toBe("a");
+    expect(stepSelection(notes, new Set(["a"]), -1)).toBe("c");
   });
 });

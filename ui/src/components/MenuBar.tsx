@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { selectedPattern, selectedTrack, useStore } from "../store";
 import { fileNameOf } from "../types";
+import { duplicateBySpan, glueNotes, moveNotes, splitNotes, toggleMute } from "../noteEditing";
 
 type Item = { label: string; sc?: string; sub?: string; action?: () => void; disabled?: boolean; sep?: false } | { sep: true };
 
@@ -19,6 +20,8 @@ export function MenuBar() {
   }, [open]);
 
   const mod = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
+  const hasSel = s.selectedNoteIds.length > 0;
+  const range = { min: 24, max: 96 };
 
   const recentItems: Item[] = s.recent.length
     ? [
@@ -45,6 +48,19 @@ export function MenuBar() {
     edit: [
       { label: snapshot.undoLabel ? `Undo ${snapshot.undoLabel}` : "Undo", sc: `${mod}Z`, action: () => s.undo(), disabled: !snapshot.canUndo },
       { label: snapshot.redoLabel ? `Redo ${snapshot.redoLabel}` : "Redo", sc: `⇧${mod}Z`, action: () => s.redo(), disabled: !snapshot.canRedo },
+      { sep: true },
+      { label: "Select all notes", sc: `${mod}A`, disabled: !pattern || !track, action: () => s.requestSelection((pattern && track ? (pattern.notesByTrack[track.id] ?? []) : []).map((n) => n.id)) },
+      { label: "Select none", sc: "Esc", disabled: !hasSel, action: () => s.requestSelection([]) },
+      { sep: true },
+      { label: "Transpose up a semitone", sc: "↑", disabled: !hasSel, action: () => s.transformSelection((ns, ids) => moveNotes(ns, ids, 0, 1, range), "transpose notes") },
+      { label: "Transpose down a semitone", sc: "↓", disabled: !hasSel, action: () => s.transformSelection((ns, ids) => moveNotes(ns, ids, 0, -1, range), "transpose notes") },
+      { label: "Transpose up an octave", sc: "⇧↑", disabled: !hasSel, action: () => s.transformSelection((ns, ids) => moveNotes(ns, ids, 0, 12, range), "transpose notes") },
+      { label: "Transpose down an octave", sc: "⇧↓", disabled: !hasSel, action: () => s.transformSelection((ns, ids) => moveNotes(ns, ids, 0, -12, range), "transpose notes") },
+      { sep: true },
+      { label: "Split at playhead", sc: `${mod}E`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => splitNotes(ns, ids, s.playhead), "split notes") },
+      { label: "Glue notes", sc: `${mod}J`, disabled: !hasSel, action: () => s.transformSelection(glueNotes, "glue notes") },
+      { label: "Duplicate one loop later", sc: `${mod}B`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => duplicateBySpan(ns, ids, pattern?.lengthBeats ?? 16).notes, "duplicate to next loop") },
+      { label: "Mute / unmute notes", sc: "0", disabled: !hasSel, action: () => s.transformSelection(toggleMute, "mute notes") },
       { sep: true },
       {
         label: "Clear notes on this track",

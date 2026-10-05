@@ -640,6 +640,9 @@ impl Engine {
                 continue;
             }
             for note in &track.notes {
+                if note.muted {
+                    continue;
+                }
                 let s = swing(note.start_beat);
                 let e = swing(note.end_beat()).min(seq.length_beats);
                 if s >= from && s < to {
@@ -841,6 +844,22 @@ mod tests {
         let left = render(&mut e, 44_100 * 2, 512);
         assert!(left[..4000].iter().any(|s| s.abs() > 0.01));
         assert!(left[70_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn muted_notes_are_skipped() {
+        let mut model = ProjectModel::empty();
+        model.tracks[0].voice = "sine".into();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let mut n = NoteEvent::new(0.0, 1.0, 69);
+        n.muted = true;
+        model.patterns[0].notes_by_track.insert(tid, vec![n]);
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(seq));
+        e.handle(EngineCommand::Play);
+        let left = render(&mut e, 20_000, 512);
+        assert!(left.iter().all(|s| s.abs() < 1e-6));
     }
 
     #[test]

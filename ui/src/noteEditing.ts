@@ -297,3 +297,121 @@ export function resolveTargets(pitch: number, tiers: ("chordTone" | "tension" | 
   }
   return { down, up };
 }
+
+// ─── Editing commands (roll QOL) ───────────────────────────────────────────────────────────
+
+/** Cut every selected note that straddles `beat` into two at `beat`. */
+export function splitNotes(notes: NoteEvent[], ids: Set<string>, beat: number, minLength = MIN_LENGTH): NoteEvent[] {
+  const target = new Set(sel(notes, ids).map((n) => n.id));
+  const out: NoteEvent[] = [];
+  for (const n of notes) {
+    const end = n.startBeat + n.lengthBeats;
+    if (target.has(n.id) && beat > n.startBeat + minLength - 1e-9 && beat < end - minLength + 1e-9) {
+      out.push({ ...n, lengthBeats: beat - n.startBeat });
+      out.push({ ...n, id: uuid(), startBeat: beat, lengthBeats: end - beat });
+    } else {
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+/**
+ * Join selected same-pitch notes that touch or overlap into one (the first keeps its id and
+ * velocity). Notes separated by a gap stay apart.
+ */
+export function glueNotes(notes: NoteEvent[], ids: Set<string>): NoteEvent[] {
+  const target = sel(notes, ids);
+  if (target.length < 2) return notes;
+  const targetIds = new Set(target.map((n) => n.id));
+  const byPitch = new Map<number, NoteEvent[]>();
+  for (const n of target) byPitch.set(n.pitch, [...(byPitch.get(n.pitch) ?? []), n]);
+  const merged = new Map<string, NoteEvent>();
+  const dropped = new Set<string>();
+  for (const group of byPitch.values()) {
+    group.sort((a, b) => a.startBeat - b.startBeat);
+    let cur = { ...group[0] };
+    for (const n of group.slice(1)) {
+      if (n.startBeat <= cur.startBeat + cur.lengthBeats + 1e-9) {
+        cur.lengthBeats = Math.max(cur.lengthBeats, n.startBeat + n.lengthBeats - cur.startBeat);
+        dropped.add(n.id);
+      } else {
+        merged.set(cur.id, cur);
+        cur = { ...n };
+      }
+    }
+    merged.set(cur.id, cur);
+  }
+  if (dropped.size === 0) return notes;
+  return notes.filter((n) => !dropped.has(n.id)).map((n) => (targetIds.has(n.id) ? (merged.get(n.id) ?? n) : n));
+}
+
+/** Copy the selection one `span` later (⌘B: the pattern length, FL's favourite). */
+export function duplicateBySpan(notes: NoteEvent[], ids: Set<string>, span: number): { notes: NoteEvent[]; newIds: Set<string> } {
+  const target = sel(notes, ids);
+  if (!target.length || !(span > 0)) return { notes, newIds: new Set() };
+  const copies = target.map((n) => ({ ...n, id: uuid(), startBeat: n.startBeat + span }));
+  return { notes: [...notes, ...copies], newIds: new Set(copies.map((c) => c.id)) };
+}
+
+/** Reverse the selection in time within its own span (ends become starts). */
+export function reverseNotes(notes: NoteEvent[], ids: Set<string>): NoteEvent[] {
+  const target = sel(notes, ids);
+  if (target.length < 2) return notes;
+  const set = new Set(target.map((n) => n.id));
+  const start = Math.min(...target.map((n) => n.startBeat));
+  const end = Math.max(...target.map((n) => n.startBeat + n.lengthBeats));
+  return notes.map((n) => (set.has(n.id) ? { ...n, startBeat: start + (end - (n.startBeat + n.lengthBeats)) } : n));
+}
+
+/** Mirror the selection's pitches around its middle (highest ↔ lowest). */
+export function invertNotes(notes: NoteEvent[], ids: Set<string>, range: PitchRange): NoteEvent[] {
+  const target = sel(notes, ids);
+  if (target.length < 2) return notes;
+  const set = new Set(target.map((n) => n.id));
+  const lo = Math.min(...target.map((n) => n.pitch));
+  const hi = Math.max(...target.map((n) => n.pitch));
+  return notes.map((n) => (set.has(n.id) ? { ...n, pitch: Math.min(range.max, Math.max(range.min, lo + hi - n.pitch)) } : n));
+}
+
+/** Give every selected note the same length. */
+export function setLength(notes: NoteEvent[], ids: Set<string>, length: number): NoteEvent[] {
+  const target = new Set(sel(notes, ids).map((n) => n.id));
+  return notes.map((n) => (target.has(n.id) ? { ...n, lengthBeats: Math.max(MIN_LENGTH, length) } : n));
+}
+
+/** Toggle the mute flag on the selection (all unmuted if any is muted → mute all, else unmute). */
+export function toggleMute(notes: NoteEvent[], ids: Set<string>): NoteEvent[] {
+  const target = sel(notes, ids);
+  if (!target.length) return notes;
+  const set = new Set(target.map((n) => n.id));
+  const mute = target.some((n) => !n.muted);
+  return notes.map((n) => (set.has(n.id) ? { ...n, muted: mute } : n));
+}
+
+/**
+ * Velocity ramp: a straight line from (`b0`, `v0`) to (`b1`, `v1`) in beat × velocity space;
+ * every note (of `ids`, or all) whose start lies between the two beats takes the line's value.
+ */
+export function rampVelocity(notes: NoteEvent[], ids: Set<string>, b0: number, v0: number, b1: number, v1: number): NoteEvent[] {
+  const [from, to] = b0 <= b1 ? [b0, b1] : [b1, b0];
+  const [vf, vt] = b0 <= b1 ? [v0, v1] : [v1, v0];
+  const target = new Set(sel(notes, ids).map((n) => n.id));
+  const span = Math.max(1e-9, to - from);
+  return notes.map((n) => {
+    if (!target.has(n.id) || n.startBeat < from - 1e-9 || n.startBeat > to + 1e-9) return n;
+    const t = (n.startBeat - from) / span;
+    return { ...n, velocity: Math.round(Math.min(127, Math.max(1, vf + (vt - vf) * t))) };
+  });
+}
+
+/** Ids of the next / previous note in time order after the selection (or the first note). */
+export function stepSelection(notes: NoteEvent[], ids: Set<string>, dir: 1 | -1): string | null {
+  if (!notes.length) return null;
+  const ordered = [...notes].sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
+  if (!ids.size) return (dir === 1 ? ordered[0] : ordered[ordered.length - 1]).id;
+  const idx = ordered.map((n) => n.id);
+  const anchor = dir === 1 ? Math.max(...[...ids].map((id) => idx.indexOf(id))) : Math.min(...[...ids].map((id) => idx.indexOf(id)));
+  const next = (anchor + dir + ordered.length) % ordered.length;
+  return ordered[next].id;
+}
