@@ -22,7 +22,7 @@ pub enum TrackParam {
 
 /// Every edit the UI can make. Serialized as `{"type": "...", ...}` over Tauri IPC.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
     SetTempo { bpm: f64 },
     SetKey { key: KeyState },
