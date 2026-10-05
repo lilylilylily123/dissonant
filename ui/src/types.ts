@@ -24,7 +24,31 @@ export interface NoteEvent {
   lengthBeats: number;
   pitch: number;
   velocity: number;
+  /** The player marked this dissonance as deliberate. */
+  intentional?: boolean;
+  /** Kept in the pattern but not played (drawn hollow). */
+  muted?: boolean;
 }
+
+export interface TimeSignature {
+  numerator: number;
+  denominator: number;
+}
+
+/** Quarter-note beats per bar. */
+export function beatsPerBar(ts: TimeSignature | undefined): number {
+  if (!ts) return 4;
+  return (ts.numerator * 4) / Math.max(1, ts.denominator);
+}
+
+export const TIME_SIGNATURES: TimeSignature[] = [
+  { numerator: 2, denominator: 4 },
+  { numerator: 3, denominator: 4 },
+  { numerator: 4, denominator: 4 },
+  { numerator: 5, denominator: 4 },
+  { numerator: 6, denominator: 8 },
+  { numerator: 7, denominator: 8 },
+];
 
 export interface Track {
   id: string;
@@ -53,6 +77,25 @@ export interface SongPattern {
   notesByTrack: Record<string, NoteEvent[]>;
 }
 
+/** A pattern placed on the song; loops from `offsetBeats` for `lengthBeats`. */
+export interface Clip {
+  id: string;
+  patternId: string;
+  startBeat: number;
+  lengthBeats: number;
+  offsetBeats: number;
+  muted: boolean;
+}
+
+/** A song marker, optionally with its own key (modulation). */
+export interface Section {
+  id: string;
+  name: string;
+  startBeat: number;
+  key: KeyState | null;
+  color: string | null;
+}
+
 export interface MasterSettings {
   gain: number;
   reverbWet: number;
@@ -69,8 +112,90 @@ export interface ProjectModel {
   key: KeyState;
   tracks: Track[];
   patterns: SongPattern[];
-  arrangement: string[];
+  clips: Clip[];
+  sections: Section[];
   master: MasterSettings;
+  timeSignature?: TimeSignature;
+  /** 50 = straight … 75 = hard shuffle. */
+  swing?: number;
+  /** 0.5 (eighths) or 0.25 (sixteenths). */
+  swingGrid?: number;
+  /** Tempo changes along the song (absent / empty = constant). */
+  tempoPoints?: TempoPoint[];
+}
+
+export interface TempoPoint {
+  id: string;
+  beat: number;
+  bpm: number;
+  /** Glide linearly from the previous point's tempo to this one. */
+  ramp: boolean;
+}
+
+/** Mirror of `dissonant_core::tempo::TempoMap`: tempo and elapsed seconds along the song. */
+export function tempoMap(baseBpm: number, points: TempoPoint[] | undefined) {
+  const anchors: { beat: number; bpm: number; ramp: boolean }[] = [{ beat: 0, bpm: baseBpm, ramp: false }];
+  for (const p of [...(points ?? [])].sort((a, b) => a.beat - b.beat)) {
+    if (p.beat <= 0) anchors[0] = { beat: 0, bpm: p.bpm, ramp: false };
+    else if (anchors[anchors.length - 1].beat !== p.beat) anchors.push({ beat: p.beat, bpm: p.bpm, ramp: p.ramp });
+  }
+  const segSeconds = (b0: number, bpm0: number, b1: number, bpm1: number) => {
+    const len = b1 - b0;
+    if (len <= 0) return 0;
+    return Math.abs(bpm1 - bpm0) < 1e-9 ? (60 * len) / bpm0 : ((60 * len) / (bpm1 - bpm0)) * Math.log(bpm1 / bpm0);
+  };
+  const starts: number[] = [0];
+  for (let i = 1; i < anchors.length; i++) {
+    const a = anchors[i - 1];
+    const n = anchors[i];
+    starts.push(starts[i - 1] + segSeconds(a.beat, a.bpm, n.beat, n.ramp ? n.bpm : a.bpm));
+  }
+  const segAt = (beat: number) => {
+    let i = 0;
+    while (i + 1 < anchors.length && anchors[i + 1].beat <= beat) i++;
+    return i;
+  };
+  const bpmAt = (beat: number) => {
+    const i = segAt(beat);
+    const a = anchors[i];
+    const n = anchors[i + 1];
+    if (!n || !n.ramp) return a.bpm;
+    const t = Math.min(1, Math.max(0, (beat - a.beat) / (n.beat - a.beat)));
+    return a.bpm + (n.bpm - a.bpm) * t;
+  };
+  const secondsAt = (beat: number) => {
+    const i = segAt(Math.max(0, beat));
+    const a = anchors[i];
+    return starts[i] + segSeconds(a.beat, a.bpm, Math.max(0, beat), bpmAt(beat));
+  };
+  return { bpmAt, secondsAt, isConstant: anchors.length === 1 };
+}
+
+/**
+ * Swing as a piecewise-linear warp of the beat line (mirrors `dissonant_core::tempo::swing_warp`):
+ * the second half of each `2·grid` pair is pushed so it lands at `2·grid·swing/100`.
+ */
+export function swingWarp(beat: number, swing: number, grid: number): number {
+  if (!(grid > 0) || !(swing > 50) || swing > 75) return beat;
+  const pair = 2 * grid;
+  const late = (pair * swing) / 100;
+  const base = Math.floor(beat / pair) * pair;
+  const u = beat - base;
+  return base + (u <= grid ? u * (late / grid) : late + (u - grid) * ((pair - late) / grid));
+}
+
+export function songLength(m: ProjectModel): number {
+  return m.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
+}
+
+export function sectionAt(m: ProjectModel, beat: number): Section | null {
+  let best: Section | null = null;
+  for (const s of m.sections) if (s.startBeat <= beat && (!best || s.startBeat >= best.startBeat)) best = s;
+  return best;
+}
+
+export function keyAt(m: ProjectModel, beat: number): KeyState {
+  return sectionAt(m, beat)?.key ?? m.key;
 }
 
 export interface Snapshot {
@@ -79,6 +204,21 @@ export interface Snapshot {
   canRedo: boolean;
   dirty: boolean;
   path: string | null;
+  /** What the next undo reverts ("move notes"). */
+  undoLabel: string | null;
+  redoLabel: string | null;
+}
+
+/** An autosave from an earlier run that may hold unsaved work. */
+export interface RecoveryCandidate {
+  autosavePath: string;
+  projectPath: string | null;
+  savedAtMs: number;
+}
+
+export function fileNameOf(path: string | null | undefined, fallback = "untitled.dissonant"): string {
+  if (!path) return fallback;
+  return path.split(/[\\/]/).pop() || fallback;
 }
 
 export type TrackParam = "volume" | "reverbSend" | "tone" | "pan";
@@ -104,20 +244,161 @@ export type Command =
   | { type: "setPatternLength"; id: string; beats: number }
   | { type: "setNotes"; patternId: string; trackId: string; notes: NoteEvent[] }
   | { type: "setChords"; patternId: string; chords: ChordEvent[] }
-  | { type: "setArrangement"; arrangement: string[] }
-  | { type: "setMaster"; master: MasterSettings };
+  | { type: "addClip"; patternId: string; startBeat: number; lengthBeats: number | null }
+  | { type: "updateClip"; clip: Clip }
+  | { type: "removeClip"; id: string }
+  | { type: "addSection"; name: string; startBeat: number }
+  | { type: "updateSection"; section: Section }
+  | { type: "removeSection"; id: string }
+  | { type: "setMaster"; master: MasterSettings }
+  | { type: "setTimeSignature"; numerator: number; denominator: number }
+  | { type: "setSwing"; swing: number; grid: number }
+  | { type: "addTempoPoint"; beat: number; bpm: number; ramp: boolean }
+  | { type: "updateTempoPoint"; point: TempoPoint }
+  | { type: "removeTempoPoint"; id: string };
 
 export interface PlayheadEvent {
   beat: number;
   playing: boolean;
   masterPeak: [number, number];
   trackPeaks: number[];
+  /** Beats of count-in left; 0 when not counting in. */
+  countIn?: number;
 }
 
 export interface AudioStatus {
   running: boolean;
   sampleRate: number | null;
   error: string | null;
+  deviceName?: string | null;
+  bufferSize?: number | null;
+  blockFrames?: number;
+  latencyMs?: number;
+  load?: number;
+  xruns?: number;
+}
+
+/** What the export dialog sends; `null` fields fall back to the export settings. */
+export interface ExportRequest {
+  path: string;
+  scope: "song" | "pattern";
+  sampleRate: number | null;
+  bitDepth: 16 | 24 | 32 | null;
+  dither: boolean | null;
+  normalizeDb: number | null;
+  tailSeconds: number | null;
+  loops: number | null;
+  stems: boolean;
+  hearChords: boolean | null;
+}
+
+export interface ExportProgress {
+  done: number;
+  total: number;
+  current: string;
+}
+
+export interface ExportResult {
+  files: string[];
+}
+
+export interface TemplateInfo {
+  name: string;
+  path: string;
+}
+
+export interface OutputDevice {
+  name: string;
+  isDefault: boolean;
+  sampleRates: number[];
+  defaultSampleRate: number;
+}
+
+// ─── Settings (mirrors src-tauri/src/settings.rs) ──────────────────────────────────────────
+
+export type VelocityCurve = "linear" | "soft" | "hard" | "fixed";
+export type NewProjectKind = "starter" | "empty";
+export type AltKey = "noSnap" | "paint";
+
+export interface TierColors {
+  chordTone: string;
+  tension: string;
+  dissonance: string;
+}
+
+export interface Settings {
+  audio: { device: string | null; sampleRate: number | null; bufferSize: number | null };
+  midi: { defaultInput: string | null; autoReconnect: boolean; velocityCurve: VelocityCurve; channel: number | null; octaveOffset: number };
+  editing: {
+    defaultGrid: number;
+    defaultNoteLength: number;
+    defaultVelocity: number;
+    defaultPatternBars: number;
+    defaultTempo: number;
+    defaultTimeSignature: TimeSignature;
+    newProject: NewProjectKind;
+    auditionOnPlace: boolean;
+    confirmDestructive: boolean;
+    altKey: AltKey;
+    snapToChords: boolean;
+  };
+  export: { sampleRate: number; bitDepth: 16 | 24 | 32; dither: boolean; normalize: boolean; normalizeDb: number; tailSeconds: number };
+  appearance: { uiScale: number; rowHeight: number; reducedMotion: boolean; tierColors: TierColors; accent: string };
+  metronome: { on: boolean; volume: number; countInBars: number; preRollBars: number; duringPlayback: boolean };
+}
+
+export const DEFAULT_TIER_COLORS: TierColors = { chordTone: "#3dffb0", tension: "#ff9d2a", dissonance: "#ff3b30" };
+
+/** Tier palettes: the default, and an Okabe–Ito set that survives red-green and blue-yellow CVD. */
+export const TIER_PRESETS: { name: string; colors: TierColors }[] = [
+  { name: "default", colors: DEFAULT_TIER_COLORS },
+  { name: "okabe–ito (color-blind safe)", colors: { chordTone: "#56b4e9", tension: "#f0e442", dissonance: "#d55e00" } },
+  { name: "cool", colors: { chordTone: "#4dd2ff", tension: "#c9b3ff", dissonance: "#ff5f9e" } },
+];
+
+export const DEFAULT_SETTINGS: Settings = {
+  audio: { device: null, sampleRate: null, bufferSize: null },
+  midi: { defaultInput: null, autoReconnect: true, velocityCurve: "linear", channel: null, octaveOffset: 0 },
+  editing: {
+    defaultGrid: 0.25,
+    defaultNoteLength: 0.25,
+    defaultVelocity: 100,
+    defaultPatternBars: 4,
+    defaultTempo: 120,
+    defaultTimeSignature: { numerator: 4, denominator: 4 },
+    newProject: "starter",
+    auditionOnPlace: true,
+    confirmDestructive: true,
+    altKey: "noSnap",
+    snapToChords: false,
+  },
+  export: { sampleRate: 44100, bitDepth: 16, dither: true, normalize: false, normalizeDb: -1, tailSeconds: 1.5 },
+  appearance: { uiScale: 1, rowHeight: 18, reducedMotion: false, tierColors: DEFAULT_TIER_COLORS, accent: "#b48cff" },
+  metronome: { on: false, volume: 0.6, countInBars: 1, preRollBars: 0, duringPlayback: true },
+};
+
+/** Deep-merge a (possibly partial / older) settings object over the defaults. */
+export function withDefaults(s: Partial<Settings> | null | undefined): Settings {
+  const d = DEFAULT_SETTINGS;
+  return {
+    audio: { ...d.audio, ...(s?.audio ?? {}) },
+    midi: { ...d.midi, ...(s?.midi ?? {}) },
+    editing: { ...d.editing, ...(s?.editing ?? {}), defaultTimeSignature: { ...d.editing.defaultTimeSignature, ...(s?.editing?.defaultTimeSignature ?? {}) } },
+    export: { ...d.export, ...(s?.export ?? {}) },
+    appearance: { ...d.appearance, ...(s?.appearance ?? {}), tierColors: { ...d.appearance.tierColors, ...(s?.appearance?.tierColors ?? {}) } },
+    metronome: { ...d.metronome, ...(s?.metronome ?? {}) },
+  };
+}
+
+export interface AudioStatusEvent {
+  status: AudioStatus;
+  message: string;
+}
+
+export interface MidiStatus {
+  inputs: string[];
+  open: string | null;
+  armed: boolean;
 }
 
 export const VOICES = ["saw", "square", "triangle", "sine", "pad", "pluck"] as const;
@@ -142,11 +423,22 @@ export function trackColor(track: Track, index: number): string {
   return track.color ?? TRACK_PALETTE[index % 11];
 }
 
-export const TIER_COLORS: Record<Tier, string> = {
-  chordTone: "#3dffb0",
-  tension: "#ff9d2a",
-  dissonance: "#ff3b30",
-};
+/** Live tier colors. Mutated in place by the appearance settings so every canvas reads the current set. */
+export const TIER_COLORS: Record<Tier, string> = { ...DEFAULT_TIER_COLORS };
+
+/** `#rrggbb` → [r, g, b] */
+export function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.replace("#", ""), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** Blend `hex` toward `toward` (another hex) by `t` in 0…1. */
+export function mixHex(hex: string, toward: string, t: number): string {
+  const a = hexToRgb(hex);
+  const b = hexToRgb(toward);
+  const c = a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  return `#${c.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
 
 /** Drum kit rows, top to bottom. Mirrors `dissonant_engine::drums::KIT`. */
 export const DRUM_KIT: { name: string; pitch: number }[] = [

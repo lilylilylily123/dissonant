@@ -1,30 +1,39 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { midiName, tierMap } from "../theory";
+import { beatsPerBar, effectiveKey, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { chordAt, explainNote, midiName, tierMap } from "../theory";
 import {
   adjustVelocity,
+  duplicateBySpan,
   duplicateNotes,
+  glueNotes,
+  magnetPitch,
   moveNotes,
+  stampChord,
   noteAt,
   notesInRect,
   pasteNotes,
   placeNote,
+  rampVelocity,
   removeNotes,
   resizeNotes,
   selectionBounds,
   snapFloor,
   snapRound,
+  splitNotes,
+  stepSelection,
+  toggleMute,
 } from "../noteEditing";
-import { TIER_COLORS, trackColor, uuid, type NoteEvent, type Tier } from "../types";
+import { mixHex, swingWarp, TIER_COLORS, trackColor, uuid, type NoteEvent, type Tier } from "../types";
 import { BASE_BEAT_W, GUTTER } from "./ChordLane";
 
 // Geometry (from the handoff: 18px rows, 96px beats at 1×, 64px keyboard, 28px ruler)
 const LOW = 24; // C1
 const HIGH = 96; // C7
-const ROW_H = 18;
 const RULER_H = 28;
 const EDGE_PX = 7;
 const VEL_H = 110;
+/** Grid used while ⌥ bypasses snap. */
+const FINE = 1 / 64;
 const BLACK = new Set([1, 3, 6, 8, 10]);
 
 const C = {
@@ -50,13 +59,15 @@ const C = {
   rootRowBlack: "#1f1830",
 };
 
-const NOTE_BORDER: Record<Tier, string> = { chordTone: "#1a9e6c", tension: "#b26a12", dissonance: "#a3261f" };
-const NOTE_SEL: Record<Tier, string> = { chordTone: "#c9ffe9", tension: "#ffe0b8", dissonance: "#ffc9c5" };
+// Borders and selection fills derive from the live tier palette (settings → appearance).
+const noteBorder = (t: Tier) => mixHex(TIER_COLORS[t], "#000000", 0.38);
+const noteSel = (t: Tier) => mixHex(TIER_COLORS[t], "#ffffff", 0.72);
 const tierColor = (t: Tier | null) => (t ? TIER_COLORS[t] : "#9a9aa4");
 
 type Drag =
-  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; base: NoteEvent[]; lastPitch: number }
+  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; startPitch: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate"; axis?: "x" | "y" | null }
   | { kind: "resize"; ids: Set<string>; anchor: NoteEvent; startX: number; base: NoteEvent[] }
+  | { kind: "ramp"; ids: Set<string>; b0: number; v0: number; base: NoteEvent[] }
   | { kind: "paint"; base: NoteEvent[] }
   | { kind: "erase"; base: NoteEvent[] }
   | { kind: "marquee"; x0: number; y0: number; x1: number; y1: number; baseSelection: Set<string> }
@@ -66,18 +77,23 @@ let clipboard: NoteEvent[] = [];
 
 /**
  * The piano roll. Modeless direct manipulation, FL-style:
- *  - click empty = place a note (and keep dragging to move it) · ⌥-drag empty = paint
- *  - drag a note = move (auditions pitch) · drag its right edge = resize · ⌥-drag = duplicate
- *  - shift-drag empty = marquee select · shift-click = toggle in selection
- *  - right-click / right-drag = erase · ruler click = seek · velocity lane: drag stems
- *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · arrows nudge (⇧ = octave / bar) · [ ] velocity · esc
+ *  - click empty = place a note (and keep dragging to move it) · brush on (or ⌥ in "paint"
+ *    mode) = paint · ⌥ in "no snap" mode = place / move / resize off the grid
+ *  - drag a note = move (auditions pitch; ⇧ constrains to one axis) · right edge = resize ·
+ *    ⌥-drag = duplicate
+ *  - shift/⌘-drag empty = marquee select · shift-click = toggle · double-click a key = select
+ *    that pitch (⌘: the pitch class) · Tab/⇧Tab = next/previous note
+ *  - right-click / right-drag = erase · ruler click = seek · velocity lane: drag stems, ⌥-drag
+ *    draws a ramp · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor
+ *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one
+ *    loop later · 0 mute · arrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] velocity · esc
  * Tiering is visual only — any note can be placed in any tier.
  */
 export function PianoRoll() {
   const pattern = useStore(selectedPattern);
   const track = useStore(selectedTrack);
   const trackIdx = useStore(selectedTrackIndex);
-  const key = useStore((s) => s.snapshot!.model.key);
+  const key = useStore(effectiveKey);
   const playhead = useStore((s) => s.playhead);
   const showLandscape = useStore((s) => s.showLandscape);
   const highlightRows = useStore((s) => s.highlightRows);
@@ -88,6 +104,31 @@ export function PianoRoll() {
   const seek = useStore((s) => s.seek);
   const setZoom = useStore((s) => s.setZoom);
   const setSelectedNoteIds = useStore((s) => s.setSelectedNoteIds);
+  const bpb = useStore(beatsPerBar);
+  const loopRegion = useStore((s) => s.loopRegion);
+  const looping = useStore((s) => s.looping);
+  const setLoopRegion = useStore((s) => s.setLoopRegion);
+  const loopDrag = useRef<{ anchor: number } | null>(null);
+  const magnet = useStore((s) => s.magnet);
+  const stamp = useStore((s) => s.stamp);
+  const brush = useStore((s) => s.brush);
+  const follow = useStore((s) => s.follow);
+  const playing = useStore((s) => s.playing);
+  const selectionRequest = useStore((s) => s.selectionRequest);
+  const fold = useStore((s) => s.fold);
+  const ghostTrackId = useStore((s) => s.ghostTrackId);
+  const commitGesture = useStore((s) => s.commitGesture);
+  const editing = useStore((s) => s.settings.editing);
+  const swing = useStore((s) => s.snapshot?.model.swing ?? 50);
+  const swingGrid = useStore((s) => s.snapshot?.model.swingGrid ?? 0.5);
+  const appearance = useStore((s) => s.settings.appearance);
+  const ROW_H = appearance.rowHeight;
+  const defaultVelocity = editing.defaultVelocity;
+  // Audition only when the setting says so; drags still audition pitch changes. `beats` is the
+  // length of the note being previewed, so a preview never outlasts the note it stands for.
+  const auditionPlace = (pitch: number, velocity: number, beats?: number) => {
+    if (editing.auditionOnPlace) audition(pitch, velocity, beats);
+  };
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const velRef = useRef<HTMLCanvasElement>(null);
@@ -100,23 +141,42 @@ export function PianoRoll() {
   const [viewW, setViewW] = useState(800);
 
   const notes = useMemo(() => (pattern && track ? (pattern.notesByTrack[track.id] ?? []) : []), [pattern, track]);
+  const ghostNotes = useMemo(
+    () => (pattern && ghostTrackId && ghostTrackId !== track?.id ? (pattern.notesByTrack[ghostTrackId] ?? []) : []),
+    [pattern, ghostTrackId, track],
+  );
   const chords = pattern?.chords.chords ?? [];
   const beats = pattern?.lengthBeats ?? 16;
   const beatW = BASE_BEAT_W * zoom;
-  const rows = HIGH - LOW + 1;
   const gridW = beats * beatW;
-  const gridH = rows * ROW_H;
   const shown = preview ?? notes;
   const color = track ? trackColor(track, trackIdx) : C.accent;
   const rootPc = key.rootPitchClass;
 
-  const yForPitch = (p: number) => RULER_H + (HIGH - p) * ROW_H;
-  const pitchForY = (y: number) => HIGH - Math.floor((y - RULER_H) / ROW_H);
+  // Row layout: every pitch, or (folded) the pitches that carry notes plus the chord tones of
+  // the pattern's chords within an octave of them. Top row first.
+  const visiblePitches = useMemo(() => {
+    const all: number[] = [];
+    for (let p = HIGH; p >= LOW; p--) all.push(p);
+    if (!fold) return all;
+    const used = new Set<number>([...shown, ...ghostNotes].map((n) => n.pitch));
+    const pcs = new Set<number>(chords.flatMap((c) => c.pitchClasses.map((pc) => ((pc % 12) + 12) % 12)));
+    const lo = used.size ? Math.min(...used) - 12 : 48;
+    const hi = used.size ? Math.max(...used) + 12 : 72;
+    return all.filter((p) => used.has(p) || (p >= lo && p <= hi && pcs.has(p % 12)));
+  }, [fold, shown, ghostNotes, chords]);
+  const rowOf = useMemo(() => new Map(visiblePitches.map((p, i) => [p, i])), [visiblePitches]);
+  const rows = visiblePitches.length;
+  const gridH = rows * ROW_H;
+
+  /** Top of a pitch's row; hidden pitches land above the ruler (never drawn). */
+  const yForPitch = (p: number) => RULER_H + (rowOf.get(p) ?? -2) * ROW_H;
+  const pitchForY = (y: number) => visiblePitches[Math.floor((y - RULER_H) / ROW_H)] ?? NaN;
   const beatForX = (x: number) => (x - GUTTER) / beatW;
 
   const commit = useCallback(
-    (next: NoteEvent[]) => {
-      if (pattern && track) void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next });
+    (next: NoteEvent[], label = "edit notes") => {
+      if (pattern && track) void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
     },
     [dispatch, pattern, track],
   );
@@ -132,12 +192,26 @@ export function PianoRoll() {
   useEffect(() => {
     setSelectedNoteIds([...selection]);
   }, [selection, setSelectedNoteIds]);
+  useEffect(() => {
+    if (selectionRequest) setSelection(new Set(selectionRequest.ids));
+  }, [selectionRequest]);
 
-  // Center on C4 initially; track viewport width for the velocity lane.
+  // Follow: page the view when the playhead leaves it.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !follow || !playing) return;
+    const px = GUTTER + playhead * beatW;
+    const left = el.scrollLeft;
+    const w = el.clientWidth;
+    if (px < left + GUTTER || px > left + w - 24) el.scrollLeft = Math.max(0, px - GUTTER - 16);
+  }, [playhead, follow, playing, beatW]);
+
+  // Track the viewport width for the velocity lane. (Centering on C4 happens in the canvas
+  // effect below, once the canvas has its height — a layout effect here would clamp to 0.)
+  const centered = useRef(false);
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = Math.max(0, yForPitch(60) - el.clientHeight / 2);
     const ro = new ResizeObserver(() => setViewW(el.clientWidth));
     ro.observe(el);
     setViewW(el.clientWidth);
@@ -158,6 +232,12 @@ export function PianoRoll() {
       canvas.style.width = `${W}px`;
       canvas.style.height = `${H}px`;
     }
+    if (!centered.current && scrollRef.current) {
+      centered.current = true;
+      const el = scrollRef.current;
+      const middle = rowOf.has(60) ? 60 : (visiblePitches[Math.floor(visiblePitches.length / 2)] ?? 60);
+      el.scrollTop = Math.max(0, yForPitch(middle) - el.clientHeight / 2);
+    }
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.textBaseline = "middle";
@@ -168,20 +248,21 @@ export function PianoRoll() {
 
     // Rows
     const live = tierMap(playhead, chords, key);
-    for (let p = LOW; p <= HIGH; p++) {
+    for (const [i, p] of visiblePitches.entries()) {
       const y = yForPitch(p);
       const blk = BLACK.has(p % 12);
+      const octaveBreak = fold ? visiblePitches[i + 1] !== undefined && Math.floor(visiblePitches[i + 1] / 12) !== Math.floor(p / 12) : p % 12 === 0;
       let bg = blk ? C.rowBlack : C.rowWhite;
       if (highlightRows && !showLandscape) {
         const t = live[p % 12];
         if (rootPc !== null && p % 12 === rootPc && t !== "dissonance") bg = blk ? C.rootRowBlack : C.rootRow;
-        else if (t === "chordTone") bg = blk ? "#111a17" : "#15221d";
-        else if (t === "tension") bg = blk ? "#151411" : "#1a1814";
+        else if (t === "chordTone") bg = mixHex(TIER_COLORS.chordTone, blk ? C.rowBlack : C.rowWhite, blk ? 0.93 : 0.9);
+        else if (t === "tension") bg = mixHex(TIER_COLORS.tension, blk ? C.rowBlack : C.rowWhite, blk ? 0.95 : 0.93);
         else if (t === "dissonance") bg = blk ? "#0e0e10" : "#121214";
       }
       ctx.fillStyle = bg;
       ctx.fillRect(GUTTER, y, gridW, ROW_H);
-      ctx.fillStyle = p % 12 === 0 ? C.octave : C.rowSep;
+      ctx.fillStyle = octaveBreak ? C.octave : C.rowSep;
       ctx.fillRect(GUTTER, y + ROW_H - 1, gridW, 1);
     }
 
@@ -189,7 +270,7 @@ export function PianoRoll() {
     if (showLandscape) {
       for (let b = 0; b < beats; b++) {
         const map = tierMap(b + 0.5, chords, key);
-        for (let p = LOW; p <= HIGH; p++) {
+        for (const p of visiblePitches) {
           const t = map[p % 12];
           if (!t) continue;
           const x = GUTTER + b * beatW;
@@ -210,14 +291,22 @@ export function PianoRoll() {
       }
     }
 
-    // Vertical grid: subdivision, beat, bar
+    // Vertical grid: subdivision, beat, bar. With swing on, the swung sub-lines are drawn
+    // where the notes will actually sound (accent-tinted), next to the straight grid.
     const sub = Math.min(noteLength, 1);
     for (let t = 0; t <= beats + 1e-9; t += sub) {
       const x = GUTTER + t * beatW;
-      const isBar = Math.abs(t % 4) < 1e-9;
+      const isBar = Math.abs(t % bpb) < 1e-9;
       const isBeat = Math.abs(t % 1) < 1e-9;
       ctx.fillStyle = isBar ? C.gridBar : isBeat ? C.gridBeat : C.gridSub;
       ctx.fillRect(Math.round(x), RULER_H, 1, gridH);
+      if (swing > 50 && !isBeat) {
+        const w = swingWarp(t, swing, swingGrid);
+        if (Math.abs(w - t) > 1e-6) {
+          ctx.fillStyle = "rgba(180,140,255,.22)";
+          ctx.fillRect(Math.round(GUTTER + w * beatW), RULER_H, 1, gridH);
+        }
+      }
     }
 
     // Ruler: loop bar (the pattern loops), bar + beat labels
@@ -225,19 +314,25 @@ export function PianoRoll() {
     ctx.fillRect(0, 0, W, RULER_H);
     ctx.fillStyle = C.line1;
     ctx.fillRect(0, RULER_H - 1, W, 1);
-    ctx.globalAlpha = 0.8;
+    // Loop brace: the whole pattern in the track color, a sub-region in accent.
+    ctx.globalAlpha = looping ? 0.8 : 0.25;
     ctx.fillStyle = color;
     ctx.fillRect(GUTTER, 2, gridW, 6);
+    if (loopRegion) {
+      ctx.fillStyle = C.accent;
+      ctx.fillRect(GUTTER + loopRegion[0] * beatW, 2, (loopRegion[1] - loopRegion[0]) * beatW, 6);
+    }
     ctx.globalAlpha = 1;
     for (let b = 0; b < beats; b++) {
       const x = GUTTER + b * beatW;
-      const isBar = b % 4 === 0;
+      const barIdx = Math.floor(b / bpb);
+      const isBar = Math.abs(b % bpb) < 1e-9;
       if (!isBar && beatW < 40) continue;
       ctx.fillStyle = isBar ? "#5a5a62" : "#2e2e36";
       ctx.fillRect(Math.round(x), 10, 1, 18);
       ctx.fillStyle = isBar ? C.text1 : C.text4;
       ctx.font = isBar ? mono(600, 11) : mono(400, 9);
-      ctx.fillText(isBar ? `${b / 4 + 1}` : `${Math.floor(b / 4) + 1}.${(b % 4) + 1}`, x + 4, 19);
+      ctx.fillText(isBar ? `${barIdx + 1}` : `${barIdx + 1}.${Math.floor(b % bpb) + 1}`, x + 4, 19);
     }
     // Chord names in the ruler
     ctx.font = mono(500, 9);
@@ -249,21 +344,53 @@ export function PianoRoll() {
       ctx.fillText(label, x + c.lengthBeats * beatW - tw - 4, 19);
     }
 
+    // Ghost notes: another track, dashed, behind everything else.
+    if (ghostNotes.length) {
+      ctx.setLineDash([3, 2]);
+      ctx.lineWidth = 1;
+      for (const g of ghostNotes) {
+        if (!rowOf.has(g.pitch)) continue;
+        const t = tierMap(g.startBeat, chords, key)[g.pitch % 12];
+        const x = GUTTER + g.startBeat * beatW;
+        const y = yForPitch(g.pitch);
+        const w = Math.max(3, g.lengthBeats * beatW - 1);
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = tierColor(t);
+        roundRect(ctx, x, y, w, ROW_H - 1, 2);
+        ctx.fill();
+        ctx.globalAlpha = 0.55;
+        ctx.strokeStyle = tierColor(t);
+        roundRect(ctx, x + 0.5, y + 0.5, w - 1, ROW_H - 2, 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.setLineDash([]);
+    }
+
     // Notes
     const velocityAlpha = (v: number) => 0.45 + 0.55 * (v / 127);
     for (const n of shown) {
-      if (n.pitch < LOW || n.pitch > HIGH) continue;
+      if (!rowOf.has(n.pitch)) continue;
       const t = tierMap(n.startBeat, chords, key)[n.pitch % 12];
       const sel = selection.has(n.id);
       const x = GUTTER + n.startBeat * beatW;
       const y = yForPitch(n.pitch);
       const w = Math.max(3, n.lengthBeats * beatW - 1);
       const h = ROW_H - 1;
-      ctx.fillStyle = sel ? (t ? NOTE_SEL[t] : "#f0f0f4") : tierColor(t);
-      ctx.globalAlpha = sel ? 1 : velocityAlpha(n.velocity);
+      ctx.fillStyle = sel ? (t ? noteSel(t) : "#f0f0f4") : tierColor(t);
+      ctx.globalAlpha = n.muted ? 0.14 : sel ? 1 : velocityAlpha(n.velocity);
       roundRect(ctx, x, y, w, h, 2);
       ctx.fill();
       ctx.globalAlpha = 1;
+      if (n.muted) {
+        ctx.setLineDash([3, 2]);
+        ctx.strokeStyle = sel ? "#ffffff" : tierColor(t);
+        ctx.lineWidth = 1;
+        roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        continue;
+      }
       // Non-color tier cues
       if (t === "tension") {
         ctx.fillStyle = "rgba(4,20,13,.85)";
@@ -290,14 +417,20 @@ export function PianoRoll() {
         ctx.fillStyle = "#ff9d2a";
         ctx.fillRect(x, y, 3, h);
       }
-      // Label
+      // Label (a deliberate dissonance keeps its hatch but loses the "!")
       if (w > 22) {
         ctx.fillStyle = "#04140d";
         ctx.font = mono(600, 8);
-        ctx.fillText(t === "dissonance" ? `${midiName(n.pitch)} !` : midiName(n.pitch), x + (n.velocity >= 118 ? 6 : 4), y + h / 2);
+        ctx.fillText(t === "dissonance" && !n.intentional ? `${midiName(n.pitch)} !` : midiName(n.pitch), x + (n.velocity >= 118 ? 6 : 4), y + h / 2);
+      }
+      if (n.intentional && t === "dissonance") {
+        ctx.strokeStyle = C.accent;
+        ctx.lineWidth = 1;
+        roundRect(ctx, x - 1.5, y - 1.5, w + 3, h + 3, 3);
+        ctx.stroke();
       }
       // Border
-      ctx.strokeStyle = sel ? "#ffffff" : t ? NOTE_BORDER[t] : "#5f5f68";
+      ctx.strokeStyle = sel ? "#ffffff" : t ? noteBorder(t) : "#5f5f68";
       ctx.lineWidth = 1;
       roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 2);
       ctx.stroke();
@@ -318,8 +451,8 @@ export function PianoRoll() {
       ctx.setLineDash([]);
     }
 
-    // Keyboard
-    for (let p = LOW; p <= HIGH; p++) {
+    // Keyboard (folded: every key is labelled, since neighbours are no longer adjacent)
+    for (const p of visiblePitches) {
       const y = yForPitch(p);
       const blk = BLACK.has(p % 12);
       ctx.fillStyle = blk ? C.keyBlackBase : C.keyWhite;
@@ -332,10 +465,10 @@ export function PianoRoll() {
       ctx.fillRect(0, y + ROW_H - 1, GUTTER, 1);
       const isC = p % 12 === 0;
       const isRoot = rootPc !== null && p % 12 === rootPc;
-      if (isC || isRoot) {
+      if (isC || isRoot || fold) {
         ctx.font = mono(600, 8.5);
-        ctx.fillStyle = isC ? "#2a2a31" : C.accent;
-        const label = isC ? midiName(p) : midiName(p).replace(/\d+$/, "");
+        ctx.fillStyle = isRoot ? C.accent : "#2a2a31";
+        const label = isC || fold ? midiName(p) : midiName(p).replace(/\d+$/, "");
         ctx.fillText(label, GUTTER - 4 - ctx.measureText(label).width - 6, y + ROW_H / 2);
       }
       // Tier dot at the key edge (guidance cue, mirrors the rows)
@@ -362,8 +495,10 @@ export function PianoRoll() {
 
     // Playhead
     const px = Math.round(GUTTER + playhead * beatW);
-    ctx.shadowColor = "rgba(255,255,255,.5)";
-    ctx.shadowBlur = 6;
+    if (!appearance.reducedMotion) {
+      ctx.shadowColor = "rgba(255,255,255,.5)";
+      ctx.shadowBlur = 6;
+    }
     ctx.fillStyle = "#fff";
     ctx.fillRect(px, RULER_H, 1, gridH);
     ctx.shadowBlur = 0;
@@ -378,16 +513,19 @@ export function PianoRoll() {
     if (hover && !dragRef.current) {
       const t = tierMap(hover.beat, chords, key)[hover.pitch % 12];
       const label = `${midiName(hover.pitch)}${t ? ` · ${t === "chordTone" ? "chord tone" : t}` : ""}`;
+      const why = explainNote(hover.pitch, chords, key, hover.beat);
       ctx.font = mono(500, 9);
-      const tw = ctx.measureText(label).width + 10;
-      const hx = GUTTER + hover.beat * beatW + 8;
-      const hy = yForPitch(hover.pitch) - 16;
-      ctx.fillStyle = "rgba(22,22,26,.92)";
-      ctx.fillRect(hx, hy, tw, 14);
+      const tw = Math.max(ctx.measureText(label).width, ctx.measureText(why).width) + 12;
+      const hx = Math.min(GUTTER + hover.beat * beatW + 8, W - tw - 4);
+      const hy = Math.max(RULER_H + 2, yForPitch(hover.pitch) - 30);
+      ctx.fillStyle = "rgba(22,22,26,.94)";
+      ctx.fillRect(hx, hy, tw, 28);
       ctx.fillStyle = t ? tierColor(t) : C.text1;
-      ctx.fillText(label, hx + 5, hy + 7);
+      ctx.fillText(label, hx + 6, hy + 8);
+      ctx.fillStyle = "#b8b8c0";
+      ctx.fillText(why, hx + 6, hy + 20);
     }
-  }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc]);
+  }, [shown, ghostNotes, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping, ROW_H, appearance, swing, swingGrid, visiblePitches, rowOf, fold]);
 
   // ─── Velocity lane canvas ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -411,7 +549,7 @@ export function PianoRoll() {
     ctx.translate(-scrollLeft, 0);
     // grid
     for (let b = 0; b <= beats; b++) {
-      ctx.fillStyle = b % 4 === 0 ? "#2a2a32" : "#18181d";
+      ctx.fillStyle = Math.abs(b % bpb) < 1e-9 ? "#2a2a32" : "#18181d";
       ctx.fillRect(Math.round(GUTTER + b * beatW), 0, 1, H);
     }
     ctx.fillStyle = "#1c1c22";
@@ -440,7 +578,7 @@ export function PianoRoll() {
     ctx.fillText("127", GUTTER - 8 - ctx.measureText("127").width, 8);
     ctx.fillText("64", GUTTER - 8 - ctx.measureText("64").width, H / 2);
     ctx.fillText("0", GUTTER - 8 - ctx.measureText("0").width, H - 8);
-  }, [shown, chords, key, playhead, beatW, beats, gridW, selection, scrollLeft, viewW]);
+  }, [shown, chords, key, playhead, beatW, beats, gridW, selection, scrollLeft, viewW, bpb]);
 
   // ─── Interaction ──────────────────────────────────────────────────────────────────────────
   const local = (e: React.PointerEvent, el: HTMLElement) => {
@@ -461,7 +599,18 @@ export function PianoRoll() {
     scrollRef.current?.focus();
     const { x, y } = local(e, canvas);
     if (y < RULER_H) {
-      if (x >= GUTTER) seek(Math.max(0, Math.min(beats, beatForX(x))));
+      if (x < GUTTER) return;
+      if (e.button === 2) {
+        setLoopRegion(null);
+        return;
+      }
+      if (y < 10) {
+        // Drag in the brace strip to set a loop region (snapped to beats).
+        canvas.setPointerCapture(e.pointerId);
+        loopDrag.current = { anchor: Math.max(0, Math.min(beats, Math.round(beatForX(x)))) };
+        return;
+      }
+      seek(Math.max(0, Math.min(beats, beatForX(x))));
       return;
     }
     if (x < GUTTER) {
@@ -497,7 +646,9 @@ export function PianoRoll() {
       let ids = selection.has(hit.note.id) ? new Set(selection) : new Set([hit.note.id]);
       let base = notes;
       let anchor = hit.note;
+      let origin: "duplicate" | undefined;
       if (e.altKey && !hit.edge) {
+        origin = "duplicate";
         const originals = notes.filter((n) => ids.has(n.id));
         const copies = originals.map((o) => ({ ...o, id: uuid() }));
         base = [...notes, ...copies];
@@ -507,40 +658,60 @@ export function PianoRoll() {
       setSelection(ids);
       dragRef.current = hit.edge
         ? { kind: "resize", ids, anchor, startX: x, base }
-        : { kind: "move", ids, anchor, startX: x, startY: y, base, lastPitch: anchor.pitch };
+        : { kind: "move", ids, anchor, startX: x, startY: y, startPitch: pitchForY(y), base, lastPitch: anchor.pitch, origin };
       setPreview(base);
       return;
     }
 
-    if (e.shiftKey) {
-      dragRef.current = { kind: "marquee", x0: x, y0: y, x1: x, y1: y, baseSelection: new Set(selection) };
+    if (e.shiftKey || e.metaKey || e.ctrlKey) {
+      dragRef.current = { kind: "marquee", x0: x, y0: y, x1: x, y1: y, baseSelection: new Set(e.shiftKey ? selection : []) };
       setPreview(notes);
       return;
     }
-    if (e.altKey) {
-      const placed = placeNote(notes, beat, pitch, noteLength, noteLength);
+    if (brush || (e.altKey && editing.altKey === "paint")) {
+      const placed = placeNote(notes, beat, pitch, noteLength, noteLength, defaultVelocity);
       const base = placed ? [...notes, placed] : notes;
-      if (placed) audition(pitch, placed.velocity, placed.lengthBeats);
+      if (placed) auditionPlace(pitch, placed.velocity, placed.lengthBeats);
       dragRef.current = { kind: "paint", base };
       setPreview(base);
       return;
     }
-    const placed = placeNote(notes, beat, pitch, noteLength, noteLength);
+    // ⌥ (no-snap mode): place exactly where the cursor is instead of on the grid.
+    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE : noteLength;
+    if (stamp) {
+      // Chord stamp: place the chord under the cursor as stacked notes, voiced upward.
+      const chord = chordAt(chords, beat);
+      if (!chord) return;
+      const added = stampChord(notes, beat, chord.pitchClasses, pitch, noteLength, noteLength).map((n) => ({ ...n, velocity: defaultVelocity }));
+      if (!added.length) return;
+      for (const a of added) auditionPlace(a.pitch, a.velocity, a.lengthBeats);
+      commit([...notes, ...added], "stamp chord");
+      setSelection(new Set(added.map((a) => a.id)));
+      return;
+    }
+    const target = magnet ? magnetPitch(pitch, tierMap(beat, chords, key)) : pitch;
+    const placed = placeNote(notes, beat, target, noteLength, snapGrid, defaultVelocity);
     if (!placed) {
       setSelection(new Set());
       return;
     }
-    audition(pitch, placed.velocity, placed.lengthBeats);
+    auditionPlace(target, placed.velocity, placed.lengthBeats);
     const base = [...notes, placed];
     const ids = new Set([placed.id]);
     setSelection(ids);
-    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, base, lastPitch: pitch };
+    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, startPitch: pitch, base, lastPitch: target, origin: "place" };
     setPreview(base);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     const canvas = canvasRef.current!;
     const { x, y } = local(e, canvas);
+    if (loopDrag.current) {
+      const b = Math.max(0, Math.min(beats, Math.round(beatForX(x))));
+      const a = loopDrag.current.anchor;
+      if (b !== a) setLoopRegion([Math.min(a, b), Math.max(a, b)]);
+      return;
+    }
     const d = dragRef.current;
     if (!d) {
       const beat = beatForX(x);
@@ -548,12 +719,35 @@ export function PianoRoll() {
       setHover(x >= GUTTER && y >= RULER_H && beat < beats && pitch >= LOW && pitch <= HIGH ? { beat, pitch } : null);
       return;
     }
+    // Auto-scroll when dragging past the viewport's edges.
+    const el = scrollRef.current;
+    if (el && d.kind !== "velocity" && d.kind !== "ramp") {
+      const rect = el.getBoundingClientRect();
+      if (e.clientX > rect.right - 24) el.scrollLeft += 12;
+      else if (e.clientX < rect.left + GUTTER + 12) el.scrollLeft = Math.max(0, el.scrollLeft - 12);
+      if (e.clientY > rect.bottom - 24) el.scrollTop += 10;
+      else if (e.clientY < rect.top + RULER_H + 12) el.scrollTop = Math.max(0, el.scrollTop - 10);
+    }
+    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE : noteLength;
     switch (d.kind) {
       case "move": {
         const rawDelta = (x - d.startX) / beatW;
-        const newStart = snapRound(d.anchor.startBeat + rawDelta, noteLength);
-        const dBeats = newStart - d.anchor.startBeat;
-        const dPitch = pitchForY(y) - pitchForY(d.startY);
+        const newStart = snapRound(d.anchor.startBeat + rawDelta, snapGrid);
+        let dBeats = newStart - d.anchor.startBeat;
+        const rowPitch = pitchForY(y);
+        let dPitch = Number.isNaN(rowPitch) ? 0 : rowPitch - d.startPitch;
+        // ⇧ constrains to the axis that moved first (time or pitch).
+        if (e.shiftKey) {
+          d.axis ??= Math.abs(x - d.startX) >= Math.abs(y - d.startY) ? "x" : "y";
+          if (d.axis === "x") dPitch = 0;
+          else dBeats = 0;
+        } else {
+          d.axis = null;
+        }
+        if (magnet && d.ids.size === 1) {
+          const want = magnetPitch(d.anchor.pitch + dPitch, tierMap(d.anchor.startBeat + dBeats, chords, key));
+          dPitch = want - d.anchor.pitch;
+        }
         const next = moveNotes(d.base, d.ids, dBeats, dPitch, { min: LOW, max: HIGH }, beats);
         const moved = next.find((n) => n.id === d.anchor.id);
         if (moved && moved.pitch !== d.lastPitch) {
@@ -565,18 +759,18 @@ export function PianoRoll() {
       }
       case "resize": {
         const rawDelta = (x - d.startX) / beatW;
-        const newLen = Math.max(noteLength, snapRound(d.anchor.lengthBeats + rawDelta, noteLength));
-        setPreview(resizeNotes(d.base, d.ids, newLen - d.anchor.lengthBeats, noteLength));
+        const newLen = Math.max(snapGrid, snapRound(d.anchor.lengthBeats + rawDelta, snapGrid));
+        setPreview(resizeNotes(d.base, d.ids, newLen - d.anchor.lengthBeats, snapGrid));
         break;
       }
       case "paint": {
         const beat = beatForX(x);
         const pitch = pitchForY(y);
         if (beat < 0 || beat >= beats || pitch < LOW || pitch > HIGH) return;
-        const placed = placeNote(d.base, beat, pitch, noteLength, noteLength);
+        const placed = placeNote(d.base, beat, pitch, noteLength, noteLength, defaultVelocity);
         if (placed) {
           d.base = [...d.base, placed];
-          audition(pitch, placed.velocity, placed.lengthBeats);
+          auditionPlace(pitch, placed.velocity, placed.lengthBeats);
           setPreview(d.base);
         }
         break;
@@ -598,11 +792,74 @@ export function PianoRoll() {
         break;
       }
       case "velocity":
+      case "ramp":
         break;
     }
   };
 
+  // Double-click a key: select every note at that pitch (⌘: the pitch class in every octave).
+  const onDoubleClick = (e: React.MouseEvent) => {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (x >= GUTTER || y < RULER_H) return;
+    const pitch = pitchForY(y);
+    const pc = ((pitch % 12) + 12) % 12;
+    const byClass = e.metaKey || e.ctrlKey;
+    setSelection(new Set(notes.filter((n) => (byClass ? ((n.pitch % 12) + 12) % 12 === pc : n.pitch === pitch)).map((n) => n.id)));
+  };
+
+  // ⌥-wheel transposes the selection (⌥⇧: octaves); ⌘-wheel zooms around the cursor; ⇧-wheel scrolls sideways.
+  // Attached natively (non-passive) because React's onWheel cannot preventDefault.
+  const wheelCommit = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onWheel = (e: WheelEvent) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (e.altKey && selection.size) {
+      e.preventDefault();
+      const step = (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 12 : 1);
+      const next = moveNotes(notes, selection, 0, step, { min: LOW, max: HIGH }, beats);
+      if (next !== notes && pattern && track) {
+        void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, true, "transpose notes");
+        if (wheelCommit.current) clearTimeout(wheelCommit.current);
+        wheelCommit.current = setTimeout(() => void commitGesture(), 400);
+      }
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const beatUnderCursor = (el.scrollLeft + cursorX - GUTTER) / beatW;
+      const nextZoom = Math.min(3, Math.max(0.25, zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+      setZoom(nextZoom);
+      const nextBeatW = BASE_BEAT_W * nextZoom;
+      requestAnimationFrame(() => {
+        el.scrollLeft = Math.max(0, beatUnderCursor * nextBeatW + GUTTER - cursorX);
+      });
+      return;
+    }
+    if (e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    }
+  };
+  const onWheelRef = useRef(onWheel);
+  onWheelRef.current = onWheel;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => onWheelRef.current(e);
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);
+
   const endDrag = () => {
+    if (loopDrag.current) {
+      loopDrag.current = null;
+      return;
+    }
     const d = dragRef.current;
     dragRef.current = null;
     if (!d) return;
@@ -612,15 +869,23 @@ export function PianoRoll() {
     }
     const result = preview;
     setPreview(null);
-    if (result && result !== notes) commit(result);
+    if (result && result !== notes) commit(result, dragLabel(d, notes, result));
   };
 
   // Velocity lane: drag a stem (or all selected stems) vertically.
+  const velAt = (y: number) => Math.round(Math.min(127, Math.max(1, ((VEL_H - 4 - y) / (VEL_H - 14)) * 127)));
   const onVelDown = (e: React.PointerEvent) => {
     const canvas = velRef.current!;
     const { x, y } = local(e, canvas);
     if (x < GUTTER || e.button !== 0) return;
     const beat = (x + scrollLeft - GUTTER) / beatW;
+    if (e.altKey) {
+      // Ramp: draw a line through the stems; selected notes only when there is a selection.
+      canvas.setPointerCapture(e.pointerId);
+      dragRef.current = { kind: "ramp", ids: new Set(selection), b0: beat, v0: velAt(y), base: notes };
+      setPreview(notes);
+      return;
+    }
     let best: NoteEvent | null = null;
     let bestDx = Infinity;
     for (const n of notes) {
@@ -648,7 +913,14 @@ export function PianoRoll() {
   };
   const onVelMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
-    if (!d || d.kind !== "velocity") return;
+    if (!d) return;
+    if (d.kind === "ramp") {
+      const { x, y } = local(e, velRef.current!);
+      const b1 = (x + scrollLeft - GUTTER) / beatW;
+      setPreview(rampVelocity(d.base, d.ids, d.b0, d.v0, b1, velAt(y)));
+      return;
+    }
+    if (d.kind !== "velocity") return;
     applyVelocityAt(local(e, velRef.current!).y);
   };
 
@@ -659,24 +931,45 @@ export function PianoRoll() {
     const grid = noteLength;
 
     if (k === "Backspace" || k === "Delete") {
-      if (selection.size) commit(removeNotes(notes, selection));
+      if (selection.size) commit(removeNotes(notes, selection), "delete notes");
+    } else if (k === "Tab") {
+      const id = stepSelection(notes, selection, e.shiftKey ? -1 : 1);
+      if (id) {
+        setSelection(new Set([id]));
+        const n = notes.find((x) => x.id === id);
+        if (n) auditionPlace(n.pitch, n.velocity, n.lengthBeats);
+      }
+    } else if (k === "0" && !mod) {
+      if (selection.size) commit(toggleMute(notes, selection), "mute notes");
+    } else if (mod && k.toLowerCase() === "e") {
+      // Split at the playhead; with nothing to split, fall through to the global export.
+      const next = splitNotes(notes, selection, playhead);
+      if (next === notes || next.length === notes.length) return;
+      commit(next, "split notes");
+    } else if (mod && k.toLowerCase() === "j") {
+      if (selection.size) commit(glueNotes(notes, selection), "glue notes");
+    } else if (mod && k.toLowerCase() === "b") {
+      if (!selection.size) return;
+      const { notes: next, newIds } = duplicateBySpan(notes, selection, beats);
+      commit(next, "duplicate to next loop");
+      setSelection(newIds);
     } else if (mod && k.toLowerCase() === "a") {
       setSelection(new Set(notes.map((n) => n.id)));
     } else if (mod && k.toLowerCase() === "c") {
       clipboard = notes.filter((n) => selection.has(n.id));
     } else if (mod && k.toLowerCase() === "x") {
       clipboard = notes.filter((n) => selection.has(n.id));
-      if (selection.size) commit(removeNotes(notes, selection));
+      if (selection.size) commit(removeNotes(notes, selection), "cut notes");
     } else if (mod && k.toLowerCase() === "v") {
       if (!clipboard.length) return;
       const at = bounds ? snapFloor(bounds.end, grid) : snapFloor(playhead, grid);
       const { notes: next, newIds } = pasteNotes(notes, clipboard, at);
-      commit(next);
+      commit(next, "paste notes");
       setSelection(newIds);
     } else if (mod && k.toLowerCase() === "d") {
       if (!selection.size) return;
       const { notes: next, newIds } = duplicateNotes(notes, selection, grid);
-      commit(next);
+      commit(next, "duplicate notes");
       setSelection(newIds);
     } else if (mod && (k === "=" || k === "+")) {
       setZoom(zoom * 1.25);
@@ -685,11 +978,12 @@ export function PianoRoll() {
     } else if (k === "Escape") {
       setSelection(new Set());
     } else if (k.startsWith("Arrow") && selection.size) {
-      const dBeats = k === "ArrowLeft" ? -(e.shiftKey ? 4 : grid) : k === "ArrowRight" ? (e.shiftKey ? 4 : grid) : 0;
+      const step = e.altKey ? FINE : e.shiftKey ? bpb : grid;
+      const dBeats = k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0;
       const dPitch = k === "ArrowUp" ? (e.shiftKey ? 12 : 1) : k === "ArrowDown" ? -(e.shiftKey ? 12 : 1) : 0;
-      commit(moveNotes(notes, selection, dBeats, dPitch, { min: LOW, max: HIGH }, beats));
+      commit(moveNotes(notes, selection, dBeats, dPitch, { min: LOW, max: HIGH }, beats), dPitch ? "transpose notes" : "nudge notes");
     } else if ((k === "[" || k === "]") && selection.size) {
-      commit(adjustVelocity(notes, selection, k === "]" ? 10 : -10));
+      commit(adjustVelocity(notes, selection, k === "]" ? 10 : -10), "change velocity");
     } else {
       return; // let global shortcuts through
     }
@@ -714,16 +1008,11 @@ export function PianoRoll() {
         tabIndex={0}
         onKeyDown={onKeyDown}
         onScroll={(e) => setScrollLeft((e.target as HTMLDivElement).scrollLeft)}
-        onWheel={(e) => {
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            setZoom(zoom * (e.deltaY < 0 ? 1.1 : 0.9));
-          }
-        }}
       >
         <canvas
           ref={canvasRef}
           onPointerDown={onPointerDown}
+          onDoubleClick={onDoubleClick}
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
@@ -740,6 +1029,32 @@ export function PianoRoll() {
       </div>
     </div>
   );
+}
+
+/** Name a finished drag for the Edit menu. */
+function dragLabel(d: Drag, before: NoteEvent[], after: NoteEvent[]): string {
+  switch (d.kind) {
+    case "move": {
+      if (d.origin === "place") return "place note";
+      if (d.origin === "duplicate") return "duplicate notes";
+      const anchorBefore = before.find((n) => n.id === d.anchor.id);
+      const anchorAfter = after.find((n) => n.id === d.anchor.id);
+      if (anchorBefore && anchorAfter && anchorBefore.pitch !== anchorAfter.pitch && anchorBefore.startBeat === anchorAfter.startBeat) return "transpose notes";
+      return "move notes";
+    }
+    case "resize":
+      return "resize notes";
+    case "paint":
+      return "paint notes";
+    case "erase":
+      return "erase notes";
+    case "velocity":
+      return "change velocity";
+    case "ramp":
+      return "ramp velocity";
+    case "marquee":
+      return "edit notes";
+  }
 }
 
 function gridLabelFor(len: number): string {

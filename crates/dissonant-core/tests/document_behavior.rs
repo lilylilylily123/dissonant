@@ -27,8 +27,13 @@ fn fixture() -> ProjectModel {
             NoteEvent::new(4.0, 2.0, 64).with_velocity(70),
         ],
     );
-    m.arrangement = vec![p0, p1];
+    m.clips = vec![clip_at(p0, 0.0, 16.0), clip_at(p1, 16.0, 8.0)];
     m
+}
+
+/// A clip placing `pattern` on the song timeline.
+fn clip_at(pattern: Uuid, start: f64, length: f64) -> Clip {
+    Clip { id: Uuid::new_v4(), pattern_id: pattern, start_beat: start, length_beats: length, offset_beats: 0.0, muted: false }
 }
 
 fn doc() -> Document {
@@ -62,8 +67,19 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::SetPatternLength { .. } => "SetPatternLength",
         Command::SetNotes { .. } => "SetNotes",
         Command::SetChords { .. } => "SetChords",
-        Command::SetArrangement { .. } => "SetArrangement",
+        Command::AddClip { .. } => "AddClip",
+        Command::UpdateClip { .. } => "UpdateClip",
+        Command::RemoveClip { .. } => "RemoveClip",
+        Command::AddSection { .. } => "AddSection",
+        Command::UpdateSection { .. } => "UpdateSection",
+        Command::RemoveSection { .. } => "RemoveSection",
         Command::SetMaster { .. } => "SetMaster",
+        Command::SetTimeSignature { .. } => "SetTimeSignature",
+        Command::SetSwing { .. } => "SetSwing",
+        Command::ImportTracks { .. } => "ImportTracks",
+        Command::AddTempoPoint { .. } => "AddTempoPoint",
+        Command::UpdateTempoPoint { .. } => "UpdateTempoPoint",
+        Command::RemoveTempoPoint { .. } => "RemoveTempoPoint",
     }
 }
 
@@ -96,8 +112,12 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
             pattern_id: p1,
             chords: vec![ChordEvent::new(0.0, 4.0, vec![2, 5, 9], Some("Dm".into()))],
         },
-        Command::SetArrangement { arrangement: vec![p1, p0, p1] },
+        Command::AddClip { pattern_id: p1, start_beat: 16.0, length_beats: None },
+        Command::AddSection { name: "chorus".into(), start_beat: 32.0 },
         Command::SetMaster { master: MasterSettings { gain: 0.5, ..MasterSettings::default() } },
+        Command::SetTimeSignature { numerator: 3, denominator: 4 },
+        Command::SetSwing { swing: 62.0, grid: 0.25 },
+        Command::AddTempoPoint { beat: 8.0, bpm: 140.0, ramp: true },
     ]
 }
 
@@ -190,7 +210,9 @@ fn a_command_that_changes_nothing_records_no_undo_step() {
     d.apply(Command::SetTempo { bpm: before.tempo }, false).unwrap();
     d.apply(Command::RenameTrack { id: t0, name: before.tracks[0].name.clone() }, false).unwrap();
     d.apply(Command::MoveTrack { id: t0, up: true }, false).unwrap(); // already at the top
-    d.apply(Command::SetArrangement { arrangement: before.arrangement.clone() }, false).unwrap();
+    if let Some(clip) = before.clips.first() {
+        d.apply(Command::UpdateClip { clip: clip.clone() }, false).unwrap();
+    }
     d.apply(
         Command::SetNotes { pattern_id: p0, track_id: t0, notes: before.patterns[0].notes(&t0).to_vec() },
         false,
@@ -586,12 +608,22 @@ fn deleting_a_track_purges_its_notes_from_every_pattern() {
 }
 
 #[test]
-fn deleting_a_pattern_purges_every_occurrence_from_the_arrangement() {
+fn deleting_a_pattern_purges_every_clip_of_it_from_the_song() {
     let mut d = doc();
     let (.., p0, p1) = ids(d.model());
-    d.apply(Command::SetArrangement { arrangement: vec![p0, p1, p0, p0, p1] }, false).unwrap();
+    // Start from a clean song: the fixture already places one clip of each pattern.
+    for id in d.model().clips.iter().map(|c| c.id).collect::<Vec<_>>() {
+        d.apply(Command::RemoveClip { id }, false).unwrap();
+    }
+    for (pattern_id, start) in [(p0, 0.0), (p1, 16.0), (p0, 32.0), (p0, 48.0), (p1, 64.0)] {
+        d.apply(Command::AddClip { pattern_id, start_beat: start, length_beats: None }, false).unwrap();
+    }
     d.apply(Command::DeletePattern { id: p0 }, false).unwrap();
-    assert_eq!(d.model().arrangement, vec![p1, p1]);
+    assert_eq!(
+        d.model().clips.iter().map(|c| c.pattern_id).collect::<Vec<_>>(),
+        vec![p1, p1],
+        "clips of the deleted pattern survived"
+    );
     assert!(d.model().pattern(&p0).is_none());
 }
 
@@ -652,16 +684,20 @@ fn duplicating_a_pattern_deep_copies_notes_and_chords_with_fresh_ids() {
 }
 
 #[test]
-fn the_arrangement_only_ever_holds_live_pattern_ids() {
+fn the_song_only_ever_holds_clips_of_live_patterns() {
     let mut d = doc();
     let (.., p0, p1) = ids(d.model());
-    d.apply(Command::SetArrangement { arrangement: vec![p0, Uuid::new_v4(), p1, Uuid::nil()] }, false)
-        .unwrap();
-    assert_eq!(d.model().arrangement, vec![p0, p1]);
+    d.apply(Command::AddClip { pattern_id: p0, start_beat: 0.0, length_beats: None }, false).unwrap();
+    d.apply(Command::AddClip { pattern_id: p1, start_beat: 16.0, length_beats: None }, false).unwrap();
+    // A clip can only be placed for a pattern that exists.
+    assert_eq!(
+        d.apply(Command::AddClip { pattern_id: Uuid::new_v4(), start_beat: 32.0, length_beats: None }, false),
+        Err(EditError::NoSuchPattern)
+    );
 
     let live: Vec<Uuid> = d.model().patterns.iter().map(|p| p.id).collect();
-    for id in &d.model().arrangement {
-        assert!(live.contains(id));
+    for clip in &d.model().clips {
+        assert!(live.contains(&clip.pattern_id), "clip points at a pattern that is gone");
     }
 }
 
@@ -695,7 +731,7 @@ fn song_flattening_produces_absolute_beat_positions() {
     let (t0, _, p0, p1) = ids(&m);
     // p0 is 16 beats with notes at 0 and 4; p1 is 8 beats with a note at 2.
     m.patterns[1].notes_by_track.insert(t0, vec![NoteEvent::new(2.0, 1.0, 67)]);
-    m.arrangement = vec![p0, p1, p0];
+    m.clips = vec![clip_at(p0, 0.0, 16.0), clip_at(p1, 16.0, 8.0), clip_at(p0, 24.0, 16.0)];
 
     let seq = Sequence::from_song(&m);
     assert_eq!(seq.length_beats, 16.0 + 8.0 + 16.0);
@@ -728,7 +764,7 @@ fn a_song_sequence_always_has_a_playable_loop_length() {
     let base = r#"{
       "tracks": [ { "id": "11111111-1111-1111-1111-111111111111", "name": "lead" } ],
       "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "name": "p", "lengthBeats": LEN } ],
-      "arrangement": [ "22222222-2222-2222-2222-222222222222" ]
+      "clips": [ { "patternId": "22222222-2222-2222-2222-222222222222", "startBeat": 0, "lengthBeats": 16 } ]
     }"#;
     for len in ["0", "-8", "0.25"] {
         let m = ProjectModel::from_json(&base.replace("LEN", len)).unwrap();
@@ -745,34 +781,38 @@ fn a_song_sequence_always_has_a_playable_loop_length() {
     }
 
     // Same guarantee when the arrangement is empty and the fallback pattern is degenerate.
-    let m = ProjectModel::from_json(&base.replace("LEN", "0").replace(r#""arrangement": [ "22222222-2222-2222-2222-222222222222" ]"#, r#""arrangement": []"#)).unwrap();
+    let m = ProjectModel::from_json(&base.replace("LEN", "0").replace(r#""clips": [ { "patternId": "22222222-2222-2222-2222-222222222222", "startBeat": 0, "lengthBeats": 16 } ]"#, r#""clips": []"#)).unwrap();
     assert!(Sequence::from_song(&m).length_beats >= 1.0, "empty-arrangement fallback is unplayable");
 }
 
 #[test]
 fn song_flattening_survives_empty_and_degenerate_input() {
-    // Empty arrangement: no notes, length falls back to the first pattern.
+    // Empty song: no notes, length falls back to the first pattern.
     let mut m = fixture();
-    m.arrangement = vec![];
+    m.clips = vec![];
     let seq = Sequence::from_song(&m);
     assert!(seq.tracks.iter().all(|t| t.notes.is_empty()));
     assert!(seq.chords.is_empty());
     assert_eq!(seq.length_beats, 16.0);
 
-    // Arrangement full of dead ids: same fallback, no panic, no phantom offsets.
-    m.arrangement = vec![Uuid::new_v4(), Uuid::new_v4()];
+    // Clips of patterns that are gone: loading drops them, so the song falls back to the first
+    // pattern's length rather than stretching over clips that can never play.
+    m.clips = vec![clip_at(Uuid::new_v4(), 0.0, 16.0), clip_at(Uuid::new_v4(), 16.0, 16.0)];
+    let m = ProjectModel::from_json(&m.to_json().unwrap()).unwrap();
+    assert!(m.clips.is_empty(), "clips of deleted patterns survived loading");
     let seq = Sequence::from_song(&m);
     assert_eq!(seq.length_beats, 16.0);
     assert!(seq.tracks.iter().all(|t| t.notes.is_empty()));
+    let mut m = m;
 
     // A dead id in the middle must not shift the patterns after it.
     let (t0, _, p0, p1) = ids(&m);
     m.patterns[1].notes_by_track.insert(t0, vec![NoteEvent::new(0.0, 1.0, 67)]);
-    m.arrangement = vec![p0, Uuid::new_v4(), p1];
+    m.clips = vec![clip_at(p0, 0.0, 16.0), clip_at(p1, 16.0, 16.0)];
     let seq = Sequence::from_song(&m);
     let starts: Vec<f64> = seq.tracks[0].notes.iter().map(|n| n.start_beat).collect();
     assert_eq!(
-        Arrangement::total_length(&m.patterns, &m.arrangement),
+        Arrangement::total_length(&m.clips),
         seq.length_beats,
         "total_length and the flattened timeline disagree"
     );
@@ -781,7 +821,7 @@ fn song_flattening_survives_empty_and_degenerate_input() {
     // A pattern with no notes and no chords: empty, not a panic.
     let mut bare = ProjectModel::empty();
     let bare_p = bare.patterns[0].id;
-    bare.arrangement = vec![bare_p];
+    bare.clips = vec![clip_at(bare_p, 0.0, 16.0)];
     let seq = Sequence::from_song(&bare);
     assert_eq!(seq.length_beats, 16.0);
     assert!(seq.chords.is_empty());
@@ -835,7 +875,9 @@ fn save_load_round_trip_preserves_every_edit() {
         false,
     )
     .unwrap();
-    d.apply(Command::SetArrangement { arrangement: vec![p1, p0, p1] }, false).unwrap();
+    for (pattern_id, start) in [(p1, 0.0), (p0, 16.0), (p1, 32.0)] {
+        d.apply(Command::AddClip { pattern_id, start_beat: start, length_beats: None }, false).unwrap();
+    }
     d.apply(
         Command::SetMaster {
             master: MasterSettings {

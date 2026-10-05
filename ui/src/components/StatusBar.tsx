@@ -1,4 +1,4 @@
-import { gridLabel, selectedPattern, selectedTrack, useStore } from "../store";
+import { beatsPerBar, gridLabel, selectedPattern, selectedTrack, useStore } from "../store";
 
 export function StatusBar() {
   const snapshot = useStore((s) => s.snapshot!);
@@ -8,25 +8,33 @@ export function StatusBar() {
   const selectedNoteIds = useStore((s) => s.selectedNoteIds);
   const pattern = useStore(selectedPattern);
   const track = useStore(selectedTrack);
+  const bpb = useStore(beatsPerBar);
 
   const noteCount = pattern && track ? (pattern.notesByTrack[track.id]?.length ?? 0) : 0;
-  const totalBeats = snapshot.model.arrangement.reduce(
-    (sum, id) => sum + (snapshot.model.patterns.find((p) => p.id === id)?.lengthBeats ?? 0),
-    0,
-  );
+  const totalBeats = snapshot.model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
 
   const context =
     mode === "pattern"
       ? `${pattern?.name ?? "—"} › ${track?.name ?? "—"} · ${noteCount} notes${selectedNoteIds.length ? ` · ${selectedNoteIds.length} selected` : ""} · snap ${gridLabel(noteLength)}`
-      : `song · ${snapshot.model.arrangement.length} blocks · ${totalBeats / 4} bars · ${snapshot.model.tracks.length} tracks`;
+      : `song · ${snapshot.model.clips.length} clips · ${snapshot.model.sections.length} sections · ${+(totalBeats / bpb).toFixed(2)} bars · ${snapshot.model.tracks.length} tracks`;
 
   return (
     <div className="statusbar">
       <span style={{ color: audio?.running ? "var(--ok)" : "var(--rec-text)" }}>● {audio?.running ? "READY" : "NO AUDIO"}</span>
       <span>{context}</span>
+      {useStore.getState().armed && <span style={{ color: "var(--rec-text)" }}>● REC</span>}
+      {useStore.getState().liveKeyboard !== "off" && <span style={{ color: "var(--accent)" }}>keys: {useStore.getState().liveKeyboard}</span>}
       <span className="spacer" />
-      <span>UNDO {snapshot.canUndo ? "●" : "○"}</span>
-      <span>REDO {snapshot.canRedo ? "●" : "○"}</span>
+      <span title={snapshot.undoLabel ? `undo ${snapshot.undoLabel}` : "nothing to undo"}>
+        UNDO {snapshot.canUndo ? "●" : "○"}
+        {snapshot.undoLabel && <span style={{ color: "var(--text-5)", marginLeft: 4 }}>{snapshot.undoLabel}</span>}
+      </span>
+      <span title={snapshot.redoLabel ? `redo ${snapshot.redoLabel}` : "nothing to redo"}>REDO {snapshot.canRedo ? "●" : "○"}</span>
+      {audio?.running && audio.blockFrames ? (
+        <span title={`engine load · ${audio.blockFrames} frames per block · ${(audio.latencyMs ?? 0).toFixed(1)} ms`} style={{ color: (audio.load ?? 0) > 0.8 ? "var(--warn)" : undefined }}>
+          cpu {Math.round((audio.load ?? 0) * 100)}%{audio.xruns ? ` · ${audio.xruns} xrun${audio.xruns === 1 ? "" : "s"}` : ""}
+        </span>
+      ) : null}
       <span>{audio?.sampleRate ? `${audio.sampleRate / 1000} kHz` : "—"}</span>
       <span style={{ color: "var(--text-3)" }}>v0.2.0</span>
     </div>

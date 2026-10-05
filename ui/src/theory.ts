@@ -214,3 +214,47 @@ export function detectKey(pitchClasses: number[], minNotes = 10, minGap = 0.04, 
   const isConfident = pitchClasses.length >= minNotes && distinct >= minDistinct && gap >= minGap;
   return { candidates, isConfident };
 }
+
+// ─── Explain this note ─────────────────────────────────────────────────────────────────────
+
+const INTERVAL_NAMES = ["the root", "a ♭9", "the 9th", "a ♭3 / ♯9", "the 3rd", "the 11th", "a ♯11", "the 5th", "a ♭13", "the 13th", "the ♭7", "the 7th"];
+
+/** Root pitch class of a chord: the named root if the chord is a recognizable triad, else its lowest pitch class. */
+export function chordRoot(chord: ChordEvent): number {
+  const name = chord.name ?? chordName(chord.pitchClasses);
+  const m = /^([A-G]#?)/.exec(name);
+  if (m) {
+    const idx = NOTE_NAMES.indexOf(m[1]);
+    if (idx >= 0) return idx;
+  }
+  return chord.pitchClasses[0] ?? 0;
+}
+
+/**
+ * Plain words for why a pitch is tiered the way it is against the chord at `beat`.
+ * The voice from PRODUCT.md: names things plainly, never condescends, never forbids.
+ */
+export function explainNote(pitch: number, chords: ChordEvent[], key: KeyState, beat: number): string {
+  const chord = chordAt(chords, beat);
+  const keyPcs = keyPitchClasses(key);
+  const pc = normalize(pitch);
+  const name = noteName(pc);
+  if (!chord) {
+    if (!keyPcs) return "no chord or key yet — anything goes";
+    return keyPcs.includes(pc)
+      ? `${name} is in ${keyName(key.rootPitchClass!, key.scale)}`
+      : `${name} is outside ${keyName(key.rootPitchClass!, key.scale)} — flagged, not forbidden`;
+  }
+  const label = chord.name ?? chordName(chord.pitchClasses);
+  const root = chordRoot(chord);
+  const interval = INTERVAL_NAMES[normalize(pc - root)];
+  const t = tier(pc, chord.pitchClasses, keyPcs);
+  if (t === "chordTone") return `${name} over ${label}: ${interval}. Solid.`;
+  if (t === "tension") return `${name} over ${label}: ${interval}. Spicy but good.`;
+  // Dissonance: say which chord tone it rubs against and where it wants to go.
+  const above = chord.pitchClasses.map(normalize).find((c) => normalize(pc - c) === 1);
+  const below = chord.pitchClasses.map(normalize).find((c) => normalize(c - pc) === 1);
+  if (above !== undefined) return `${name} over ${label}: a half step above ${noteName(above)}. It wants to fall to ${noteName(above)} — or stay, on purpose.`;
+  if (below !== undefined) return `${name} over ${label}: a half step below ${noteName(below)}. It leans up into ${noteName(below)} — or stays, on purpose.`;
+  return `${name} over ${label}: outside the key. Flagged, not forbidden.`;
+}

@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { dbText, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { chordAt, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
+import { beatsPerBar, dbText, effectiveKey, GRID_OPTIONS, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { chordAt, explainNote, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
+import { arpeggiateNotes, chopNotes, humanizeNotes, invertNotes, legatoNotes, quantizeNotes, resolveTargets, reverseNotes, scaleNotes, setLength, strumNotes, toggleMute } from "../noteEditing";
 import { DRUM_KIT, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
 import { hz, Knob, lin, log, panText, pct } from "./Knob";
 
@@ -15,6 +16,7 @@ export function Inspector() {
   const pattern = useStore(selectedPattern);
   const track = useStore(selectedTrack);
   const trackIdx = useStore(selectedTrackIndex);
+  const bpb = useStore(beatsPerBar);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [renamingPattern, setRenamingPattern] = useState(false);
@@ -32,8 +34,10 @@ export function Inspector() {
 
   const chords = pattern.chords.chords;
   const chord = chordAt(chords, s.playhead);
-  const map = tierMap(s.playhead, chords, model.key);
+  const liveKey = effectiveKey(s);
+  const map = tierMap(s.playhead, chords, liveKey);
   const root = model.key.rootPitchClass;
+  const sectionKey = liveKey !== model.key ? liveKey : null;
 
   const finishRename = (id: string) => {
     if (draft.trim()) void s.dispatch({ type: "renameTrack", id, name: draft.trim() });
@@ -48,7 +52,7 @@ export function Inspector() {
   const commit = () => void s.commitGesture();
 
   // Overview geometry
-  const total = model.arrangement.reduce((sum, id) => sum + (model.patterns.find((p) => p.id === id)?.lengthBeats ?? 0), 0);
+  const total = model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
 
   return (
     <aside className="side inspector">
@@ -91,9 +95,11 @@ export function Inspector() {
                 <button
                   className="ico"
                   title="delete track"
-                  onClick={(e) => {
+                  onClick={async (e) => {
                     e.stopPropagation();
-                    if (confirm(`Delete “${t.name}” and its notes in every pattern?`)) void s.dispatch({ type: "deleteTrack", id: t.id });
+                    if (await s.confirm("Delete track?", `“${t.name}” and its notes in every pattern will be removed.`, "Delete", true)) {
+                      void s.dispatch({ type: "deleteTrack", id: t.id });
+                    }
                   }}
                 >
                   ×
@@ -109,7 +115,7 @@ export function Inspector() {
         <div className="head">
           <span className="cap">pattern</span>
           <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>
-            midi · {pattern.lengthBeats / 4} bars
+            midi · {+(pattern.lengthBeats / bpb).toFixed(2)} bars
           </span>
         </div>
         <div className="namebar" style={{ background: color }} onClick={() => !renamingPattern && (setDraft(pattern.name), setRenamingPattern(true))} title="click to rename">
@@ -149,7 +155,7 @@ export function Inspector() {
           <span className="flabel">length</span>
           <div className="row" style={{ gap: 3 }}>
             {[1, 2, 4, 8].map((bars) => (
-              <button key={bars} className={`chip tiny${pattern.lengthBeats === bars * 4 ? " on" : ""}`} onClick={() => s.dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * 4 })}>
+              <button key={bars} className={`chip tiny${pattern.lengthBeats === bars * bpb ? " on" : ""}`} onClick={() => s.dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * bpb })}>
                 {bars}
               </button>
             ))}
@@ -162,7 +168,16 @@ export function Inspector() {
         <div className="row" style={{ gap: 4 }}>
           <button onClick={() => s.dispatch({ type: "addPattern" })}>+ new</button>
           <button onClick={() => s.dispatch({ type: "duplicatePattern", id: pattern.id })}>dup</button>
-          <button disabled={model.patterns.length <= 1} onClick={() => confirm(`Delete “${pattern.name}”?`) && s.dispatch({ type: "deletePattern", id: pattern.id })}>del</button>
+          <button
+            disabled={model.patterns.length <= 1}
+            onClick={async () => {
+              if (await s.confirm("Delete pattern?", `“${pattern.name}” and its clips in the song will be removed.`, "Delete", true)) {
+                void s.dispatch({ type: "deletePattern", id: pattern.id });
+              }
+            }}
+          >
+            del
+          </button>
         </div>
       </div>
 
@@ -175,7 +190,35 @@ export function Inspector() {
         <RangeRow label="pitch" lo={pitchR ? (pitchR[0] - 24) / 72 : 0} hi={pitchR ? (pitchR[1] - 24) / 72 : 0} color={color} text={pitchR ? (track.isDrum ? `${pitchR[0]} – ${pitchR[1]}` : `${midiName(pitchR[0])} – ${midiName(pitchR[1])}`) : "—"} />
         <RangeRow label="velocity" lo={velR ? velR[0] / 127 : 0} hi={velR ? velR[1] / 127 : 0} color={color} text={velR ? `${velR[0]} – ${velR[1]}` : "—"} />
         <RangeRow label="length" lo={lenR ? Math.min(1, lenR[0] / 4) : 0} hi={lenR ? Math.min(1, lenR[1] / 4) : 0} color="#9a9aa4" text={lenR ? `${gridLabel(lenR[0])} – ${gridLabel(lenR[1])}` : "—"} />
+        {selected.length > 0 && !track.isDrum && (
+          <div className="chipsrow" title="set the length of every selected note">
+            {GRID_OPTIONS.map(([label, v]) => (
+              <button key={label} className={`chip tiny${selected.every((n) => n.lengthBeats === v) ? " on" : ""}`} onClick={() => s.transformSelection((ns, ids) => setLength(ns, ids, v), "set note length")}>
+                {label}
+              </button>
+            ))}
+            <button className={`chip tiny${selected.every((n) => n.muted) ? " on" : ""}`} onClick={() => s.transformSelection(toggleMute, "mute notes")} title="mute the selected notes (0): kept, drawn hollow, not played">
+              {selected.every((n) => n.muted) ? "muted" : "mute"}
+            </button>
+          </div>
+        )}
+        {selected.length === 1 && !track.isDrum && <ResolveKeep note={selected[0]} />}
       </div>
+
+      {/* TRANSFORM */}
+      {!track.isDrum && (
+        <div className="section">
+          <div className="head">
+            <span className="cap">transform</span>
+            <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>{selected.length ? `${selected.length} selected` : "all notes"}</span>
+          </div>
+          <TransformGrid />
+          <div className="chipsrow">
+            <button className={`chip${s.magnet ? " on" : ""}`} onClick={() => s.toggleMagnet()} title="pull placed and dragged notes to the nearest chord tone (then tension) — a magnet, not a wall">magnet</button>
+            <button className={`chip${s.stamp ? " on" : ""}`} onClick={() => s.toggleStamp()} title="click places the whole chord under the cursor, voiced upward">stamp chord</button>
+          </div>
+        </div>
+      )}
 
       {/* HARMONY */}
       <div className="section">
@@ -192,6 +235,12 @@ export function Inspector() {
             <option value="minor">Minor</option>
           </select>
         </div>
+        {sectionKey && sectionKey.rootPitchClass !== null && (
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="flabel">section key</span>
+            <span className="mono" style={{ fontSize: 10, color: "var(--accent)" }}>{noteName(sectionKey.rootPitchClass)} {sectionKey.scale}</span>
+          </div>
+        )}
         <div className="row" style={{ justifyContent: "space-between" }}>
           <span className="flabel">now</span>
           <span className="mono" style={{ fontSize: 11, color: chord ? "var(--text-1)" : "var(--text-5)" }}>{chord?.name ?? (root !== null ? "scale only" : "no guidance yet")}</span>
@@ -208,6 +257,25 @@ export function Inspector() {
           <button className={`chip${s.showLandscape ? " on" : ""}`} onClick={() => s.toggleLandscape()}>map</button>
           <button className={`chip${s.hearChords ? " on" : ""}`} onClick={() => s.toggleHearChords()}>hear</button>
         </div>
+        {!track.isDrum && notes.length > 0 && (
+          <div className="chipsrow" title="select every note of this pattern by how it fits the chord it sits on">
+            <span className="flabel" style={{ flex: "0 0 100%" }}>select by tier</span>
+            {(["chordTone", "tension", "dissonance"] as const).map((t) => {
+              const count = notes.filter((n) => tierMap(n.startBeat, chords, liveKey)[((n.pitch % 12) + 12) % 12] === t).length;
+              return (
+                <button
+                  key={t}
+                  className="chip tiny"
+                  disabled={!count}
+                  style={{ color: count ? `var(--tier-${t === "chordTone" ? "solid" : t})` : undefined }}
+                  onClick={() => s.requestSelection(notes.filter((n) => tierMap(n.startBeat, chords, liveKey)[((n.pitch % 12) + 12) % 12] === t).map((n) => n.id))}
+                >
+                  {t === "chordTone" ? "chord tones" : t === "tension" ? "tensions" : "dissonant"} · {count}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <span className="flabel">progression starters · in {root !== null ? noteName(root) : "C"} {model.key.scale}</span>
         <div className="chipsrow">
           {STARTERS.map((st) => (
@@ -266,32 +334,101 @@ export function Inspector() {
       <div className="section" style={{ borderBottom: 0, borderTop: "1px solid var(--line-1)", gap: 6 }}>
         <span className="cap">song overview · {track.name}</span>
         <div className="overview" title="the song; the pattern you're editing is highlighted">
-          {(() => {
-            let off = 0;
-            return model.arrangement.map((pid, i) => {
-              const p = model.patterns.find((x) => x.id === pid);
-              const w = ((p?.lengthBeats ?? 0) / Math.max(1, total)) * 100;
-              const left = (off / Math.max(1, total)) * 100;
-              off += p?.lengthBeats ?? 0;
-              const current = pid === pattern.id;
-              return (
-                <div
-                  key={`${pid}-${i}`}
-                  style={{ left: `${left}%`, width: `calc(${w}% - 1px)`, background: current ? color : `${color}55`, boxShadow: current ? "0 0 0 1px #fff" : undefined, cursor: "pointer" }}
-                  onClick={() => s.selectPattern(pid)}
-                  title={p?.name}
-                />
-              );
-            });
-          })()}
+          {model.clips.map((c) => {
+            const p = model.patterns.find((x) => x.id === c.patternId);
+            const current = c.patternId === pattern.id;
+            return (
+              <div
+                key={c.id}
+                style={{ left: `${(c.startBeat / Math.max(1, total)) * 100}%`, width: `calc(${(c.lengthBeats / Math.max(1, total)) * 100}% - 1px)`, background: current ? color : `${color}55`, boxShadow: current ? "0 0 0 1px #fff" : undefined, cursor: "pointer", opacity: c.muted ? 0.4 : 1 }}
+                onClick={() => s.selectPattern(c.patternId)}
+                title={p?.name}
+              />
+            );
+          })}
         </div>
         <div className="overview-scale">
           <span>1</span>
-          <span>{Math.max(1, Math.round(total / 8) + 1)}</span>
-          <span>{Math.max(1, Math.round(total / 4) + 1)}</span>
+          <span>{Math.max(1, Math.round(total / bpb / 2) + 1)}</span>
+          <span>{Math.max(1, Math.round(total / bpb) + 1)}</span>
         </div>
       </div>
     </aside>
+  );
+}
+
+function TransformGrid() {
+  const s = useStore();
+  const pattern = useStore(selectedPattern);
+  const track = useStore(selectedTrack);
+  const key = s.snapshot!.model.key;
+  if (!pattern || !track) return null;
+  const notes = pattern.notesByTrack[track.id] ?? [];
+  const ids = new Set(s.selectedNoteIds);
+  const grid = s.noteLength;
+  const chords = pattern.chords.chords;
+  const tierOf = (n: { pitch: number; startBeat: number }) => tierMap(n.startBeat, chords, key)[((n.pitch % 12) + 12) % 12];
+  const apply = (next: typeof notes, label: string) => void s.dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
+  const tools: [string, string, () => void][] = [
+    ["quantize", "snap starts and lengths to the grid", () => apply(quantizeNotes(notes, ids, grid), "quantize")],
+    ["humanize", "loosen timing and velocity; chord tones stay tighter", () => apply(humanizeNotes(notes, ids, { timing: grid * 0.15, velocity: 12 }, tierOf), "humanize")],
+    ["legato", "extend each note to the next one", () => apply(legatoNotes(notes, ids), "legato")],
+    ["arp ↑", "spread stacked notes into rising grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "up"), "arpeggiate")],
+    ["arp ↓", "spread stacked notes into falling grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "down"), "arpeggiate")],
+    ["arp ⇅", "up then down", () => apply(arpeggiateNotes(notes, ids, grid, "updown"), "arpeggiate")],
+    ["strum", "offset the notes of each stack, low to high", () => apply(strumNotes(notes, ids, grid / 4), "strum")],
+    ["chop", "split notes into grid-length pieces", () => apply(chopNotes(notes, ids, grid), "chop")],
+    ["arp ?", "random order", () => apply(arpeggiateNotes(notes, ids, grid, "random"), "arpeggiate")],
+    ["×2 slower", "stretch the selection to twice its length (half speed)", () => apply(scaleNotes(notes, ids, 2, grid / 2), "stretch notes")],
+    ["½ faster", "squeeze the selection to half its length (double speed)", () => apply(scaleNotes(notes, ids, 0.5, grid / 2), "squeeze notes")],
+    ["reverse", "play the selection backwards in time", () => apply(reverseNotes(notes, ids), "reverse notes")],
+    ["invert", "mirror pitches around the selection's middle", () => apply(invertNotes(notes, ids, { min: 24, max: 96 }), "invert notes")],
+  ];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>
+      {tools.map(([label, title, fn]) => (
+        <button key={label} title={title} onClick={fn} disabled={notes.length === 0} style={{ background: "var(--bg-2)", color: "var(--text-2)" }}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** For one selected dissonant note: say why, offer the two nearest chord tones, or keep it on purpose. */
+function ResolveKeep({ note }: { note: { id: string; pitch: number; startBeat: number; intentional?: boolean } }) {
+  const s = useStore();
+  const pattern = useStore(selectedPattern);
+  const track = useStore(selectedTrack);
+  const key = s.snapshot!.model.key;
+  if (!pattern || !track) return null;
+  const chords = pattern.chords.chords;
+  const tiers = tierMap(note.startBeat, chords, key);
+  const t = tiers[((note.pitch % 12) + 12) % 12];
+  const why = explainNote(note.pitch, chords, key, note.startBeat);
+  const notes = pattern.notesByTrack[track.id] ?? [];
+  const update = (patch: Partial<{ pitch: number; intentional: boolean }>) =>
+    void s.dispatch(
+      { type: "setNotes", patternId: pattern.id, trackId: track.id, notes: notes.map((n) => (n.id === note.id ? { ...n, ...patch } : n)) },
+      false,
+      "pitch" in patch ? "resolve note" : "keep note",
+    );
+  const { down, up } = resolveTargets(note.pitch, tiers);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 2 }}>
+      <div className="mono" style={{ fontSize: 9.5, color: t === "dissonance" ? "var(--tier-dissonance)" : t === "tension" ? "var(--tier-tension)" : "var(--tier-solid)" }}>
+        {why}
+      </div>
+      {t === "dissonance" && (
+        <div className="chipsrow">
+          {down !== null && <button className="chip" onClick={() => (update({ pitch: down }), s.audition(down))}>↓ {midiName(down)}</button>}
+          {up !== null && <button className="chip" onClick={() => (update({ pitch: up }), s.audition(up))}>↑ {midiName(up)}</button>}
+          <button className={`chip${note.intentional ? " on" : ""}`} onClick={() => update({ intentional: !note.intentional })} title="it's dissonant on purpose: the hatch stays, the flag calms down">
+            {note.intentional ? "kept ✓" : "keep"}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

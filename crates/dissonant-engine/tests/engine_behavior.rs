@@ -40,6 +40,8 @@ fn render(m: &ProjectModel, tail_seconds: f64) -> (Vec<f32>, Vec<f32>) {
         tail_seconds,
         hear_chords: false,
         master: m.master.clone(),
+        // Measurements below compare raw sample values, so no normalising, dither or extra loops.
+        ..RenderOptions::default()
     };
     let inter = render_to_buffer(sequence(m), &opts).expect("render");
     split(&inter)

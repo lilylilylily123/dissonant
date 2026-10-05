@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { selectedPattern, useStore } from "../store";
+import { beatsPerBar, selectedPattern, useStore } from "../store";
+import { songLength } from "../types";
 
 /** Left column in SONG mode: the pattern library. Click selects, ＋ appends to the song. */
 export function PatternsPanel() {
@@ -8,6 +9,8 @@ export function PatternsPanel() {
   const selectPattern = useStore((s) => s.selectPattern);
   const setMode = useStore((s) => s.setMode);
   const dispatch = useStore((s) => s.dispatch);
+  const confirmDialog = useStore((s) => s.confirm);
+  const bpb = useStore(beatsPerBar);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
@@ -30,7 +33,12 @@ export function PatternsPanel() {
           <button disabled={!pattern} onClick={() => pattern && dispatch({ type: "duplicatePattern", id: pattern.id })}>dup</button>
           <button
             disabled={!pattern || model.patterns.length <= 1}
-            onClick={() => pattern && confirm(`Delete “${pattern.name}”?`) && dispatch({ type: "deletePattern", id: pattern.id })}
+            onClick={async () => {
+              if (!pattern) return;
+              if (await confirmDialog("Delete pattern?", `“${pattern.name}” and its clips in the song will be removed.`, "Delete", true)) {
+                void dispatch({ type: "deletePattern", id: pattern.id });
+              }
+            }}
           >
             del
           </button>
@@ -69,14 +77,14 @@ export function PatternsPanel() {
                   <span className="name">{p.name}</span>
                 )}
                 <span className="meta">
-                  {p.lengthBeats / 4}b · {noteCount(p.id)}n
+                  {+(p.lengthBeats / bpb).toFixed(2)}b · {noteCount(p.id)}n
                 </span>
                 <button className="ico" title="rename" onClick={(e) => (e.stopPropagation(), setDraft(p.name), setRenaming(p.id))}>✎</button>
                 <button
                   className="ico"
                   title="append to song"
                   style={{ color: "var(--accent)" }}
-                  onClick={(e) => (e.stopPropagation(), dispatch({ type: "setArrangement", arrangement: [...model.arrangement, p.id] }))}
+                  onClick={(e) => (e.stopPropagation(), dispatch({ type: "addClip", patternId: p.id, startBeat: songLength(model), lengthBeats: null }))}
                 >
                   ＋
                 </button>
@@ -89,21 +97,21 @@ export function PatternsPanel() {
         <div className="section" style={{ borderBottom: 0, borderTop: "1px solid var(--line-1)" }}>
           <div className="head">
             <span className="cap">length</span>
-            <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>{pattern.lengthBeats / 4} bars</span>
+            <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>{+(pattern.lengthBeats / bpb).toFixed(2)} bars</span>
           </div>
           <div className="chipsrow">
             {[1, 2, 4, 8].map((bars) => (
               <button
                 key={bars}
-                className={`chip${pattern.lengthBeats === bars * 4 ? " on" : ""}`}
-                onClick={() => dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * 4 })}
+                className={`chip${pattern.lengthBeats === bars * bpb ? " on" : ""}`}
+                onClick={() => dispatch({ type: "setPatternLength", id: pattern.id, beats: bars * bpb })}
               >
                 {bars}
               </button>
             ))}
           </div>
           <div className="help" style={{ padding: 0 }}>
-            ＋ adds the pattern to the end of the song · in the timeline: click selects, double-click opens, drag reorders, right-click removes
+            ＋ adds the pattern to the end of the song · timeline: drag a clip to move, its right edge to trim or loop-extend, ⌥-drag to copy, right-click to remove, double-click to edit · double-click the marker strip to add a section
           </div>
         </div>
       )}

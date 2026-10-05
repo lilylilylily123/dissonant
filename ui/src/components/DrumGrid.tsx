@@ -31,7 +31,7 @@ export function DrumGrid() {
 
   const commit = () => {
     if (working) {
-      void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: working });
+      void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: working }, false, "edit drum steps");
       setWorking(null);
     }
     dragMode.current = null;

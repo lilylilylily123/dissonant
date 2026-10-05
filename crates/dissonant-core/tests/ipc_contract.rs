@@ -96,10 +96,46 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
         other => panic!("expected SetChords, got {other:?}"),
     }
 
+    // Song timeline: clips, sections and the tempo map.
+    let clip_id = Uuid::new_v4();
     assert_eq!(
-        parse(json!({"type": "setArrangement", "arrangement": [pattern_id]})),
-        Command::SetArrangement { arrangement: vec![pattern_id] }
+        parse(json!({"type": "addClip", "patternId": pattern_id, "startBeat": 16.0, "lengthBeats": null})),
+        Command::AddClip { pattern_id, start_beat: 16.0, length_beats: None }
     );
+    assert_eq!(
+        parse(json!({"type": "addClip", "patternId": pattern_id, "startBeat": 0.0, "lengthBeats": 8.0})),
+        Command::AddClip { pattern_id, start_beat: 0.0, length_beats: Some(8.0) }
+    );
+    match parse(json!({
+        "type": "updateClip",
+        "clip": {"id": clip_id, "patternId": pattern_id, "startBeat": 4.0, "lengthBeats": 8.0, "offsetBeats": 2.0, "muted": true},
+    })) {
+        Command::UpdateClip { clip } => {
+            assert_eq!((clip.id, clip.pattern_id), (clip_id, pattern_id));
+            assert_eq!((clip.start_beat, clip.length_beats, clip.offset_beats), (4.0, 8.0, 2.0));
+            assert!(clip.muted);
+        }
+        other => panic!("expected UpdateClip, got {other:?}"),
+    }
+    assert_eq!(parse(json!({"type": "removeClip", "id": clip_id})), Command::RemoveClip { id: clip_id });
+
+    let section_id = Uuid::new_v4();
+    assert_eq!(
+        parse(json!({"type": "addSection", "name": "chorus", "startBeat": 32.0})),
+        Command::AddSection { name: "chorus".into(), start_beat: 32.0 }
+    );
+    match parse(json!({
+        "type": "updateSection",
+        "section": {"id": section_id, "name": "verse", "startBeat": 16.0, "key": {"rootPitchClass": 7, "scale": "major", "isLocked": true}, "color": "#ff8800"},
+    })) {
+        Command::UpdateSection { section } => {
+            assert_eq!(section.id, section_id);
+            assert_eq!(section.start_beat, 16.0);
+            assert_eq!(section.key.map(|k| k.root_pitch_class), Some(Some(7)));
+        }
+        other => panic!("expected UpdateSection, got {other:?}"),
+    }
+    assert_eq!(parse(json!({"type": "removeSection", "id": section_id})), Command::RemoveSection { id: section_id });
 
     assert!(matches!(
         parse(json!({
@@ -108,4 +144,26 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
         })),
         Command::SetMaster { .. }
     ));
+
+    assert_eq!(
+        parse(json!({"type": "setTimeSignature", "numerator": 3, "denominator": 4})),
+        Command::SetTimeSignature { numerator: 3, denominator: 4 }
+    );
+    assert_eq!(
+        parse(json!({"type": "setSwing", "swing": 62.0, "grid": 0.25})),
+        Command::SetSwing { swing: 62.0, grid: 0.25 }
+    );
+
+    let point_id = Uuid::new_v4();
+    assert_eq!(
+        parse(json!({"type": "addTempoPoint", "beat": 8.0, "bpm": 140.0, "ramp": true})),
+        Command::AddTempoPoint { beat: 8.0, bpm: 140.0, ramp: true }
+    );
+    match parse(json!({"type": "updateTempoPoint", "point": {"id": point_id, "beat": 12.0, "bpm": 90.0, "ramp": false}})) {
+        Command::UpdateTempoPoint { point } => {
+            assert_eq!((point.id, point.beat, point.bpm, point.ramp), (point_id, 12.0, 90.0, false));
+        }
+        other => panic!("expected UpdateTempoPoint, got {other:?}"),
+    }
+    assert_eq!(parse(json!({"type": "removeTempoPoint", "id": point_id})), Command::RemoveTempoPoint { id: point_id });
 }

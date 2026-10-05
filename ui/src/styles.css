@@ -341,8 +341,9 @@ select {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
+  gap: 10px;
+  padding: 0 10px;
+  overflow: hidden;
   background: var(--bg-transport);
   border-bottom: 1px solid var(--line-1);
 }
@@ -366,6 +367,18 @@ select {
   background: var(--bg-inactive);
   cursor: pointer;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+.transport input[type="range"] {
+  height: 4px;
+  accent-color: var(--accent);
+  margin: 0;
+}
+.transport .tgroup {
+  flex: none;
+}
+.transport .mastermeter {
+  flex: none;
 }
 .seg > div.on {
   color: var(--on-accent);
@@ -496,7 +509,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  width: 150px;
+  width: 130px;
 }
 .mastermeter .hdr {
   display: flex;
@@ -1682,4 +1695,262 @@ select {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Section markers in the arrangement ruler */
+.arr .marker {
+  position: absolute;
+  top: 2px;
+  height: 13px;
+  display: flex;
+  align-items: center;
+  border-left: 2px solid;
+  padding-left: 4px;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: grab;
+  white-space: nowrap;
+  overflow: visible;
+  z-index: 2;
+}
+.arr .marker .popover {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--text-1);
+  cursor: default;
+}
+
+/* ─── Modal dialog (replaces confirm/alert) ─────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 8, 10, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.modal {
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  border-radius: 3px;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+.modal .mtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0);
+  letter-spacing: 0.01em;
+}
+.modal .mbody {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+.modal .mdetail {
+  font-size: 10px;
+  color: var(--text-4);
+  padding: 5px 7px;
+  background: var(--bg-0b);
+  border: 1px solid var(--line-1);
+  border-radius: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal .mbtns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+.modal .mbtns button {
+  height: 24px;
+  padding: 0 12px;
+  font-size: 11px;
+}
+.modal .mbtns button.solid {
+  color: #0b0b0d;
+  font-weight: 600;
+}
+.menubar .dropdown .item .sub {
+  color: var(--text-5);
+  font-size: 10px;
+  margin-left: 8px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Settings window ───────────────────────────────────────────────────────────────────── */
+.modal.settings {
+  width: 640px;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.settings .shead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-1);
+}
+.settings .sbody {
+  display: flex;
+  min-height: 360px;
+}
+.settings .stabs {
+  width: 120px;
+  border-right: 1px solid var(--line-1);
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-1);
+}
+.settings .stabs > div {
+  padding: 6px 8px;
+  border-radius: 2px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  cursor: default;
+}
+.settings .stabs > div:hover {
+  color: var(--text-2);
+}
+.settings .stabs > div.on {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.settings .spane {
+  flex: 1;
+  padding: 10px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+}
+.settings .srow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+}
+.settings .slabel {
+  width: 150px;
+  flex: none;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+.settings .sctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.settings .sctl .k {
+  font-size: 10px;
+  color: var(--text-5);
+}
+.settings .sdiv {
+  height: 1px;
+  background: var(--line-1);
+  margin: 6px 0;
+}
+.settings .scap {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-5);
+}
+.settings input[type="color"] {
+  width: 28px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  background: transparent;
+}
+:root.reduced-motion * {
+  transition: none !important;
+  animation: none !important;
+}
+.tplrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.tplrow:hover {
+  background: var(--bg-2-sel);
+}
+.tplrow .name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-1);
+  min-width: 90px;
+}
+.tplrow .meta {
+  flex: 1;
+  font-size: 10.5px;
+  color: var(--text-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal.exportdlg .spane .seg > div {
+  padding: 3px 8px;
+}
+
+/* ─── Tempo lane (SONG mode) ────────────────────────────────────────────────────────────── */
+.tempolane {
+  display: flex;
+  height: 40px;
+  flex: none;
+  background: var(--bg-lane);
+  border-bottom: 1px solid var(--line-1);
+}
+.tempolane .head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-right: 1px solid var(--line-1);
+  background: var(--bg-1);
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+.tempolane .head .mono {
+  font-size: 11px;
+}
+.tempolane .head .k {
+  font-size: 9.5px;
+  color: var(--text-5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tempolane .lane {
+  display: block;
+  flex: none;
 }
