@@ -1,10 +1,12 @@
 //! The three-tier classifier — the product's core mechanic.
 //!
-//! Rule: chord tones win; otherwise a pitch a half step from any chord tone is dissonance; an
-//! out-of-key pitch is dissonance; everything else (in-key, ≥ a whole step from every chord
-//! tone) is a tension.
+//! Rule: chord tones win; otherwise a pitch a half step *above* a chord tone is dissonance (the
+//! classic avoid note — F over C, C over G7); an out-of-key pitch is dissonance; everything else
+//! is a tension. The rule is deliberately one-directional: a pitch a half step *below* a chord
+//! tone is a leading tone into it (B under C, E under F, the 13th of a dominant) and is one of
+//! the best-sounding tensions there is, so flagging it red would be musically wrong.
 
-use super::{normalize, semitone_distance};
+use super::normalize;
 use serde::{Deserialize, Serialize};
 
 /// How a note relates to the chord sounding right now.
@@ -13,9 +15,9 @@ use serde::{Deserialize, Serialize};
 pub enum Tier {
     /// A note of the chord itself. Rock-solid.
     ChordTone,
-    /// In-key and at least a whole step from every chord tone. Spicy but good.
+    /// In-key and not a half step above any chord tone. Spicy but good.
     Tension,
-    /// A half step from a chord tone, or out of key. Flagged — never blocked.
+    /// A half step above a chord tone (an avoid note), or out of key. Flagged — never blocked.
     Dissonance,
 }
 
@@ -26,12 +28,13 @@ impl TierClassifier {
     /// Classify one pitch class against a chord, optionally constrained to a key's scale.
     pub fn tier(&self, pitch_class: i32, chord: &[i32], key: Option<&[i32]>) -> Tier {
         let p = normalize(pitch_class);
-        let chord: Vec<i32> = chord.iter().map(|&c| normalize(c)).collect();
-        if chord.contains(&p) {
+        if chord.iter().any(|&c| normalize(c) == p) {
             return Tier::ChordTone;
         }
-        let nearest = chord.iter().map(|&c| semitone_distance(p, c)).min().unwrap_or(12);
-        if nearest == 1 {
+        // The avoid note is the one a half step *above* a chord tone: it smears the tone it sits
+        // on (F over C's E, C over G7's B). A half step *below* is a leading tone into the chord
+        // tone (B under C = maj7, E under F = the 13th of G7) and stays a tension.
+        if chord.iter().any(|&c| normalize(p - c) == 1) {
             return Tier::Dissonance;
         }
         if let Some(key) = key {
@@ -69,6 +72,9 @@ mod tests {
         assert_eq!(c.tier(9, &chord, None), Tier::Tension);
         assert_eq!(c.tier(5, &chord, None), Tier::Dissonance); // half step above E
         assert_eq!(c.tier(1, &chord, None), Tier::Dissonance); // half step above C
+        // Half step *below* a chord tone is a leading tone, not an avoid note.
+        assert_eq!(c.tier(11, &chord, None), Tier::Tension); // B under C = maj7
+        assert_eq!(c.tier(3, &chord, None), Tier::Tension); // D# under E = #9
     }
 
     #[test]

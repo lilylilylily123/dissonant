@@ -84,19 +84,32 @@ pub fn diatonic_chords(root: i32, scale: ScaleType) -> Vec<ChordSuggestion> {
         .collect()
 }
 
-/// Build a progression from scale degrees, filling `total_beats` by cycling the degrees so
-/// long patterns get chords across their whole length.
+/// Build a progression from scale degrees, filling `total_beats` by cycling the degrees so long
+/// patterns get chords across their whole length.
+///
+/// The result always fits inside `total_beats`: on a pattern too short for one pass of the
+/// degrees at `chord_beats` each, the chords are divided to fit rather than written past the end
+/// (where they would be invisible in the lane, never heard, and still saved into the document).
 pub fn progression(degrees: &[i32], root: i32, scale: ScaleType, total_beats: f64, chord_beats: f64) -> Vec<ChordEvent> {
-    if degrees.is_empty() || chord_beats <= 0.0 {
+    if degrees.is_empty() || chord_beats <= 0.0 || total_beats <= 0.0 {
         return vec![];
     }
     let diatonic = diatonic_chords(root, scale);
-    let slots = ((total_beats / chord_beats).floor() as usize).max(degrees.len());
+    let whole_slots = (total_beats / chord_beats).floor() as usize;
+    // One chord per degree at minimum, so a starter always lands as the progression it names.
+    let (slots, beats) = if whole_slots < degrees.len() {
+        (degrees.len(), total_beats / degrees.len() as f64)
+    } else {
+        (whole_slots, chord_beats)
+    };
     (0..slots)
         .map(|i| {
             let degree = degrees[i % degrees.len()].rem_euclid(7) as usize;
             let c = &diatonic[degree];
-            ChordEvent::new(i as f64 * chord_beats, chord_beats, c.pitch_classes.clone(), Some(c.name.clone()))
+            let start = i as f64 * beats;
+            // The last chord absorbs any remainder so the lane is covered with no gap.
+            let length = if i + 1 == slots { total_beats - start } else { beats };
+            ChordEvent::new(start, length, c.pitch_classes.clone(), Some(c.name.clone()))
         })
         .collect()
 }

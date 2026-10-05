@@ -61,7 +61,9 @@ mod tests {
         let e = HighlightEngine::default();
         let key = KeyState::NONE;
         assert_eq!(e.tier(64, 1.0, &track(), &key), Some(Tier::ChordTone)); // E over C
-        assert_eq!(e.tier(64, 5.0, &track(), &key), Some(Tier::Dissonance)); // E over F (half step above F)
+        assert_eq!(e.tier(64, 5.0, &track(), &key), Some(Tier::Tension)); // E over F = maj7
+        assert_eq!(e.tier(65, 1.0, &track(), &key), Some(Tier::Dissonance)); // F over C: avoid note
+        assert_eq!(e.tier(65, 5.0, &track(), &key), Some(Tier::ChordTone)); // F over F
     }
 
     #[test]

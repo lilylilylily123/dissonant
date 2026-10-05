@@ -52,3 +52,122 @@ describe("key detection", () => {
     expect(detectKey([]).candidates).toHaveLength(0);
   });
 });
+
+// ─── Rust ↔ TypeScript parity ──────────────────────────────────────────────────────────────
+// These tables are duplicated verbatim from `crates/dissonant-core/tests/theory_behavior.rs`
+// (module `parity`). The UI reimplements the theory so the roll can repaint at 60 fps without a
+// round trip; if one side is edited without the other, one of the two suites fails — which is
+// exactly the drift that makes the colors on screen disagree with the harmony the engine plays.
+
+import { normalize, scalePitchClasses, STARTERS } from "./theory";
+import type { ScaleType, Tier as TierT } from "./types";
+
+type ParityCase = [label: string, chord: number[], key: [number, ScaleType] | null, pitch: number, expected: TierT];
+
+const TIER_CASES: ParityCase[] = [
+  ["C/Cmaj root", [0,4,7], [0, "major"], 0, "chordTone"],
+  ["C/Cmaj 9", [0,4,7], [0, "major"], 2, "tension"],
+  ["C/Cmaj avoid 11", [0,4,7], [0, "major"], 5, "dissonance"],
+  ["C/Cmaj 13", [0,4,7], [0, "major"], 9, "tension"],
+  ["C/Cmaj maj7", [0,4,7], [0, "major"], 11, "tension"],
+  ["C/Cmaj b9 out", [0,4,7], [0, "major"], 1, "dissonance"],
+  ["C/Cmaj #11 out", [0,4,7], [0, "major"], 6, "dissonance"],
+  ["C/Cmaj b13 out", [0,4,7], [0, "major"], 8, "dissonance"],
+  ["C/nokey b7", [0,4,7], null, 10, "tension"],
+  ["C/nokey maj7", [0,4,7], null, 11, "tension"],
+  ["C/nokey #9", [0,4,7], null, 3, "tension"],
+  ["C/nokey avoid 11", [0,4,7], null, 5, "dissonance"],
+  ["C octave-up pitch", [0,4,7], null, 64, "chordTone"],
+  ["C negative pitch", [0,4,7], null, -1, "tension"],
+  ["C octave chord", [12,16,19], null, 11, "tension"],
+  ["Am/Cmaj 9", [9,0,4], [0, "major"], 11, "tension"],
+  ["Am/Cmaj 11", [9,0,4], [0, "major"], 2, "tension"],
+  ["Am/Cmaj b7", [9,0,4], [0, "major"], 7, "tension"],
+  ["Am/Cmaj avoid b13", [9,0,4], [0, "major"], 5, "dissonance"],
+  ["Am/Cmaj third", [9,0,4], [0, "major"], 0, "chordTone"],
+  ["G7/Cmaj 13", [7,11,2,5], [0, "major"], 4, "tension"],
+  ["G7/Cmaj 9", [7,11,2,5], [0, "major"], 9, "tension"],
+  ["G7/Cmaj avoid 11", [7,11,2,5], [0, "major"], 0, "dissonance"],
+  ["G7/Cmaj seventh", [7,11,2,5], [0, "major"], 5, "chordTone"],
+  ["G7/Cmaj b9 out", [7,11,2,5], [0, "major"], 8, "dissonance"],
+  ["Cmaj7/Cmaj 7th", [0,4,7,11], [0, "major"], 11, "chordTone"],
+  ["Cmaj7/Cmaj 9", [0,4,7,11], [0, "major"], 2, "tension"],
+  ["Cmaj7/Cmaj avoid 11", [0,4,7,11], [0, "major"], 5, "dissonance"],
+  ["Dm7/Cmaj 13", [2,5,9,0], [0, "major"], 11, "tension"],
+  ["Dm7/Cmaj 11", [2,5,9,0], [0, "major"], 7, "tension"],
+  ["Dm7/Cmaj 9", [2,5,9,0], [0, "major"], 4, "tension"],
+  ["Bdim/Cmaj avoid b9", [11,2,5], [0, "major"], 0, "dissonance"],
+  ["Bdim/Cmaj b13", [11,2,5], [0, "major"], 7, "tension"],
+  ["Csus4/Cmaj third", [0,5,7], [0, "major"], 4, "tension"],
+  ["Csus4/Cmaj maj7", [0,5,7], [0, "major"], 11, "tension"],
+  ["Caug/nokey #5", [0,4,8], null, 8, "chordTone"],
+  ["Caug/nokey avoid 13", [0,4,8], null, 9, "dissonance"],
+  ["Em/Amin avoid b9", [4,7,11], [9, "minor"], 5, "dissonance"],
+  ["Em/Amin avoid b13", [4,7,11], [9, "minor"], 0, "dissonance"],
+  ["Em/Amin 11", [4,7,11], [9, "minor"], 9, "tension"],
+  ["D/Gmaj avoid 11", [2,6,9], [7, "major"], 7, "dissonance"],
+  ["D/Gmaj 13", [2,6,9], [7, "major"], 11, "tension"],
+];
+
+describe("parity with dissonant-core", () => {
+  it("classifies all 42 shared tier cases identically", () => {
+    expect(TIER_CASES).toHaveLength(42);
+    for (const [label, chord, key, pitch, expected] of TIER_CASES) {
+      const scale = key === null ? null : scalePitchClasses(key[0], key[1]);
+      expect(`${label}=${tier(pitch, chord, scale)}`).toBe(`${label}=${expected}`);
+    }
+  });
+
+  it("agrees on normalize, STARTERS and progression", () => {
+    expect([-25, -13, -12, -1, 0, 11, 12, 13, 64, 127].map(normalize)).toEqual([11, 11, 0, 11, 0, 11, 0, 1, 4, 7]);
+
+    expect(STARTERS.map((s) => [s.name, s.degrees])).toEqual([
+      ["I–IV–V–vi", [0, 3, 4, 5]],
+      ["I–V–vi–IV", [0, 4, 5, 3]],
+      ["vi–IV–I–V", [5, 3, 0, 4]],
+      ["ii–V–I", [1, 4, 0, 0]],
+      ["I–vi–IV–V", [0, 5, 3, 4]],
+      ["i–VI–III–VII", [0, 5, 2, 6]],
+    ]);
+
+    const described = (degrees: number[], root: number, scale: ScaleType, total: number) =>
+      progression(degrees, root, scale, total, 4).map((c) => `${c.startBeat}:${c.lengthBeats}:[${c.pitchClasses.join(", ")}]:${c.name ?? ""}`);
+    expect(described([0, 3, 4, 5], 0, "major", 16)).toEqual(["0:4:[0, 4, 7]:C", "4:4:[5, 9, 0]:F", "8:4:[7, 11, 2]:G", "12:4:[9, 0, 4]:Am"]);
+    expect(described([0, 5, 2, 6], 9, "minor", 16)).toEqual(["0:4:[9, 0, 4]:Am", "4:4:[5, 9, 0]:F", "8:4:[0, 4, 7]:C", "12:4:[7, 11, 2]:G"]);
+    expect(described([1, 4, 0, 0], 2, "major", 16)).toEqual(["0:4:[4, 7, 11]:Em", "4:4:[9, 1, 4]:A", "8:4:[2, 6, 9]:D", "12:4:[2, 6, 9]:D"]);
+    // A pattern too short for one chord per degree divides the length instead of overflowing,
+    // matching harmony::progression — a 1-bar pattern gets four 1-beat chords that fit.
+    expect(described([0, 3, 4, 5], 0, "major", 4)).toEqual(["0:1:[0, 4, 7]:C", "1:1:[5, 9, 0]:F", "2:1:[7, 11, 2]:G", "3:1:[9, 0, 4]:Am"]);
+    // A ragged length is still covered to the end: the last chord absorbs the remainder.
+    expect(described([0, 3], 0, "major", 18).at(-1)).toBe("12:6:[5, 9, 0]:F");
+    expect(progression([0], 0, "major", -8, 4)).toEqual([]);
+  });
+
+  it("resolves overlapping chords to the later-starting one whatever the array order", () => {
+    // dissonant-core's ChordTrack keeps its chords sorted and documents "the later-starting one
+    // wins"; this array arrives in the opposite order, and must still agree.
+    const chords = [
+      { id: "f", startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F" },
+      { id: "c", startBeat: 0, lengthBeats: 8, pitchClasses: [0, 4, 7], name: "C" },
+    ];
+    expect(chordAt(chords, 1)?.name).toBe("C");
+    expect(chordAt(chords, 5)?.name).toBe("F");
+    expect(tierMap(5, chords, NO_KEY)[5]).toBe("chordTone"); // F over the F chord
+    expect(tierMap(1, chords, NO_KEY)[5]).toBe("dissonance"); // F over the C chord: avoid note
+    expect(chordAt(chords, 8)).toBeNull();
+    expect(chordAt(chords, -1)).toBeNull();
+  });
+
+  it("gates key confidence on distinct pitch classes, not note count", () => {
+    // Twelve notes, but only two or three distinct pitch classes: harmonically that is a riff,
+    // not a key, and it fits half a dozen keys equally well.
+    expect(detectKey([0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4]).isConfident).toBe(false);
+    expect(detectKey([0, 4, 7, 0, 4, 7, 0, 4, 7, 0, 4, 7]).isConfident).toBe(false);
+    // A Cmaj7 arpeggio correlates best with E minor — a confident wrong answer if it passed.
+    const arp = detectKey([0, 4, 7, 11, 0, 4, 7, 11, 0, 4, 7, 11]);
+    expect(arp.candidates[0]).toMatchObject({ rootPitchClass: 4, scale: "minor" });
+    expect(arp.isConfident).toBe(false);
+    // Real melodic material still locks on.
+    expect(detectKey([60, 62, 64, 65, 67, 69, 71, 72, 67, 64, 60, 55]).isConfident).toBe(true);
+  });
+});

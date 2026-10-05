@@ -36,6 +36,11 @@ pub struct KeyDetector {
     pub min_notes_for_confidence: usize,
     /// Minimum correlation margin between the top two candidates.
     pub min_score_gap: f64,
+    /// Minimum number of *distinct* pitch classes. Repetition is not evidence: a riff that
+    /// hammers two or three pitches sits inside half a dozen keys no matter how many times it
+    /// repeats, and four distinct pitches is still just one chord (a C–E–G–B arpeggio correlates
+    /// best with E minor). Five is the first count that describes a scale rather than a chord.
+    pub min_distinct_pitch_classes: usize,
 }
 
 impl Default for KeyDetector {
@@ -43,6 +48,7 @@ impl Default for KeyDetector {
         KeyDetector {
             min_notes_for_confidence: 10,
             min_score_gap: 0.04,
+            min_distinct_pitch_classes: 5,
         }
     }
 }
@@ -82,7 +88,10 @@ impl KeyDetector {
         } else {
             1.0
         };
-        let is_confident = pitch_classes.len() >= self.min_notes_for_confidence && gap >= self.min_score_gap;
+        let distinct = histogram.iter().filter(|&&h| h > 0.0).count();
+        let is_confident = pitch_classes.len() >= self.min_notes_for_confidence
+            && distinct >= self.min_distinct_pitch_classes
+            && gap >= self.min_score_gap;
         KeyDetectionResult { candidates, is_confident }
     }
 }

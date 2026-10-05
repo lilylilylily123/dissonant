@@ -11,11 +11,6 @@ const MINOR_STEPS = [0, 2, 3, 5, 7, 8, 10];
 
 export const normalize = (pc: number): number => ((pc % 12) + 12) % 12;
 
-export function semitoneDistance(a: number, b: number): number {
-  const d = Math.abs(a - b) % 12;
-  return Math.min(d, 12 - d);
-}
-
 export const noteName = (pc: number): string => NOTE_NAMES[normalize(pc)];
 export const midiName = (pitch: number): string => `${noteName(pitch)}${Math.floor(pitch / 12) - 1}`;
 export const keyName = (root: number, scale: ScaleType): string =>
@@ -99,6 +94,11 @@ export const STARTERS: Starter[] = [
   { name: "i–VI–III–VII", degrees: [0, 5, 2, 6] },
 ];
 
+/**
+ * Mirrors `harmony::progression`. The result always fits inside `totalBeats`: on a pattern too
+ * short for one pass of the degrees at `chordBeats` each, the chords are divided to fit rather
+ * than written past the end, where they would be invisible and never heard.
+ */
 export function progression(
   degrees: number[],
   root: number,
@@ -106,15 +106,20 @@ export function progression(
   totalBeats: number,
   chordBeats = 4,
 ): ChordEvent[] {
-  if (degrees.length === 0 || chordBeats <= 0) return [];
+  if (degrees.length === 0 || chordBeats <= 0 || totalBeats <= 0) return [];
   const diatonic = diatonicChords(root, scale);
-  const slots = Math.max(Math.floor(totalBeats / chordBeats), degrees.length);
+  const wholeSlots = Math.floor(totalBeats / chordBeats);
+  const short = wholeSlots < degrees.length;
+  const slots = short ? degrees.length : wholeSlots;
+  const beats = short ? totalBeats / degrees.length : chordBeats;
   return Array.from({ length: slots }, (_, i) => {
     const c = diatonic[((degrees[i % degrees.length] % 7) + 7) % 7];
+    const startBeat = i * beats;
     return {
       id: uuid(),
-      startBeat: i * chordBeats,
-      lengthBeats: chordBeats,
+      startBeat,
+      // The last chord absorbs any remainder so the lane is covered with no gap.
+      lengthBeats: i + 1 === slots ? totalBeats - startBeat : beats,
       pitchClasses: [...c.pitchClasses],
       name: c.name,
     };
@@ -127,18 +132,23 @@ export function tier(pitchClass: number, chord: number[], key: number[] | null):
   const p = normalize(pitchClass);
   const chordSet = chord.map(normalize);
   if (chordSet.includes(p)) return "chordTone";
-  const nearest = chordSet.reduce((m, c) => Math.min(m, semitoneDistance(p, c)), 12);
-  if (nearest === 1) return "dissonance";
+  // Avoid note = a half step *above* a chord tone (F over C, C over G7). A half step below is a
+  // leading tone into the chord tone (B under C = maj7, E under F = G7's 13th) and stays a
+  // tension. Mirrors dissonant-core's TierClassifier::tier.
+  if (chordSet.some((c) => normalize(p - c) === 1)) return "dissonance";
   if (key && !key.some((k) => normalize(k) === p)) return "dissonance";
   return "tension";
 }
 
+/** The chord sounding at `beat`. Where chords overlap the later-starting one wins, matching
+ *  dissonant-core's ChordTrack — which keeps its chords sorted, while this array may not be. */
 export function chordAt(chords: ChordEvent[], beat: number): ChordEvent | null {
-  for (let i = chords.length - 1; i >= 0; i--) {
-    const c = chords[i];
-    if (beat >= c.startBeat && beat < c.startBeat + c.lengthBeats) return c;
+  let best: ChordEvent | null = null;
+  for (const c of chords) {
+    if (beat < c.startBeat || beat >= c.startBeat + c.lengthBeats) continue;
+    if (best === null || c.startBeat >= best.startBeat) best = c;
   }
-  return null;
+  return best;
 }
 
 /** Tier for every pitch class at `beat`; `null` entries mean "no guidance". */
@@ -184,7 +194,9 @@ function pearson(x: number[], y: number[]): number {
   return den === 0 ? 0 : num / den;
 }
 
-export function detectKey(pitchClasses: number[], minNotes = 10, minGap = 0.04): KeyDetectionResult {
+/** `minDistinct` mirrors dissonant-core's `min_distinct_pitch_classes`: repetition is not
+ *  evidence — fewer than five distinct pitch classes is a chord, not a scale. */
+export function detectKey(pitchClasses: number[], minNotes = 10, minGap = 0.04, minDistinct = 5): KeyDetectionResult {
   if (pitchClasses.length === 0) return { candidates: [], isConfident: false };
   const hist = Array(12).fill(0);
   for (const pc of pitchClasses) hist[normalize(pc)] += 1;
@@ -198,5 +210,7 @@ export function detectKey(pitchClasses: number[], minNotes = 10, minGap = 0.04):
   }
   candidates.sort((a, b) => b.score - a.score);
   const gap = candidates[0].score - candidates[1].score;
-  return { candidates, isConfident: pitchClasses.length >= minNotes && gap >= minGap };
+  const distinct = hist.filter((h) => h > 0).length;
+  const isConfident = pitchClasses.length >= minNotes && distinct >= minDistinct && gap >= minGap;
+  return { candidates, isConfident };
 }

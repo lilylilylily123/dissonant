@@ -12,8 +12,3 @@ pub fn normalize(pc: i32) -> i32 {
     pc.rem_euclid(12)
 }
 
-/// Shortest distance between two pitch classes around the circle (0–6).
-pub fn semitone_distance(a: i32, b: i32) -> i32 {
-    let d = (a - b).rem_euclid(12);
-    d.min(12 - d)
-}
