@@ -5,6 +5,7 @@
 //! continuous controls (sliders) send `transient` commands which coalesce into one undo step
 //! per gesture.
 
+use crate::midi_file::ImportedTrack;
 use crate::model::{ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track};
 use crate::theory::harmony;
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,9 @@ pub enum Command {
     SetTimeSignature { numerator: u32, denominator: u32 },
     /// Global swing in percent (50–75) and its grid in beats (0.5 or 0.25).
     SetSwing { swing: f64, grid: f64 },
+    /// Add one track per imported MIDI track, with its notes in `pattern_id`, in one undo step.
+    /// The pattern grows to `length_beats` when that is longer.
+    ImportTracks { pattern_id: Uuid, tracks: Vec<ImportedTrack>, length_beats: f64 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -288,6 +292,7 @@ impl Command {
             SetMaster { .. } => "change master",
             SetTimeSignature { .. } => "set time signature",
             SetSwing { .. } => "set swing",
+            ImportTracks { .. } => "import MIDI",
         }
         .to_string()
     }
@@ -497,6 +502,31 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 return Err(EditError::InvalidValue);
             }
             m.time_signature = crate::model::TimeSignature { numerator, denominator };
+        }
+        ImportTracks { pattern_id, tracks, length_beats } => {
+            if m.pattern(&pattern_id).is_none() {
+                return Err(EditError::NoSuchPattern);
+            }
+            if tracks.is_empty() || !length_beats.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            for t in tracks {
+                let mut track = if t.is_drum { Track::drums(&t.name) } else { Track::new(&t.name) };
+                if track.name.trim().is_empty() {
+                    track.name = format!("track {}", m.tracks.len() + 1);
+                }
+                let mut notes: Vec<NoteEvent> = t.notes.into_iter().map(NoteEvent::sanitized).collect();
+                notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat).then(a.pitch.cmp(&b.pitch)));
+                let id = track.id;
+                m.tracks.push(track);
+                if !notes.is_empty() {
+                    m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?.notes_by_track.insert(id, notes);
+                }
+            }
+            let p = m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?;
+            if length_beats > p.length_beats {
+                p.length_beats = length_beats;
+            }
         }
         SetSwing { swing, grid } => {
             if !swing.is_finite() || !(grid == 0.5 || grid == 0.25) {
@@ -770,6 +800,32 @@ mod tests {
         d.restore(ProjectModel::starter(), None);
         assert!(d.is_dirty());
         assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn import_tracks_is_one_undo_step() {
+        let mut d = doc();
+        let pid = d.model().patterns[0].id;
+        let before = d.model().tracks.len();
+        d.apply(
+            Command::ImportTracks {
+                pattern_id: pid,
+                tracks: vec![
+                    ImportedTrack { name: "piano".into(), is_drum: false, notes: vec![NoteEvent::new(0.0, 1.0, 60)] },
+                    ImportedTrack { name: "kit".into(), is_drum: true, notes: vec![NoteEvent::new(0.0, 0.25, 36)] },
+                ],
+                length_beats: 32.0,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(d.model().tracks.len(), before + 2);
+        assert!(d.model().tracks[before + 1].is_drum);
+        assert_eq!(d.model().patterns[0].length_beats, 32.0);
+        assert_eq!(d.undo_label(), Some("import MIDI"));
+        d.undo();
+        assert_eq!(d.model().tracks.len(), before);
+        assert_eq!(d.model().patterns[0].length_beats, 16.0);
     }
 
     #[test]

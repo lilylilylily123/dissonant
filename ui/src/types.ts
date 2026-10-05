@@ -226,6 +226,35 @@ export interface AudioStatus {
   xruns?: number;
 }
 
+/** What the export dialog sends; `null` fields fall back to the export settings. */
+export interface ExportRequest {
+  path: string;
+  scope: "song" | "pattern";
+  sampleRate: number | null;
+  bitDepth: 16 | 24 | 32 | null;
+  dither: boolean | null;
+  normalizeDb: number | null;
+  tailSeconds: number | null;
+  loops: number | null;
+  stems: boolean;
+  hearChords: boolean | null;
+}
+
+export interface ExportProgress {
+  done: number;
+  total: number;
+  current: string;
+}
+
+export interface ExportResult {
+  files: string[];
+}
+
+export interface TemplateInfo {
+  name: string;
+  path: string;
+}
+
 export interface OutputDevice {
   name: string;
   isDefault: boolean;

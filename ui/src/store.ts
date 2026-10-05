@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, Track } from "./types";
+import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, TemplateInfo, Track } from "./types";
 import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
@@ -23,6 +23,8 @@ export interface DialogSpec {
   buttons: DialogButton[];
   /** Resolved with when the dialog is dismissed with Esc / the backdrop. */
   cancelValue?: string;
+  /** A text field; the typed value is read back through `dialogText`. */
+  input?: { placeholder?: string; value?: string };
 }
 
 export type BottomPanel = "devices" | "mixer";
@@ -54,6 +56,11 @@ interface State {
   settings: Settings;
   settingsOpen: boolean;
   outputDevices: OutputDevice[];
+  dialogText: string;
+  exportOpen: boolean;
+  exporting: ExportProgress | null;
+  templates: TemplateInfo[];
+  templatesOpen: boolean;
   looping: boolean;
   loopRegion: [number, number] | null;
   armed: boolean;
@@ -122,7 +129,21 @@ interface State {
   openPath(path: string): Promise<void>;
   /** Save; resolves true when the document ended up saved (false on cancel / error). */
   saveProject(saveAs?: boolean): Promise<boolean>;
+  /** Open the export dialog (⌘E). */
   exportWav(): Promise<void>;
+  openExport(open?: boolean): void;
+  /** Pick a file and run the export described by `request` (path is filled in here). */
+  runExport(request: Omit<ExportRequest, "path">): Promise<void>;
+  exportMidi(): Promise<void>;
+  importMidi(): Promise<void>;
+  setDialogText(text: string): void;
+  /** A dialog with one text field; resolves with the text, or null on cancel. */
+  askInput(title: string, message: string, placeholder?: string, okLabel?: string, initial?: string): Promise<string | null>;
+  openTemplates(open?: boolean): void;
+  refreshTemplates(): Promise<void>;
+  saveAsTemplate(): Promise<void>;
+  deleteTemplate(name: string): Promise<void>;
+  newFromTemplate(name: string | "starter" | "empty"): Promise<void>;
   restartAudio(): Promise<void>;
   showToast(text: string, error?: boolean): void;
   /** Show an in-app dialog and resolve with the chosen button's value. */
@@ -251,6 +272,11 @@ export const useStore = create<State>((set, get) => {
     settings: DEFAULT_SETTINGS,
     settingsOpen: false,
     outputDevices: [],
+    dialogText: "",
+    exportOpen: false,
+    exporting: null,
+    templates: [],
+    templatesOpen: false,
     looping: true,
     loopRegion: null,
     armed: false,
@@ -292,6 +318,7 @@ export const useStore = create<State>((set, get) => {
         if (midi.open && midi.open !== before) get().showToast(`MIDI in: ${midi.open}`);
         else if (!midi.open && before) get().showToast(`MIDI in: ${before} disconnected`, true);
       });
+      b.onExportProgress((p) => set({ exporting: p.done >= p.total ? null : p }));
       // Engine load / xruns in the status bar.
       setInterval(() => void get().refreshAudio(), 2000);
       const audio = await b.audioStatus();
@@ -557,13 +584,108 @@ export const useStore = create<State>((set, get) => {
     },
 
     async exportWav() {
+      set({ exportOpen: true });
+    },
+    openExport(open = true) {
+      set({ exportOpen: open });
+    },
+    async runExport(request) {
       const b = await getBridge();
-      const path = await b.pickSavePath("song.wav", "wav");
+      const base = fileNameOf(get().snapshot?.path).replace(/\.dissonant$/, "");
+      const path = await b.pickSavePath(`${request.scope === "pattern" ? `${base} - ${selectedPattern(get())?.name ?? "pattern"}` : base}.wav`, "wav");
       if (!path) return;
-      get().showToast("rendering…");
+      set({ exportOpen: false, exporting: { done: 0, total: request.stems ? 2 : 1, current: "rendering…" } });
       try {
-        const out = await b.exportWav(path, 1.5);
-        get().showToast(`exported ${out}`);
+        const out = await b.exportWav({ ...request, path });
+        get().showToast(out.files.length > 1 ? `exported ${out.files.length} files next to ${fileNameOf(path)}` : `exported ${fileNameOf(path)}`);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+      set({ exporting: null });
+    },
+    async exportMidi() {
+      const b = await getBridge();
+      const st = get();
+      const scope = st.mode === "song" && st.snapshot?.model.clips.length ? "song" : "pattern";
+      const base = fileNameOf(st.snapshot?.path).replace(/\.dissonant$/, "");
+      const path = await b.pickSavePath(scope === "pattern" ? `${base} - ${selectedPattern(st)?.name ?? "pattern"}.mid` : `${base}.mid`, "mid");
+      if (!path) return;
+      try {
+        await b.exportMidi(path, scope);
+        get().showToast(`exported ${fileNameOf(path)}`);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async importMidi() {
+      const b = await getBridge();
+      const pattern = selectedPattern(get());
+      if (!pattern) return;
+      const path = await b.pickOpenPath(["mid", "midi"], "MIDI file");
+      if (!path) return;
+      try {
+        applySnapshot(await b.importMidi(path, pattern.id));
+        get().showToast(`imported ${fileNameOf(path)} into ${pattern.name} as new tracks`);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    setDialogText(text) {
+      set({ dialogText: text });
+    },
+    async askInput(title, message, placeholder, okLabel = "OK", initial = "") {
+      set({ dialogText: initial });
+      const v = await get().ask({
+        title,
+        message,
+        input: { placeholder, value: initial },
+        buttons: [
+          { label: okLabel, value: "ok", kind: "primary" },
+          { label: "Cancel", value: "cancel", kind: "quiet" },
+        ],
+        cancelValue: "cancel",
+      });
+      return v === "ok" ? get().dialogText.trim() || null : null;
+    },
+    openTemplates(open = true) {
+      set({ templatesOpen: open });
+      if (open) void get().refreshTemplates();
+    },
+    async refreshTemplates() {
+      const b = await getBridge();
+      try {
+        set({ templates: await b.listTemplates() });
+      } catch {
+        /* no backend */
+      }
+    },
+    async saveAsTemplate() {
+      const b = await getBridge();
+      const suggested = fileNameOf(get().snapshot?.path).replace(/\.dissonant$/, "");
+      const name = await get().askInput("Save as template", "New projects can start from this one (tracks, chords, notes and mix included).", "template name", "Save", suggested === "untitled" ? "" : suggested);
+      if (!name) return;
+      try {
+        await b.saveTemplate(name);
+        get().showToast(`template “${name}” saved`);
+        void get().refreshTemplates();
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async deleteTemplate(name) {
+      const b = await getBridge();
+      if (!(await get().confirm("Delete template?", `“${name}” will be removed.`, "Delete", true))) return;
+      await b.deleteTemplate(name);
+      void get().refreshTemplates();
+    },
+    async newFromTemplate(name) {
+      const b = await getBridge();
+      if (!(await get().confirmDiscard("creating a new project"))) return;
+      set({ templatesOpen: false });
+      try {
+        if (name === "starter" || name === "empty") applySnapshot(await b.newProject(name === "starter"));
+        else applySnapshot(await b.newFromTemplate(name));
+        await syncPlayback();
       } catch (e) {
         get().showToast(String(e), true);
       }

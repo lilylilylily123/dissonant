@@ -28,6 +28,8 @@ pub struct RenderOptions {
     pub normalize_db: Option<f32>,
     /// TPDF dither when writing 16-bit.
     pub dither: bool,
+    /// How many times through the sequence (1 = once). Lets a pattern export as a longer loop.
+    pub loops: u32,
 }
 
 impl Default for RenderOptions {
@@ -40,6 +42,7 @@ impl Default for RenderOptions {
             bit_depth: 16,
             normalize_db: None,
             dither: true,
+            loops: 1,
         }
     }
 }
@@ -50,20 +53,30 @@ pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Res
         return Err(RenderError::Empty);
     }
     let sr = options.sample_rate as f32;
+    let loops = options.loops.max(1);
     let mut engine = Engine::new(sr, Arc::new(Shared::default()), &options.master);
-    engine.handle(EngineCommand::SetLooping(false));
+    // Looping stays on while there are repetitions left; the engine wraps at the sequence end.
+    engine.handle(EngineCommand::SetLooping(loops > 1));
     engine.handle(EngineCommand::SetHearChords(options.hear_chords));
     let tempo = Tempo::new(sequence.tempo_bpm);
-    let seconds = tempo.seconds_for_beats(sequence.length_beats) + options.tail_seconds;
+    let length_beats = sequence.length_beats;
+    let seconds = tempo.seconds_for_beats(length_beats) * loops as f64 + options.tail_seconds;
     engine.handle(EngineCommand::SetSequence(sequence));
     engine.handle(EngineCommand::Play);
 
     let total_frames = (seconds * sr as f64).ceil() as usize;
+    let last_pass_at = (tempo.seconds_for_beats(length_beats) * (loops as f64 - 1.0) * sr as f64) as usize;
     let block = 1024;
     let mut out = Vec::with_capacity(total_frames * 2);
     let mut buf = vec![0.0f32; block * 2];
     let mut done = 0;
+    let mut unlooped = loops <= 1;
     while done < total_frames {
+        if !unlooped && done >= last_pass_at {
+            // Entering the final repetition: let it run out into the tail instead of wrapping.
+            engine.handle(EngineCommand::SetLooping(false));
+            unlooped = true;
+        }
         let n = (total_frames - done).min(block);
         engine.process(&mut buf[..n * 2]);
         out.extend_from_slice(&buf[..n * 2]);
@@ -166,6 +179,25 @@ mod tests {
         let peak = reader.into_samples::<i16>().map(|s| s.unwrap().abs()).max().unwrap();
         assert!(peak > 1000);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn loops_repeat_the_sequence() {
+        let mut model = ProjectModel::starter();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        model.tracks[0].voice = "sine".into();
+        model.patterns[0].length_beats = 2.0;
+        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.0, 0.25, 69)]);
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        let opts = RenderOptions { tail_seconds: 0.0, loops: 3, ..Default::default() };
+        let buf = render_to_buffer(seq, &opts).unwrap();
+        // 2 beats @120 = 1 s per loop → 3 s total; the note sounds at the start of each loop.
+        assert_eq!(buf.len() / 2, 44_100 * 3);
+        for k in 0..3 {
+            let at = k * 44_100;
+            assert!(buf[2 * (at + 100)].abs() > 1e-4, "loop {k} has the note");
+            assert!(buf[2 * (at + 30_000)].abs() < 1e-4, "loop {k} is quiet before its end");
+        }
     }
 
     #[test]

@@ -9,11 +9,15 @@ import { useStore } from "../store";
 export function Dialog() {
   const dialog = useStore((s) => s.dialog);
   const answer = useStore((s) => s.answerDialog);
+  const text = useStore((s) => s.dialogText);
+  const setText = useStore((s) => s.setDialogText);
   const primaryRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!dialog) return;
-    primaryRef.current?.focus();
+    if (dialog.input) inputRef.current?.focus();
+    else primaryRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -42,6 +46,9 @@ export function Dialog() {
         <div className="mtitle">{dialog.title}</div>
         {dialog.message && <div className="mbody">{dialog.message}</div>}
         {dialog.detail && <div className="mdetail mono">{dialog.detail}</div>}
+        {dialog.input && (
+          <input ref={inputRef} type="text" value={text} placeholder={dialog.input.placeholder} onChange={(e) => setText(e.target.value)} style={{ height: 24, fontSize: 11 }} />
+        )}
         <div className="mbtns">
           {dialog.buttons.map((b) => (
             <button

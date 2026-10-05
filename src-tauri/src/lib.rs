@@ -4,7 +4,7 @@
 
 pub mod settings;
 
-use dissonant_core::{Command, Document, MasterSettings, NoteEvent, ProjectModel, Sequence};
+use dissonant_core::{midi_file, Command, Document, MasterSettings, MidiScope, NoteEvent, ProjectModel, Sequence};
 use dissonant_engine::{default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, EngineCommand, RenderOptions};
 use settings::{NewProjectKind, Settings};
 use midir::{MidiInput, MidiInputConnection};
@@ -938,40 +938,217 @@ fn set_looping(state: State<'_, AppState>, on: bool) {
 
 // ─── Export ──────────────────────────────────────────────────────────────────────────────────
 
-/// Render the song (or the current pattern when the arrangement is empty) to a WAV file,
-/// faster than real time, on a worker thread. Resolves when the file is written.
+/// Everything the export dialog decides. Fields left `None` fall back to the export settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRequest {
+    pub path: String,
+    /// "song" or "pattern" (the selected pattern).
+    pub scope: String,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u16>,
+    pub dither: Option<bool>,
+    /// `Some(db)` normalizes to that peak; `None` leaves the level alone.
+    pub normalize_db: Option<f32>,
+    pub tail_seconds: Option<f64>,
+    pub loops: Option<u32>,
+    /// Also write one WAV per track next to the mix (`<name> - <track>.wav`).
+    pub stems: bool,
+    pub hear_chords: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgress {
+    pub done: u32,
+    pub total: u32,
+    pub current: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub files: Vec<String>,
+}
+
+/// Render to WAV faster than real time on a worker thread: the mix, and with `stems` one file
+/// per track with everything else muted. Progress goes out as `export-progress` events.
 #[tauri::command]
-async fn export_wav(state: State<'_, AppState>, path: String, tail_seconds: Option<f64>) -> Result<String, String> {
+async fn export_wav(app: AppHandle, state: State<'_, AppState>, request: ExportRequest) -> Result<ExportResult, String> {
     if state.exporting.swap(true, Ordering::SeqCst) {
         return Err("an export is already running".into());
     }
-    let (sequence, master, hear_chords) = {
+    let x = state.settings().export;
+    let (model, pattern_id, hear_chords) = {
         let doc = state.doc.lock().unwrap();
         let ctx = state.playback.lock().unwrap();
-        let seq = if doc.model().clips.is_empty() {
-            build_sequence(doc.model(), PlayMode::Pattern, ctx.pattern_id)
-        } else {
-            Sequence::from_song(doc.model())
-        };
-        (seq, doc.model().master.clone(), ctx.hear_chords)
+        (doc.model().clone(), ctx.pattern_id, request.hear_chords.unwrap_or(ctx.hear_chords))
     };
-    let x = state.settings().export;
+    let song = request.scope != "pattern" && !model.clips.is_empty();
+    let build = move |m: &ProjectModel| if song { Sequence::from_song(m) } else { build_sequence(m, PlayMode::Pattern, pattern_id) };
     let options = RenderOptions {
-        sample_rate: x.sample_rate,
-        tail_seconds: tail_seconds.unwrap_or(x.tail_seconds),
+        sample_rate: request.sample_rate.unwrap_or(x.sample_rate),
+        tail_seconds: request.tail_seconds.unwrap_or(x.tail_seconds),
         hear_chords,
-        master,
-        bit_depth: x.bit_depth,
-        normalize_db: if x.normalize { Some(x.normalize_db) } else { None },
-        dither: x.dither,
+        master: model.master.clone(),
+        bit_depth: request.bit_depth.unwrap_or(x.bit_depth),
+        normalize_db: request.normalize_db,
+        dither: request.dither.unwrap_or(x.dither),
+        loops: request.loops.unwrap_or(1).clamp(1, 64),
     };
-    let target = PathBuf::from(&path);
-    let result = tauri::async_runtime::spawn_blocking(move || render_wav(Arc::new(sequence), &target, &options))
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| e.to_string()));
+    let mix_path = PathBuf::from(&request.path);
+    // Stem jobs: (file, model with only that track audible).
+    let mut jobs: Vec<(PathBuf, ProjectModel, bool)> = vec![(mix_path.clone(), model.clone(), hear_chords)];
+    if request.stems {
+        let stem = mix_path.file_stem().and_then(|s| s.to_str()).unwrap_or("export").to_string();
+        let dir = mix_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        for (i, t) in model.tracks.iter().enumerate() {
+            let mut m = model.clone();
+            for (j, mt) in m.tracks.iter_mut().enumerate() {
+                mt.muted = j != i;
+                mt.soloed = false;
+            }
+            let safe: String = t.name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+            jobs.push((dir.join(format!("{stem} - {:02} {}.wav", i + 1, safe.trim())), m, false));
+        }
+        if hear_chords {
+            let mut m = model.clone();
+            for mt in m.tracks.iter_mut() {
+                mt.muted = true;
+                mt.soloed = false;
+            }
+            jobs.push((dir.join(format!("{stem} - chords.wav")), m, true));
+        }
+    }
+    let total = jobs.len() as u32;
+    let handle = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for (i, (path, m, chords)) in jobs.into_iter().enumerate() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let _ = handle.emit("export-progress", ExportProgress { done: i as u32, total, current: name });
+            let opts = RenderOptions { hear_chords: chords, ..options.clone() };
+            render_wav(Arc::new(build(&m)), &path, &opts).map_err(|e| e.to_string())?;
+            files.push(path.display().to_string());
+        }
+        let _ = handle.emit("export-progress", ExportProgress { done: total, total, current: String::new() });
+        Ok::<_, String>(files)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
     state.exporting.store(false, Ordering::SeqCst);
-    result.map(|_| path)
+    result.map(|files| ExportResult { files })
+}
+
+// ─── MIDI files ──────────────────────────────────────────────────────────────────────────────
+
+/// Write the selected pattern (`scope` = "pattern") or the song as a Standard MIDI File.
+#[tauri::command]
+fn export_midi(state: State<'_, AppState>, path: String, scope: String) -> Result<String, String> {
+    let doc = state.doc.lock().unwrap();
+    let ctx = state.playback.lock().unwrap();
+    let midi_scope = if scope == "pattern" || doc.model().clips.is_empty() {
+        let pid = ctx
+            .pattern_id
+            .filter(|id| doc.model().pattern(id).is_some())
+            .or_else(|| doc.model().patterns.first().map(|p| p.id))
+            .ok_or("no pattern")?;
+        MidiScope::Pattern(pid)
+    } else {
+        MidiScope::Song
+    };
+    let bytes = midi_file::export(doc.model(), midi_scope).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("could not write {path}: {e}"))?;
+    Ok(path)
+}
+
+/// Read a MIDI file and add its tracks (with their notes) to a pattern, in one undo step.
+#[tauri::command]
+fn import_midi(state: State<'_, AppState>, path: String, pattern_id: Uuid) -> Result<Snapshot, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let bpb = state.doc.lock().unwrap().model().time_signature.beats_per_bar();
+    let imported = midi_file::import(&bytes, bpb).map_err(|e| e.to_string())?;
+    let count = imported.tracks.len();
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(
+            Command::ImportTracks { pattern_id, tracks: imported.tracks, length_beats: imported.length_beats },
+            false,
+            Some(format!("import {count} MIDI track{}", if count == 1 { "" } else { "s" })),
+        )
+        .map_err(|e| e.to_string())?;
+    state.sync_engine();
+    Ok(state.snapshot())
+}
+
+// ─── Templates ───────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateInfo {
+    pub name: String,
+    pub path: String,
+}
+
+impl AppState {
+    fn templates_dir(&self) -> Option<PathBuf> {
+        self.data_dir().map(|d| d.join("templates"))
+    }
+
+    fn list_templates(&self) -> Vec<TemplateInfo> {
+        let Some(dir) = self.templates_dir() else { return vec![] };
+        let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+        let mut out: Vec<TemplateInfo> = entries
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("dissonant"))
+            .map(|e| TemplateInfo {
+                name: e.path().file_stem().and_then(|n| n.to_str()).unwrap_or("template").to_string(),
+                path: e.path().display().to_string(),
+            })
+            .collect();
+        out.sort_by_key(|t| t.name.to_lowercase());
+        out
+    }
+}
+
+#[tauri::command]
+fn list_templates(state: State<'_, AppState>) -> Vec<TemplateInfo> {
+    state.list_templates()
+}
+
+/// Save the current project as a template (notes, chords, tracks, master — everything).
+#[tauri::command]
+fn save_template(state: State<'_, AppState>, name: String) -> Result<TemplateInfo, String> {
+    let safe: String = name.trim().chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')).collect();
+    if safe.is_empty() {
+        return Err("a template needs a name".into());
+    }
+    let dir = state.templates_dir().ok_or("no app data dir")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{safe}.dissonant"));
+    let json = state.doc.lock().unwrap().model().to_json().map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("could not write template: {e}"))?;
+    Ok(TemplateInfo { name: safe, path: path.display().to_string() })
+}
+
+#[tauri::command]
+fn delete_template(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    let dir = state.templates_dir().ok_or("no app data dir")?;
+    std::fs::remove_file(dir.join(format!("{name}.dissonant"))).map_err(|e| e.to_string())
+}
+
+/// A new untitled project from a template: fresh ids are not needed (a template is a
+/// snapshot), but the document gets no path so Save asks where.
+#[tauri::command]
+fn new_from_template(state: State<'_, AppState>, name: String) -> Result<Snapshot, String> {
+    let dir = state.templates_dir().ok_or("no app data dir")?;
+    let json = std::fs::read_to_string(dir.join(format!("{name}.dissonant"))).map_err(|e| format!("could not read template: {e}"))?;
+    let model = ProjectModel::from_json(&json).map_err(|e| format!("not a dissonant project: {e}"))?;
+    state.load_model(model, None, false);
+    Ok(state.snapshot())
 }
 
 // ─── Settings ────────────────────────────────────────────────────────────────────────────────
@@ -1249,6 +1426,12 @@ pub fn run() {
             set_settings,
             output_devices,
             test_tone,
+            export_midi,
+            import_midi,
+            list_templates,
+            save_template,
+            delete_template,
+            new_from_template,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

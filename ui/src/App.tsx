@@ -9,6 +9,8 @@ import { Inspector } from "./components/Inspector";
 import { Editor } from "./components/Editor";
 import { Dialog } from "./components/Dialog";
 import { SettingsWindow } from "./components/Settings";
+import { ExportDialog, ExportProgressBar } from "./components/ExportDialog";
+import { TemplatePicker } from "./components/TemplatePicker";
 import { useStore } from "./store";
 import { useLiveKeyboard } from "./liveKeyboard";
 
@@ -40,7 +42,11 @@ export default function App() {
         s.openSettings(!s.settingsOpen);
         return;
       }
-      if (s.settingsOpen) return;
+      if (s.settingsOpen || s.templatesOpen) return;
+      if (s.exportOpen) {
+        if (e.key === "Escape") s.openExport(false);
+        return;
+      }
       const k = e.key.toLowerCase();
       if (e.code === "Space") {
         e.preventDefault();
@@ -115,6 +121,9 @@ export default function App() {
       <StatusBar />
       {toast && <div className={`toast${toast.error ? " error" : ""}`}>{toast.text}</div>}
       <SettingsWindow />
+      <ExportDialog />
+      <TemplatePicker />
+      <ExportProgressBar />
       <Dialog />
     </div>
   );

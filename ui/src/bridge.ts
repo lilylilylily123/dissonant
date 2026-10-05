@@ -6,6 +6,9 @@ import type {
   AudioStatus,
   AudioStatusEvent,
   ChordEvent,
+  ExportProgress,
+  ExportRequest,
+  ExportResult,
   Command,
   MasterSettings,
   MidiStatus,
@@ -19,6 +22,7 @@ import type {
   Snapshot,
   Track,
   SongPattern,
+  TemplateInfo,
 } from "./types";
 import { uuid, withDefaults } from "./types";
 import { normalize, progression, STARTERS } from "./theory";
@@ -45,7 +49,14 @@ export interface Bridge {
   auditionOff(trackId: string, pitch: number): Promise<void>;
   audioStatus(): Promise<AudioStatus>;
   restartAudio(): Promise<AudioStatus>;
-  exportWav(path: string, tailSeconds?: number): Promise<string>;
+  exportWav(request: ExportRequest): Promise<ExportResult>;
+  onExportProgress(cb: (p: ExportProgress) => void): () => void;
+  exportMidi(path: string, scope: "song" | "pattern"): Promise<string>;
+  importMidi(path: string, patternId: string): Promise<Snapshot>;
+  listTemplates(): Promise<TemplateInfo[]>;
+  saveTemplate(name: string): Promise<TemplateInfo>;
+  deleteTemplate(name: string): Promise<void>;
+  newFromTemplate(name: string): Promise<Snapshot>;
   onPlayhead(cb: (e: PlayheadEvent) => void): () => void;
   /** The backend changed the document on its own (e.g. a recorded note landed). */
   onDocument(cb: (s: Snapshot) => void): () => void;
@@ -60,7 +71,8 @@ export interface Bridge {
   setLoop(start: number, end: number): Promise<void>;
   clearLoop(): Promise<void>;
   setLooping(on: boolean): Promise<void>;
-  pickOpenPath(): Promise<string | null>;
+  /** Native open dialog; `extensions` defaults to the project formats. */
+  pickOpenPath(extensions?: string[], label?: string): Promise<string | null>;
   pickSavePath(defaultName: string, extension: string): Promise<string | null>;
   /** OS window title (file name + dirty mark). */
   setTitle(title: string): Promise<void>;
@@ -130,7 +142,14 @@ async function tauriBridge(): Promise<Bridge> {
     auditionOff: (trackId, pitch) => invoke("audition_off", { trackId, pitch }),
     audioStatus: () => invoke<AudioStatus>("audio_status"),
     restartAudio: () => invoke<AudioStatus>("restart_audio"),
-    exportWav: (path, tailSeconds = 1.5) => invoke<string>("export_wav", { path, tailSeconds }),
+    exportWav: (request) => invoke<ExportResult>("export_wav", { request }),
+    onExportProgress: (cb) => subscribe<ExportProgress>("export-progress", cb),
+    exportMidi: (path, scope) => invoke<string>("export_midi", { path, scope }),
+    importMidi: (path, patternId) => invoke<Snapshot>("import_midi", { path, patternId }),
+    listTemplates: () => invoke<TemplateInfo[]>("list_templates"),
+    saveTemplate: (name) => invoke<TemplateInfo>("save_template", { name }),
+    deleteTemplate: (name) => invoke("delete_template", { name }),
+    newFromTemplate: (name) => invoke<Snapshot>("new_from_template", { name }),
     onPlayhead: (cb) => subscribe<PlayheadEvent>("playhead", cb),
     onDocument: (cb) => subscribe<Snapshot>("document", cb),
     onMidiActivity: (cb) => subscribe<number>("midi-activity", cb),
@@ -144,11 +163,11 @@ async function tauriBridge(): Promise<Bridge> {
     setLoop: (start, end) => invoke("set_loop", { start, end }),
     clearLoop: () => invoke("clear_loop"),
     setLooping: (on) => invoke("set_looping", { on }),
-    pickOpenPath: async () => {
+    pickOpenPath: async (extensions = ["dissonant", "json"], label = "dissonant project") => {
       const r = await dialog.open({
         multiple: false,
         directory: false,
-        filters: [{ name: "dissonant project", extensions: ["dissonant", "json"] }],
+        filters: [{ name: label, extensions }],
       });
       return typeof r === "string" ? r : null;
     },
@@ -605,6 +624,45 @@ function mockBridge(): Bridge {
     restartAudio: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
     exportWav: async () => {
       throw new Error("export needs the desktop app — the browser mock renders nothing");
+    },
+    onExportProgress: () => () => {},
+    exportMidi: async () => {
+      throw new Error("MIDI export needs the desktop app");
+    },
+    importMidi: async () => {
+      throw new Error("MIDI import needs the desktop app");
+    },
+    listTemplates: async () => {
+      try {
+        return Object.keys(JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}")).map((name) => ({ name, path: name }));
+      } catch {
+        return [];
+      }
+    },
+    saveTemplate: async (name) => {
+      const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
+      all[name] = clone(model);
+      localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
+      return { name, path: name };
+    },
+    deleteTemplate: async (name) => {
+      const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
+      delete all[name];
+      localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
+    },
+    newFromTemplate: async (name) => {
+      const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
+      if (all[name]) {
+        model = clone(all[name]);
+        undo.length = 0;
+        redo.length = 0;
+        undoLabels.length = 0;
+        redoLabels.length = 0;
+        dirty = false;
+        path = null;
+        beat = 0;
+      }
+      return snapshot();
     },
     onPlayhead: (cb) => {
       listeners.add(cb);

@@ -11,6 +11,7 @@
 pub mod arrangement;
 pub mod chord_track;
 pub mod document;
+pub mod midi_file;
 pub mod model;
 pub mod sequence;
 pub mod tempo;
@@ -19,6 +20,7 @@ pub mod theory;
 pub use arrangement::Arrangement;
 pub use chord_track::ChordTrack;
 pub use document::{Command, Document, EditError, TrackParam};
+pub use midi_file::{ImportedMidi, ImportedTrack, MidiError, MidiScope};
 pub use model::{
     ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, ScaleType, Section, SongPattern, TimeSignature, Track,
     SCHEMA_VERSION,
