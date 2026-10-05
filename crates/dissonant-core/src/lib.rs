@@ -26,7 +26,7 @@ pub use model::{
     SCHEMA_VERSION,
 };
 pub use sequence::{Sequence, SequenceTrack};
-pub use tempo::{swing_warp, Tempo};
+pub use tempo::{swing_warp, Tempo, TempoMap, TempoPoint};
 pub use theory::harmony::{self, ChordSuggestion, ProgressionStarter};
 pub use theory::highlight::HighlightEngine;
 pub use theory::key_detector::{KeyCandidate, KeyDetectionResult, KeyDetector};

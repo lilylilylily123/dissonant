@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { peakDb, selectedPattern, useStore } from "../store";
-import { TIME_SIGNATURES } from "../types";
+import { tempoMap, TIME_SIGNATURES } from "../types";
 import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
 
@@ -25,7 +25,9 @@ export function Transport() {
   const bar = Math.floor(beat / 4) + 1;
   const bib = Math.floor(beat % 4) + 1;
   const six = Math.floor((beat % 1) * 4) + 1;
-  const secs = (beat * 60) / model.tempo;
+  const map = s.mode === "song" ? tempoMap(model.tempo, model.tempoPoints) : null;
+  const secs = map && !map.isConstant ? map.secondsAt(beat) : (beat * 60) / model.tempo;
+  const liveBpm = map && !map.isConstant ? map.bpmAt(beat) : null;
   const mm = Math.floor(secs / 60);
   const ss = secs - mm * 60;
 
@@ -182,7 +184,7 @@ export function Transport() {
               {model.tempo.toFixed(3)}
             </span>
           )}
-          <span className="micro">bpm</span>
+          <span className="micro">{liveBpm !== null && Math.abs(liveBpm - model.tempo) > 0.05 ? `bpm · now ${liveBpm.toFixed(1)}` : "bpm"}</span>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <button className="chip tiny" onClick={() => s.tapTempo()} title="tap tempo (averages the last 8 taps)">tap</button>

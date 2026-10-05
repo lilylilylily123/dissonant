@@ -7,6 +7,7 @@
 
 use crate::midi_file::ImportedTrack;
 use crate::model::{ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track};
+use crate::tempo::TempoPoint;
 use crate::theory::harmony;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -61,6 +62,10 @@ pub enum Command {
     /// Add one track per imported MIDI track, with its notes in `pattern_id`, in one undo step.
     /// The pattern grows to `length_beats` when that is longer.
     ImportTracks { pattern_id: Uuid, tracks: Vec<ImportedTrack>, length_beats: f64 },
+    /// A tempo change on the song timeline (replaces any point already on that beat).
+    AddTempoPoint { beat: f64, bpm: f64, ramp: bool },
+    UpdateTempoPoint { point: TempoPoint },
+    RemoveTempoPoint { id: Uuid },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,6 +84,8 @@ pub enum EditError {
     NoSuchClip,
     #[error("no such section")]
     NoSuchSection,
+    #[error("no such tempo point")]
+    NoSuchTempoPoint,
 }
 
 /// One undo step: the model before the edit, and what the edit was ("move notes").
@@ -293,6 +300,9 @@ impl Command {
             SetTimeSignature { .. } => "set time signature",
             SetSwing { .. } => "set swing",
             ImportTracks { .. } => "import MIDI",
+            AddTempoPoint { .. } => "add tempo change",
+            UpdateTempoPoint { .. } => "edit tempo change",
+            RemoveTempoPoint { .. } => "remove tempo change",
         }
         .to_string()
     }
@@ -526,6 +536,33 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             let p = m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?;
             if length_beats > p.length_beats {
                 p.length_beats = length_beats;
+            }
+        }
+        AddTempoPoint { beat, bpm, ramp } => {
+            if !beat.is_finite() || beat < 0.0 || !bpm.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            let bpm = bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM);
+            m.tempo_points.retain(|p| (p.beat - beat).abs() > 1e-9);
+            m.tempo_points.push(TempoPoint::new(beat, bpm, ramp));
+            m.tempo_points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        }
+        UpdateTempoPoint { point } => {
+            if !point.beat.is_finite() || point.beat < 0.0 || !point.bpm.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            let slot = m.tempo_points.iter_mut().find(|p| p.id == point.id).ok_or(EditError::NoSuchTempoPoint)?;
+            *slot = TempoPoint { bpm: point.bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM), ..point };
+            // Keep one point per beat: the edited one wins.
+            let (id, beat) = (slot.id, slot.beat);
+            m.tempo_points.retain(|p| p.id == id || (p.beat - beat).abs() > 1e-9);
+            m.tempo_points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        }
+        RemoveTempoPoint { id } => {
+            let before = m.tempo_points.len();
+            m.tempo_points.retain(|p| p.id != id);
+            if m.tempo_points.len() == before {
+                return Err(EditError::NoSuchTempoPoint);
             }
         }
         SetSwing { swing, grid } => {
@@ -826,6 +863,27 @@ mod tests {
         d.undo();
         assert_eq!(d.model().tracks.len(), before);
         assert_eq!(d.model().patterns[0].length_beats, 16.0);
+    }
+
+    #[test]
+    fn tempo_points_are_edited_one_per_beat() {
+        let mut d = doc();
+        d.apply(Command::AddTempoPoint { beat: 16.0, bpm: 90.0, ramp: false }, false).unwrap();
+        d.apply(Command::AddTempoPoint { beat: 16.0, bpm: 95.0, ramp: true }, false).unwrap();
+        assert_eq!(d.model().tempo_points.len(), 1);
+        assert_eq!(d.model().tempo_points[0].bpm, 95.0);
+        assert!(d.model().tempo_points[0].ramp);
+        assert_eq!(d.model().tempo_map().bpm_at(20.0), 95.0);
+        let mut p = d.model().tempo_points[0].clone();
+        p.beat = 8.0;
+        p.bpm = 999.0;
+        d.apply(Command::UpdateTempoPoint { point: p.clone() }, false).unwrap();
+        assert_eq!(d.model().tempo_points[0].bpm, 300.0);
+        assert_eq!(d.model().tempo_points[0].beat, 8.0);
+        d.apply(Command::RemoveTempoPoint { id: p.id }, false).unwrap();
+        assert!(d.model().tempo_points.is_empty());
+        assert_eq!(d.apply(Command::RemoveTempoPoint { id: p.id }, false), Err(EditError::NoSuchTempoPoint));
+        assert_eq!(d.apply(Command::AddTempoPoint { beat: -1.0, bpm: 100.0, ramp: false }, false), Err(EditError::InvalidValue));
     }
 
     #[test]

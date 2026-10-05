@@ -120,6 +120,55 @@ export interface ProjectModel {
   swing?: number;
   /** 0.5 (eighths) or 0.25 (sixteenths). */
   swingGrid?: number;
+  /** Tempo changes along the song (absent / empty = constant). */
+  tempoPoints?: TempoPoint[];
+}
+
+export interface TempoPoint {
+  id: string;
+  beat: number;
+  bpm: number;
+  /** Glide linearly from the previous point's tempo to this one. */
+  ramp: boolean;
+}
+
+/** Mirror of `dissonant_core::tempo::TempoMap`: tempo and elapsed seconds along the song. */
+export function tempoMap(baseBpm: number, points: TempoPoint[] | undefined) {
+  const anchors: { beat: number; bpm: number; ramp: boolean }[] = [{ beat: 0, bpm: baseBpm, ramp: false }];
+  for (const p of [...(points ?? [])].sort((a, b) => a.beat - b.beat)) {
+    if (p.beat <= 0) anchors[0] = { beat: 0, bpm: p.bpm, ramp: false };
+    else if (anchors[anchors.length - 1].beat !== p.beat) anchors.push({ beat: p.beat, bpm: p.bpm, ramp: p.ramp });
+  }
+  const segSeconds = (b0: number, bpm0: number, b1: number, bpm1: number) => {
+    const len = b1 - b0;
+    if (len <= 0) return 0;
+    return Math.abs(bpm1 - bpm0) < 1e-9 ? (60 * len) / bpm0 : ((60 * len) / (bpm1 - bpm0)) * Math.log(bpm1 / bpm0);
+  };
+  const starts: number[] = [0];
+  for (let i = 1; i < anchors.length; i++) {
+    const a = anchors[i - 1];
+    const n = anchors[i];
+    starts.push(starts[i - 1] + segSeconds(a.beat, a.bpm, n.beat, n.ramp ? n.bpm : a.bpm));
+  }
+  const segAt = (beat: number) => {
+    let i = 0;
+    while (i + 1 < anchors.length && anchors[i + 1].beat <= beat) i++;
+    return i;
+  };
+  const bpmAt = (beat: number) => {
+    const i = segAt(beat);
+    const a = anchors[i];
+    const n = anchors[i + 1];
+    if (!n || !n.ramp) return a.bpm;
+    const t = Math.min(1, Math.max(0, (beat - a.beat) / (n.beat - a.beat)));
+    return a.bpm + (n.bpm - a.bpm) * t;
+  };
+  const secondsAt = (beat: number) => {
+    const i = segAt(Math.max(0, beat));
+    const a = anchors[i];
+    return starts[i] + segSeconds(a.beat, a.bpm, Math.max(0, beat), bpmAt(beat));
+  };
+  return { bpmAt, secondsAt, isConstant: anchors.length === 1 };
 }
 
 /**
@@ -203,7 +252,10 @@ export type Command =
   | { type: "removeSection"; id: string }
   | { type: "setMaster"; master: MasterSettings }
   | { type: "setTimeSignature"; numerator: number; denominator: number }
-  | { type: "setSwing"; swing: number; grid: number };
+  | { type: "setSwing"; swing: number; grid: number }
+  | { type: "addTempoPoint"; beat: number; bpm: number; ramp: boolean }
+  | { type: "updateTempoPoint"; point: TempoPoint }
+  | { type: "removeTempoPoint"; id: string };
 
 export interface PlayheadEvent {
   beat: number;

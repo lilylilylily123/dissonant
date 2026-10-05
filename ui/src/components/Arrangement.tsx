@@ -3,6 +3,7 @@ import { beatsPerBar, dbText, useStore } from "../store";
 import { DRUM_KIT, TRACK_PALETTE, trackColor, type Clip, type NoteEvent, type ScaleType, type Section, type SongPattern, type Track } from "../types";
 import { NOTE_NAMES, noteName } from "../theory";
 import { VMeter } from "./Meter";
+import { TempoLane } from "./TempoLane";
 
 const HEAD_W = 220;
 const SECTION_COLORS = ["#9a9aa4", "#ff9d2a", "#ff3b30", "#3dc8ff", "#b48cff", "#3dffb0"];
@@ -188,6 +189,8 @@ export function Arrangement() {
             <div className="phtri" style={{ left: playhead * pxPerBeat }} />
           </div>
         </div>
+
+        <TempoLane headW={HEAD_W} timelineW={timelineW} pxPerBeat={pxPerBeat} bpb={bpb} />
 
         {model.tracks.map((track, ti) => (
           <TrackRow

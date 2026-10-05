@@ -1,4 +1,8 @@
-//! Beats ⇄ seconds ⇄ samples.
+//! Beats ⇄ seconds ⇄ samples, for a constant tempo ([`Tempo`]) and for a song with tempo
+//! changes ([`TempoMap`]).
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tempo {
@@ -33,6 +37,159 @@ impl Tempo {
 
     pub fn beats_for_samples(&self, samples: f64, sample_rate: f64) -> f64 {
         samples / self.samples_per_beat(sample_rate)
+    }
+}
+
+/// A tempo change on the song timeline. With `ramp`, the tempo glides linearly from the
+/// previous point's value to this one over the beats in between; otherwise it jumps here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoPoint {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    pub beat: f64,
+    pub bpm: f64,
+    #[serde(default)]
+    pub ramp: bool,
+}
+
+impl TempoPoint {
+    pub fn new(beat: f64, bpm: f64, ramp: bool) -> Self {
+        TempoPoint { id: Uuid::new_v4(), beat, bpm, ramp }
+    }
+}
+
+/// One segment of the map: from `beat` the tempo is `bpm`, and if `ramp_to` is set it glides
+/// linearly to that bpm at the next segment's start.
+#[derive(Debug, Clone, PartialEq)]
+struct Segment {
+    beat: f64,
+    seconds: f64,
+    bpm: f64,
+    /// `(end_beat, end_bpm)` for a ramp segment.
+    ramp_to: Option<(f64, f64)>,
+}
+
+/// Beats ⇄ seconds over a song with tempo changes. The base tempo holds from beat 0 until
+/// the first point. Linear-in-bpm ramps integrate exactly (`60·Δb/Δbpm · ln(bpm1/bpm0)`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempoMap {
+    segments: Vec<Segment>,
+}
+
+impl Default for TempoMap {
+    fn default() -> Self {
+        TempoMap::constant(120.0)
+    }
+}
+
+impl TempoMap {
+    pub fn constant(bpm: f64) -> Self {
+        TempoMap::new(bpm, &[])
+    }
+
+    pub fn new(base_bpm: f64, points: &[TempoPoint]) -> Self {
+        let clamp = |b: f64| if b.is_finite() { b.clamp(Tempo::MIN_BPM, Tempo::MAX_BPM) } else { 120.0 };
+        let mut pts: Vec<&TempoPoint> = points.iter().filter(|p| p.beat.is_finite() && p.beat >= 0.0).collect();
+        pts.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        pts.dedup_by(|a, b| a.beat == b.beat);
+        // Anchors: (beat, bpm, ramp_into_this_point)
+        let mut anchors: Vec<(f64, f64, bool)> = vec![(0.0, clamp(base_bpm), false)];
+        for p in pts {
+            if p.beat == 0.0 {
+                anchors[0] = (0.0, clamp(p.bpm), false);
+            } else {
+                anchors.push((p.beat, clamp(p.bpm), p.ramp));
+            }
+        }
+        let mut segments = Vec::with_capacity(anchors.len());
+        let mut seconds = 0.0;
+        for (i, &(beat, bpm, _)) in anchors.iter().enumerate() {
+            let ramp_to = anchors.get(i + 1).filter(|n| n.2).map(|n| (n.0, n.1));
+            segments.push(Segment { beat, seconds, bpm, ramp_to });
+            if let Some(&(nb, nbpm, ramp)) = anchors.get(i + 1) {
+                seconds += segment_seconds(beat, bpm, nb, if ramp { nbpm } else { bpm });
+            }
+        }
+        TempoMap { segments }
+    }
+
+    /// True when the map is a single constant tempo.
+    pub fn is_constant(&self) -> bool {
+        self.segments.len() == 1
+    }
+
+    pub fn base_bpm(&self) -> f64 {
+        self.segments[0].bpm
+    }
+
+    fn segment_at_beat(&self, beat: f64) -> &Segment {
+        let i = self.segments.partition_point(|s| s.beat <= beat).saturating_sub(1);
+        &self.segments[i]
+    }
+
+    fn segment_at_seconds(&self, seconds: f64) -> &Segment {
+        let i = self.segments.partition_point(|s| s.seconds <= seconds).saturating_sub(1);
+        &self.segments[i]
+    }
+
+    /// Tempo in force at `beat`.
+    pub fn bpm_at(&self, beat: f64) -> f64 {
+        let s = self.segment_at_beat(beat);
+        match s.ramp_to {
+            Some((eb, ebpm)) if eb > s.beat => {
+                let t = ((beat - s.beat) / (eb - s.beat)).clamp(0.0, 1.0);
+                s.bpm + (ebpm - s.bpm) * t
+            }
+            _ => s.bpm,
+        }
+    }
+
+    /// Seconds from beat 0 to `beat`.
+    pub fn seconds_at(&self, beat: f64) -> f64 {
+        let s = self.segment_at_beat(beat.max(0.0));
+        let end_bpm = match s.ramp_to {
+            Some((eb, ebpm)) if eb > s.beat => {
+                let t = ((beat - s.beat) / (eb - s.beat)).clamp(0.0, 1.0);
+                s.bpm + (ebpm - s.bpm) * t
+            }
+            _ => s.bpm,
+        };
+        s.seconds + segment_seconds(s.beat, s.bpm, beat.max(0.0), end_bpm)
+    }
+
+    /// The beat reached after `seconds` from beat 0.
+    pub fn beat_at(&self, seconds: f64) -> f64 {
+        let s = self.segment_at_seconds(seconds.max(0.0));
+        let dt = seconds.max(0.0) - s.seconds;
+        match s.ramp_to {
+            Some((eb, ebpm)) if eb > s.beat && (ebpm - s.bpm).abs() > 1e-9 => {
+                // bpm(b) grows linearly in b; seconds(b) = 60·len/Δbpm · ln(bpm(b)/bpm0).
+                let len = eb - s.beat;
+                let k = (ebpm - s.bpm) / len; // bpm per beat
+                let bpm = s.bpm * (dt * k / 60.0).exp();
+                let b = s.beat + (bpm - s.bpm) / k;
+                b.min(eb).max(s.beat) + if b > eb { (dt - segment_seconds(s.beat, s.bpm, eb, ebpm)) * ebpm / 60.0 } else { 0.0 }
+            }
+            _ => s.beat + dt * s.bpm / 60.0,
+        }
+    }
+
+    pub fn seconds_for_span(&self, from_beat: f64, to_beat: f64) -> f64 {
+        self.seconds_at(to_beat) - self.seconds_at(from_beat)
+    }
+}
+
+/// Seconds to go from `b0` (at `bpm0`) to `b1`, with the tempo moving linearly to `bpm1`.
+fn segment_seconds(b0: f64, bpm0: f64, b1: f64, bpm1: f64) -> f64 {
+    let len = b1 - b0;
+    if len <= 0.0 {
+        return 0.0;
+    }
+    if (bpm1 - bpm0).abs() < 1e-9 {
+        60.0 * len / bpm0
+    } else {
+        60.0 * len / (bpm1 - bpm0) * (bpm1 / bpm0).ln()
     }
 }
 
@@ -95,6 +252,36 @@ mod tests {
         }
         // Out-of-range swing is ignored.
         assert_eq!(swing_warp(0.5, 90.0, 0.5), 0.5);
+    }
+
+    #[test]
+    fn tempo_map_steps_and_ramps() {
+        let constant = TempoMap::constant(120.0);
+        assert!(constant.is_constant());
+        assert!((constant.seconds_at(4.0) - 2.0).abs() < 1e-12);
+        assert!((constant.beat_at(2.0) - 4.0).abs() < 1e-12);
+
+        // 120 for 4 beats, then a jump to 60.
+        let step = TempoMap::new(120.0, &[TempoPoint::new(4.0, 60.0, false)]);
+        assert_eq!(step.bpm_at(3.999), 120.0);
+        assert_eq!(step.bpm_at(4.0), 60.0);
+        assert!((step.seconds_at(8.0) - (2.0 + 4.0)).abs() < 1e-12);
+        assert!((step.beat_at(5.0) - 7.0).abs() < 1e-12);
+
+        // 120 → 60 ramped over 4 beats: exact integral 60·4/(−60)·ln(0.5) = 4·ln 2 s.
+        let ramp = TempoMap::new(120.0, &[TempoPoint::new(4.0, 60.0, true)]);
+        assert!((ramp.bpm_at(2.0) - 90.0).abs() < 1e-12);
+        let expected = 4.0 * std::f64::consts::LN_2;
+        assert!((ramp.seconds_at(4.0) - expected).abs() < 1e-9);
+        // Inverse round-trips inside and past the ramp.
+        for b in [0.0, 1.0, 2.5, 4.0, 6.0, 9.5] {
+            let t = ramp.seconds_at(b);
+            assert!((ramp.beat_at(t) - b).abs() < 1e-7, "beat {b} → {t} s → {}", ramp.beat_at(t));
+        }
+        // Unsorted and duplicate points are tolerated; a point at 0 replaces the base.
+        let messy = TempoMap::new(100.0, &[TempoPoint::new(8.0, 140.0, false), TempoPoint::new(0.0, 90.0, false), TempoPoint::new(8.0, 150.0, false)]);
+        assert_eq!(messy.base_bpm(), 90.0);
+        assert_eq!(messy.bpm_at(9.0), 140.0);
     }
 
     #[test]

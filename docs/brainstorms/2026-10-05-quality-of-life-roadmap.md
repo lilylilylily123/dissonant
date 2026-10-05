@@ -1,7 +1,8 @@
 ---
 name: quality-of-life-roadmap
-status: draft
+status: in-progress
 created: 2026-10-05
+updated: 2026-10-05
 origin: docs/brainstorms/2026-10-02-full-daw-brainstorm.md
 ---
 
@@ -14,6 +15,30 @@ as of branch `feat/phase-0-1` (schema v4).
 
 Sizing: **S** = an hour or two, one file or two · **M** = half a day, touches Rust + UI ·
 **L** = a day or more, new subsystem. Priority: **now** (next sprint), **next**, **later**.
+
+## Status (2026-10-05, branch `feat/phase-0-1`)
+
+Shipped, in the order of §7: **§0** in full (0.1–0.7) · **§1** settings file + window with
+audio (device / rate / buffer / latency / test tone / load / xruns), MIDI (default input,
+auto-reconnect, velocity curve, channel, octave), editing defaults, export defaults,
+appearance (UI scale, row height, reduced motion, accent + tier colors with a color-blind
+preset), metronome · **§2** sample rate + buffer selection, metronome + count-in + pre-roll,
+export options + stems, engine stats · **§3** BPM field QOL, swing, half / double, tap polish,
+**tempo lane** · **§4** 4.1 double-click a key / select by tier / Tab stepping / ⌘-drag
+marquee · 4.2 ⌥ no-snap (with the paint mapping as a setting), ⇧ constrain, auto-scroll,
+follow, ⌥-wheel transpose, ⌘-wheel zoom at cursor, ⇧-wheel scroll, fit · 4.3 velocity ramp,
+note mute · 4.4 split, glue, duplicate-loop, transpose menu, set length, fine nudge, reverse /
+invert, tempo-scale · 4.5 ghost notes, fold · **§5** templates, MIDI export / import ·
+**§6** export progress.
+
+Still open: 1.4 keyboard presets + cheat-sheet overlay · 1.6 per-project UI state · render-
+in-place, latency compensation, master limiter · time signature per section, tempo detection ·
+4.1 ⇧End / invert selection / same-length · 4.3 note probability / condition, release velocity ·
+4.4 humanize dials, legato switch · 4.5 section-relative bar numbers, chord names over the
+grid, minimap, density readout, cursor shapes · 4.6 chord lane QOL · 4.7 drum grid QOL ·
+§5 pattern colors, make unique / consolidate, clip split / mute UI, ripple edits, marker jump,
+project notes · §6 toast queue, log file, first-run screen, context hints, viewport culling,
+accessibility, Ctrl labels on Windows / Linux.
 
 ---
 

@@ -5,6 +5,7 @@
 use crate::arrangement::Arrangement;
 use crate::chord_track::ChordTrack;
 use crate::model::{NoteEvent, ProjectModel, Track};
+use crate::tempo::TempoMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +59,8 @@ pub struct Sequence {
     pub swing_grid: f64,
     /// Quarter-note beats per bar, for the metronome accent.
     pub beats_per_bar: f64,
+    /// Beats ⇄ seconds. Constant at `tempo_bpm` in pattern mode; the song's map in song mode.
+    pub tempo_map: TempoMap,
 }
 
 impl Sequence {
@@ -76,6 +79,7 @@ impl Sequence {
             swing: model.swing,
             swing_grid: model.swing_grid,
             beats_per_bar: model.time_signature.beats_per_bar(),
+            tempo_map: TempoMap::constant(model.tempo),
         })
     }
 
@@ -100,6 +104,7 @@ impl Sequence {
             swing: model.swing,
             swing_grid: model.swing_grid,
             beats_per_bar: model.time_signature.beats_per_bar(),
+            tempo_map: model.tempo_map(),
         }
     }
 

@@ -440,6 +440,10 @@ pub struct ProjectModel {
     /// The subdivision swing acts on, in beats (0.5 = eighths, 0.25 = sixteenths).
     #[serde(default = "default_swing_grid")]
     pub swing_grid: f64,
+    /// Tempo changes along the song (empty = `tempo` throughout). Pattern mode plays at the
+    /// base tempo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tempo_points: Vec<crate::tempo::TempoPoint>,
 }
 
 fn default_swing() -> f64 {
@@ -471,7 +475,13 @@ impl ProjectModel {
             time_signature: TimeSignature::default(),
             swing: default_swing(),
             swing_grid: default_swing_grid(),
+            tempo_points: vec![],
         }
+    }
+
+    /// The song's tempo map (base tempo plus points).
+    pub fn tempo_map(&self) -> crate::tempo::TempoMap {
+        crate::tempo::TempoMap::new(self.tempo, &self.tempo_points)
     }
 
     /// A new project pre-seeded with a I–IV–V–vi progression in C in its first pattern,
@@ -564,6 +574,11 @@ impl ProjectModel {
         if !(self.swing_grid == 0.5 || self.swing_grid == 0.25) {
             self.swing_grid = default_swing_grid();
         }
+        self.tempo_points.retain(|p| p.beat.is_finite() && p.beat >= 0.0 && p.bpm.is_finite());
+        for p in &mut self.tempo_points {
+            p.bpm = p.bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM);
+        }
+        self.tempo_points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
         self.clips.retain(|c| pattern_ids.contains(&c.pattern_id) && c.length_beats > 0.0 && c.start_beat >= 0.0);
         self.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
         self.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));

@@ -2,7 +2,7 @@
 //! Deterministic, no device needed — this is what export, stems and tests use.
 
 use crate::engine::{Engine, EngineCommand, Shared};
-use dissonant_core::{MasterSettings, Sequence, Tempo};
+use dissonant_core::{MasterSettings, Sequence};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -58,14 +58,13 @@ pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Res
     // Looping stays on while there are repetitions left; the engine wraps at the sequence end.
     engine.handle(EngineCommand::SetLooping(loops > 1));
     engine.handle(EngineCommand::SetHearChords(options.hear_chords));
-    let tempo = Tempo::new(sequence.tempo_bpm);
-    let length_beats = sequence.length_beats;
-    let seconds = tempo.seconds_for_beats(length_beats) * loops as f64 + options.tail_seconds;
+    let loop_secs = sequence.tempo_map.seconds_at(sequence.length_beats);
+    let seconds = loop_secs * loops as f64 + options.tail_seconds;
     engine.handle(EngineCommand::SetSequence(sequence));
     engine.handle(EngineCommand::Play);
 
     let total_frames = (seconds * sr as f64).ceil() as usize;
-    let last_pass_at = (tempo.seconds_for_beats(length_beats) * (loops as f64 - 1.0) * sr as f64) as usize;
+    let last_pass_at = (loop_secs * (loops as f64 - 1.0) * sr as f64) as usize;
     let block = 1024;
     let mut out = Vec::with_capacity(total_frames * 2);
     let mut buf = vec![0.0f32; block * 2];

@@ -1,4 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { tempoMap } from "./types";
+
+describe("tempo map", () => {
+  it("steps, ramps and integrates seconds like the Rust map", () => {
+    const flat = tempoMap(120, []);
+    expect(flat.isConstant).toBe(true);
+    expect(flat.secondsAt(4)).toBeCloseTo(2, 9);
+    const step = tempoMap(120, [{ id: "a", beat: 4, bpm: 60, ramp: false }]);
+    expect(step.bpmAt(3.9)).toBe(120);
+    expect(step.bpmAt(4)).toBe(60);
+    expect(step.secondsAt(8)).toBeCloseTo(6, 9);
+    const ramp = tempoMap(120, [{ id: "a", beat: 4, bpm: 60, ramp: true }]);
+    expect(ramp.bpmAt(2)).toBeCloseTo(90, 9);
+    expect(ramp.secondsAt(4)).toBeCloseTo(4 * Math.LN2, 9);
+    expect(ramp.secondsAt(6)).toBeCloseTo(4 * Math.LN2 + 2, 9);
+  });
+});
 import { chordAt, chordName, detectKey, diatonicChords, midiName, progression, tier, tierMap } from "./theory";
 import { NO_KEY } from "./types";
 

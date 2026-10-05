@@ -410,6 +410,19 @@ function reduce(m: ProjectModel, c: Command): void {
       m.swing = Math.min(75, Math.max(50, c.swing));
       m.swingGrid = c.grid === 0.25 ? 0.25 : 0.5;
       break;
+    case "addTempoPoint":
+      if (c.beat < 0) break;
+      m.tempoPoints = [...(m.tempoPoints ?? []).filter((p) => Math.abs(p.beat - c.beat) > 1e-9), { id: uuid(), beat: c.beat, bpm: Math.min(300, Math.max(20, c.bpm)), ramp: c.ramp }].sort((a, b) => a.beat - b.beat);
+      break;
+    case "updateTempoPoint": {
+      const i = (m.tempoPoints ?? []).findIndex((p) => p.id === c.point.id);
+      if (i < 0 || c.point.beat < 0) break;
+      m.tempoPoints = (m.tempoPoints ?? []).filter((p) => p.id === c.point.id || Math.abs(p.beat - c.point.beat) > 1e-9).map((p) => (p.id === c.point.id ? { ...c.point, bpm: Math.min(300, Math.max(20, c.point.bpm)) } : p)).sort((a, b) => a.beat - b.beat);
+      break;
+    }
+    case "removeTempoPoint":
+      m.tempoPoints = (m.tempoPoints ?? []).filter((p) => p.id !== c.id);
+      break;
   }
 }
 

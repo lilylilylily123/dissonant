@@ -584,12 +584,22 @@ impl Engine {
     }
 
     fn advance(&self, position: f64, frames: usize) -> f64 {
-        let beats = self.tempo.beats_for_samples(frames as f64, self.sample_rate as f64);
-        let mut p = position + beats;
+        let map = &self.sequence.tempo_map;
+        let secs = frames as f64 / self.sample_rate as f64;
+        let mut p = if map.is_constant() {
+            position + self.tempo.beats_for_samples(frames as f64, self.sample_rate as f64)
+        } else {
+            map.beat_at(map.seconds_at(position) + secs)
+        };
         let (start, end) = self.loop_bounds();
         let len = end - start;
         if self.looping && len > 0.0 && p >= end {
-            p = start + (p - end) % len;
+            // Carry the time past the loop end into the loop start at the tempo there.
+            let excess = map.seconds_at(p) - map.seconds_at(end);
+            p = map.beat_at(map.seconds_at(start) + excess);
+            if p >= end {
+                p = start + (p - end) % len;
+            }
         }
         p
     }
@@ -600,29 +610,36 @@ impl Engine {
         if !self.playing {
             return;
         }
-        let spb = self.tempo.samples_per_beat(self.sample_rate as f64);
+        let sr = self.sample_rate as f64;
+        let seq = Arc::clone(&self.sequence);
+        let map = &seq.tempo_map;
         let base = self.late_start.min(frames);
-        let block_beats = (frames - base) as f64 / spb;
+        let avail = (frames - base) as f64 / sr;
         let (loop_start, loop_end) = self.loop_bounds();
         let start = self.position;
-        let end = start + block_beats;
+        let t0 = map.seconds_at(start);
+        let end = map.beat_at(t0 + avail);
 
         if self.looping && loop_end > loop_start && end >= loop_end && start < loop_end {
             // Two segments: [start, loop_end) then [loop_start, …), with a release at the seam.
-            let seam = base + ((loop_end - start) * spb).round() as usize;
-            self.collect_segment(start, loop_end, base, spb);
+            let seam_secs = map.seconds_at(loop_end) - t0;
+            let seam = base + (seam_secs * sr).round() as usize;
+            self.collect_segment(start, loop_end, base);
             self.events.push(Event { offset: seam.min(frames), kind: EventKind::ReleaseAll });
-            self.collect_segment(loop_start, loop_start + (end - loop_end), seam, spb);
+            let to = map.beat_at(map.seconds_at(loop_start) + (avail - seam_secs).max(0.0));
+            self.collect_segment(loop_start, to, seam);
         } else {
-            self.collect_segment(start, end, base, spb);
+            self.collect_segment(start, end, base);
         }
         self.events.sort_by_key(|e| e.offset);
     }
 
-    fn collect_segment(&mut self, from: f64, to: f64, base_offset: usize, spb: f64) {
+    fn collect_segment(&mut self, from: f64, to: f64, base_offset: usize) {
         let any_solo = self.sequence.any_solo();
         let seq = Arc::clone(&self.sequence);
-        let offset_of = |beat: f64| base_offset + ((beat - from) * spb).round().max(0.0) as usize;
+        let sr = self.sample_rate as f64;
+        let t_from = seq.tempo_map.seconds_at(from);
+        let offset_of = |beat: f64| base_offset + ((seq.tempo_map.seconds_at(beat) - t_from) * sr).round().max(0.0) as usize;
         let swing = |beat: f64| swing_warp(beat, seq.swing, seq.swing_grid);
 
         if self.metronome {
@@ -844,6 +861,30 @@ mod tests {
         let left = render(&mut e, 44_100 * 2, 512);
         assert!(left[..4000].iter().any(|s| s.abs() > 0.01));
         assert!(left[70_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn tempo_map_moves_notes_and_the_playhead() {
+        use dissonant_core::{Clip, TempoPoint};
+        let mut model = ProjectModel::empty();
+        model.tracks[0].voice = "sine".into();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        model.patterns[0].length_beats = 16.0;
+        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(8.0, 1.0, 69)]);
+        model.clips = vec![Clip::new(pid, 0.0, 16.0)];
+        // 120 for 4 beats (2 s), then 60: beat 8 is reached at 2 + 4 = 6 s.
+        model.tempo_points = vec![TempoPoint::new(4.0, 60.0, false)];
+        let seq = Arc::new(Sequence::from_song(&model));
+        let shared = Arc::new(Shared::default());
+        let mut e = Engine::new(SR, shared.clone(), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(seq));
+        e.handle(EngineCommand::Play);
+        let left = render(&mut e, 44_100 * 6 + 2_000, 1000);
+        let onset = first_onset(&left).unwrap() as i64;
+        assert!((onset - 44_100 * 6).abs() <= 2, "onset {onset}");
+        // The playhead: 6 s + 2000 samples at 60 bpm ≈ beat 8.045.
+        let expected = 8.0 + (2_000.0 / 44_100.0) * (60.0 / 60.0);
+        assert!((e.position() - expected).abs() < 1e-6, "{}", e.position());
     }
 
     #[test]

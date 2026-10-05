@@ -1919,3 +1919,38 @@ select {
 .modal.exportdlg .spane .seg > div {
   padding: 3px 8px;
 }
+
+/* ─── Tempo lane (SONG mode) ────────────────────────────────────────────────────────────── */
+.tempolane {
+  display: flex;
+  height: 40px;
+  flex: none;
+  background: var(--bg-lane);
+  border-bottom: 1px solid var(--line-1);
+}
+.tempolane .head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-right: 1px solid var(--line-1);
+  background: var(--bg-1);
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+.tempolane .head .mono {
+  font-size: 11px;
+}
+.tempolane .head .k {
+  font-size: 9.5px;
+  color: var(--text-5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tempolane .lane {
+  display: block;
+  flex: none;
+}
