@@ -8,6 +8,7 @@ import { BottomPanel } from "./components/BottomPanel";
 import { Inspector } from "./components/Inspector";
 import { Editor } from "./components/Editor";
 import { useStore } from "./store";
+import { useLiveKeyboard } from "./liveKeyboard";
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -23,6 +24,7 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+  useLiveKeyboard();
 
   // Global shortcuts. The piano roll handles its own editing keys when focused.
   useEffect(() => {
@@ -58,6 +60,10 @@ export default function App() {
       } else if (!mod && e.key === "Tab") {
         e.preventDefault();
         s.setMode(s.mode === "pattern" ? "song" : "pattern");
+      } else if (!mod && s.liveKeyboard === "off" && k === "l") {
+        s.toggleLooping();
+      } else if (!mod && s.liveKeyboard === "off" && k === "r") {
+        s.toggleRecord();
       }
     };
     window.addEventListener("keydown", onKey);

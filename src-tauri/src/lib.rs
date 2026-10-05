@@ -2,13 +2,15 @@
 //! and streams the playhead back as events. All model edits go through `apply`, which keeps
 //! undo/redo in one place and re-feeds the engine a fresh [`Sequence`] after every change.
 
-use dissonant_core::{Command, Document, MasterSettings, ProjectModel, Sequence};
+use dissonant_core::{Command, Document, MasterSettings, NoteEvent, ProjectModel, Sequence};
 use dissonant_engine::{render_wav, AudioDevice, EngineCommand, RenderOptions};
+use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -25,6 +27,17 @@ struct PlaybackContext {
     mode: PlayMode,
     pattern_id: Option<Uuid>,
     hear_chords: bool,
+    /// The track live input (MIDI / typing keyboard) plays and records into.
+    live_track: Option<Uuid>,
+}
+
+/// Record-arm state. Held notes are keyed by (track, pitch) with their start beat + velocity.
+#[derive(Default)]
+struct Recorder {
+    armed: bool,
+    /// Grid to snap recorded note starts to (0 = off).
+    quantize: f64,
+    held: HashMap<(Uuid, u8), (f64, u8)>,
 }
 
 pub struct AppState {
@@ -33,6 +46,10 @@ pub struct AppState {
     audio_error: Mutex<Option<String>>,
     playback: Mutex<PlaybackContext>,
     exporting: AtomicBool,
+    midi: Mutex<Option<MidiInputConnection<()>>>,
+    midi_port: Mutex<Option<String>>,
+    midi_last_ms: AtomicU64,
+    recorder: Mutex<Recorder>,
 }
 
 /// What every editing command returns to the UI.
@@ -71,7 +88,23 @@ impl AppState {
             audio_error: Mutex::new(None),
             playback: Mutex::new(PlaybackContext::default()),
             exporting: AtomicBool::new(false),
+            midi: Mutex::new(None),
+            midi_port: Mutex::new(None),
+            midi_last_ms: AtomicU64::new(0),
+            recorder: Mutex::new(Recorder::default()),
         }
+    }
+
+    fn live_track(&self) -> Option<Uuid> {
+        let ctx = self.playback.lock().unwrap();
+        ctx.live_track
+            .filter(|id| self.doc.lock().unwrap().model().track(id).is_some())
+            .or_else(|| self.doc.lock().unwrap().model().tracks.first().map(|t| t.id))
+    }
+
+    fn engine_position(&self) -> Option<(f64, bool)> {
+        let audio = self.audio.lock().unwrap();
+        audio.as_ref().map(|a| (a.shared().position_beats(), a.shared().is_playing()))
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -122,7 +155,7 @@ impl AppState {
 
 fn build_sequence(model: &ProjectModel, mode: PlayMode, pattern_id: Option<Uuid>) -> Sequence {
     match mode {
-        PlayMode::Song if !model.arrangement.is_empty() => Sequence::from_song(model),
+        PlayMode::Song if !model.clips.is_empty() => Sequence::from_song(model),
         _ => {
             let pid = pattern_id
                 .filter(|id| model.pattern(id).is_some())
@@ -283,6 +316,186 @@ fn restart_audio(state: State<'_, AppState>) -> AudioStatus {
     audio_status(state)
 }
 
+// ─── Live input: MIDI + typing keyboard, with record-arm ──────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MidiStatus {
+    pub inputs: Vec<String>,
+    pub open: Option<String>,
+    pub armed: bool,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn midi_inputs() -> Vec<String> {
+    match MidiInput::new("dissonant-scan") {
+        Ok(input) => input.ports().iter().filter_map(|p| input.port_name(p).ok()).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// A note started (controller or typing keyboard): sound it on the live track and, when
+/// armed and playing, remember when it started.
+fn live_note_on(app: &AppHandle, pitch: u8, velocity: u8) {
+    let state = app.state::<AppState>();
+    let Some(track_id) = state.live_track() else { return };
+    state.send(EngineCommand::NoteOn { track_id, pitch, velocity });
+    state.midi_last_ms.store(now_ms(), Ordering::Relaxed);
+    let mut rec = state.recorder.lock().unwrap();
+    if rec.armed {
+        if let Some((beat, true)) = state.engine_position() {
+            rec.held.insert((track_id, pitch), (beat, velocity));
+        }
+    }
+    let _ = app.emit("midi-activity", pitch);
+}
+
+/// A note ended: release it and, if it was being recorded, write it into the pattern.
+fn live_note_off(app: &AppHandle, pitch: u8) {
+    let state = app.state::<AppState>();
+    let Some(track_id) = state.live_track() else { return };
+    state.send(EngineCommand::NoteOff { track_id, pitch });
+    let held = state.recorder.lock().unwrap().held.remove(&(track_id, pitch));
+    let Some((start, velocity)) = held else { return };
+    let Some((end, _)) = state.engine_position() else { return };
+    let quantize = state.recorder.lock().unwrap().quantize;
+
+    let (pattern_id, length_beats, existing) = {
+        let ctx = state.playback.lock().unwrap();
+        let doc = state.doc.lock().unwrap();
+        let model = doc.model();
+        let Some(p) = ctx
+            .pattern_id
+            .and_then(|id| model.pattern(&id))
+            .or_else(|| model.patterns.first())
+        else {
+            return;
+        };
+        (p.id, p.length_beats, p.notes(&track_id).to_vec())
+    };
+    // In song mode the engine position is a song position; fold it into the pattern.
+    let start_in = start % length_beats;
+    let mut len = end - start;
+    if len < 0.0 {
+        len += length_beats; // the loop wrapped while the key was held
+    }
+    let grid = if quantize > 0.0 { quantize } else { 1.0 / 32.0 };
+    let snapped_start = (start_in / grid).round() * grid;
+    let snapped_len = ((len / grid).round() * grid).max(grid);
+    let note = NoteEvent::new(snapped_start.min(length_beats - grid).max(0.0), snapped_len, pitch as i32).with_velocity(velocity as i32);
+
+    let mut notes = existing;
+    // Replace a note that starts on the same pitch and grid slot instead of stacking.
+    notes.retain(|n| !(n.pitch == note.pitch && (n.start_beat - note.start_beat).abs() < grid / 2.0));
+    notes.push(note);
+    let applied = state
+        .doc
+        .lock()
+        .unwrap()
+        .apply(Command::SetNotes { pattern_id, track_id, notes }, false);
+    if applied.is_ok() {
+        state.sync_engine();
+        let _ = app.emit("document", state.snapshot());
+    }
+}
+
+#[tauri::command]
+fn midi_status(state: State<'_, AppState>) -> MidiStatus {
+    MidiStatus {
+        inputs: midi_inputs(),
+        open: state.midi_port.lock().unwrap().clone(),
+        armed: state.recorder.lock().unwrap().armed,
+    }
+}
+
+#[tauri::command]
+fn open_midi_input(app: AppHandle, state: State<'_, AppState>, name: Option<String>) -> Result<MidiStatus, String> {
+    let input = MidiInput::new("dissonant").map_err(|e| e.to_string())?;
+    let ports = input.ports();
+    let port = match &name {
+        Some(n) => ports.iter().find(|p| input.port_name(p).ok().as_deref() == Some(n.as_str())),
+        None => ports.first(),
+    }
+    .cloned()
+    .ok_or_else(|| "no MIDI input found".to_string())?;
+    let port_name = input.port_name(&port).unwrap_or_else(|_| "midi".into());
+    let handle = app.clone();
+    let conn = input
+        .connect(
+            &port,
+            "dissonant-in",
+            move |_stamp, message, _| {
+                if message.len() < 3 {
+                    return;
+                }
+                match message[0] & 0xF0 {
+                    0x90 if message[2] > 0 => live_note_on(&handle, message[1], message[2]),
+                    0x80 | 0x90 => live_note_off(&handle, message[1]),
+                    _ => {}
+                }
+            },
+            (),
+        )
+        .map_err(|e| e.to_string())?;
+    *state.midi.lock().unwrap() = Some(conn);
+    *state.midi_port.lock().unwrap() = Some(port_name);
+    Ok(midi_status(state))
+}
+
+#[tauri::command]
+fn close_midi_input(state: State<'_, AppState>) -> MidiStatus {
+    *state.midi.lock().unwrap() = None;
+    *state.midi_port.lock().unwrap() = None;
+    midi_status(state)
+}
+
+#[tauri::command]
+fn set_live_track(state: State<'_, AppState>, track_id: Option<Uuid>) {
+    state.playback.lock().unwrap().live_track = track_id;
+}
+
+#[tauri::command]
+fn set_record(state: State<'_, AppState>, armed: bool, quantize: Option<f64>) -> MidiStatus {
+    let mut rec = state.recorder.lock().unwrap();
+    rec.armed = armed;
+    if let Some(q) = quantize {
+        rec.quantize = q.max(0.0);
+    }
+    if !armed {
+        rec.held.clear();
+    }
+    drop(rec);
+    midi_status(state)
+}
+
+#[tauri::command]
+fn note_on(app: AppHandle, pitch: u8, velocity: Option<u8>) {
+    live_note_on(&app, pitch, velocity.unwrap_or(100));
+}
+
+#[tauri::command]
+fn note_off(app: AppHandle, pitch: u8) {
+    live_note_off(&app, pitch);
+}
+
+#[tauri::command]
+fn set_loop(state: State<'_, AppState>, start: f64, end: f64) {
+    state.send(EngineCommand::SetLoop { start, end });
+}
+
+#[tauri::command]
+fn clear_loop(state: State<'_, AppState>) {
+    state.send(EngineCommand::ClearLoop);
+}
+
+#[tauri::command]
+fn set_looping(state: State<'_, AppState>, on: bool) {
+    state.send(EngineCommand::SetLooping(on));
+}
+
 // ─── Export ──────────────────────────────────────────────────────────────────────────────────
 
 /// Render the song (or the current pattern when the arrangement is empty) to a WAV file,
@@ -295,7 +508,7 @@ async fn export_wav(state: State<'_, AppState>, path: String, tail_seconds: Opti
     let (sequence, master, hear_chords) = {
         let doc = state.doc.lock().unwrap();
         let ctx = state.playback.lock().unwrap();
-        let seq = if doc.model().arrangement.is_empty() {
+        let seq = if doc.model().clips.is_empty() {
             build_sequence(doc.model(), PlayMode::Pattern, ctx.pattern_id)
         } else {
             Sequence::from_song(doc.model())
@@ -393,6 +606,16 @@ pub fn run() {
             audio_status,
             restart_audio,
             export_wav,
+            midi_status,
+            open_midi_input,
+            close_midi_input,
+            set_live_track,
+            set_record,
+            note_on,
+            note_off,
+            set_loop,
+            clear_loop,
+            set_looping,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

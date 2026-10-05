@@ -5,7 +5,7 @@
 //! continuous controls (sliders) send `transient` commands which coalesce into one undo step
 //! per gesture.
 
-use crate::model::{ChordEvent, KeyState, MasterSettings, NoteEvent, ProjectModel, SongPattern, Track};
+use crate::model::{ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track};
 use crate::theory::harmony;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -45,8 +45,16 @@ pub enum Command {
     SetNotes { pattern_id: Uuid, track_id: Uuid, notes: Vec<NoteEvent> },
     /// Replace a pattern's chord track.
     SetChords { pattern_id: Uuid, chords: Vec<ChordEvent> },
-    SetArrangement { arrangement: Vec<Uuid> },
+    /// Place a pattern on the song. `length_beats` defaults to the pattern length.
+    AddClip { pattern_id: Uuid, start_beat: f64, length_beats: Option<f64> },
+    /// Move / resize / re-offset / mute a clip (matched by id).
+    UpdateClip { clip: Clip },
+    RemoveClip { id: Uuid },
+    AddSection { name: String, start_beat: f64 },
+    UpdateSection { section: Section },
+    RemoveSection { id: Uuid },
     SetMaster { master: MasterSettings },
+    SetTimeSignature { numerator: u32, denominator: u32 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -61,6 +69,10 @@ pub enum EditError {
     LastPattern,
     #[error("invalid value")]
     InvalidValue,
+    #[error("no such clip")]
+    NoSuchClip,
+    #[error("no such section")]
+    NoSuchSection,
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +302,7 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             if m.patterns.len() == before {
                 return Err(EditError::NoSuchPattern);
             }
-            m.arrangement.retain(|pid| *pid != id);
+            m.clips.retain(|c| c.pattern_id != id);
         }
         RenamePattern { id, name } => {
             if name.trim().is_empty() {
@@ -331,8 +343,62 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 .collect();
             p.chords = crate::chord_track::ChordTrack::new(chords);
         }
-        SetArrangement { arrangement } => {
-            m.arrangement = arrangement.into_iter().filter(|id| m.patterns.iter().any(|p| &p.id == id)).collect();
+        AddClip { pattern_id, start_beat, length_beats } => {
+            let p = m.pattern(&pattern_id).ok_or(EditError::NoSuchPattern)?;
+            let len = length_beats.unwrap_or(p.length_beats);
+            if !start_beat.is_finite() || start_beat < 0.0 || !len.is_finite() || len <= 0.0 {
+                return Err(EditError::InvalidValue);
+            }
+            m.clips.push(Clip::new(pattern_id, start_beat, len));
+            m.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        UpdateClip { clip } => {
+            if m.pattern(&clip.pattern_id).is_none() {
+                return Err(EditError::NoSuchPattern);
+            }
+            let bad = [clip.start_beat, clip.length_beats, clip.offset_beats].iter().any(|v| !v.is_finite());
+            if bad || clip.start_beat < 0.0 || clip.length_beats <= 0.0 || clip.offset_beats < 0.0 {
+                return Err(EditError::InvalidValue);
+            }
+            let slot = m.clips.iter_mut().find(|c| c.id == clip.id).ok_or(EditError::NoSuchClip)?;
+            *slot = clip;
+            m.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        RemoveClip { id } => {
+            let before = m.clips.len();
+            m.clips.retain(|c| c.id != id);
+            if m.clips.len() == before {
+                return Err(EditError::NoSuchClip);
+            }
+        }
+        AddSection { name, start_beat } => {
+            if !start_beat.is_finite() || start_beat < 0.0 {
+                return Err(EditError::InvalidValue);
+            }
+            let name = if name.trim().is_empty() { format!("section {}", m.sections.len() + 1) } else { name };
+            m.sections.push(Section::new(name, start_beat));
+            m.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        UpdateSection { section } => {
+            if !section.start_beat.is_finite() || section.start_beat < 0.0 || section.name.trim().is_empty() {
+                return Err(EditError::InvalidValue);
+            }
+            let slot = m.sections.iter_mut().find(|s| s.id == section.id).ok_or(EditError::NoSuchSection)?;
+            *slot = section;
+            m.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        RemoveSection { id } => {
+            let before = m.sections.len();
+            m.sections.retain(|s| s.id != id);
+            if m.sections.len() == before {
+                return Err(EditError::NoSuchSection);
+            }
+        }
+        SetTimeSignature { numerator, denominator } => {
+            if !(1..=16).contains(&numerator) || ![2, 4, 8, 16].contains(&denominator) {
+                return Err(EditError::InvalidValue);
+            }
+            m.time_signature = crate::model::TimeSignature { numerator, denominator };
         }
         SetMaster { master } => {
             let v = [
@@ -458,15 +524,58 @@ mod tests {
     }
 
     #[test]
-    fn delete_pattern_updates_arrangement_and_guards_last() {
+    fn delete_pattern_removes_its_clips_and_guards_last() {
         let mut d = doc();
         let first = d.model().patterns[0].id;
         assert_eq!(d.apply(Command::DeletePattern { id: first }, false), Err(EditError::LastPattern));
         d.apply(Command::DuplicatePattern { id: first }, false).unwrap();
         let second = d.model().patterns[1].id;
-        d.apply(Command::SetArrangement { arrangement: vec![first, second, first] }, false).unwrap();
+        d.apply(Command::AddClip { pattern_id: second, start_beat: 16.0, length_beats: None }, false).unwrap();
+        d.apply(Command::AddClip { pattern_id: first, start_beat: 32.0, length_beats: Some(8.0) }, false).unwrap();
+        assert_eq!(d.model().clips.len(), 3);
         d.apply(Command::DeletePattern { id: first }, false).unwrap();
-        assert_eq!(d.model().arrangement, vec![second]);
+        assert_eq!(d.model().clips.len(), 1);
+        assert_eq!(d.model().clips[0].pattern_id, second);
+    }
+
+    #[test]
+    fn clips_are_validated_sorted_and_removable() {
+        let mut d = doc();
+        let pid = d.model().patterns[0].id;
+        assert_eq!(d.apply(Command::AddClip { pattern_id: Uuid::new_v4(), start_beat: 0.0, length_beats: None }, false), Err(EditError::NoSuchPattern));
+        assert_eq!(d.apply(Command::AddClip { pattern_id: pid, start_beat: -1.0, length_beats: None }, false), Err(EditError::InvalidValue));
+        d.apply(Command::AddClip { pattern_id: pid, start_beat: 64.0, length_beats: Some(8.0) }, false).unwrap();
+        d.apply(Command::AddClip { pattern_id: pid, start_beat: 32.0, length_beats: Some(8.0) }, false).unwrap();
+        let starts: Vec<f64> = d.model().clips.iter().map(|c| c.start_beat).collect();
+        assert_eq!(starts, vec![0.0, 32.0, 64.0]);
+        assert_eq!(d.model().song_length(), 72.0);
+        let mut c = d.model().clips[1].clone();
+        c.length_beats = 0.0;
+        assert_eq!(d.apply(Command::UpdateClip { clip: c.clone() }, false), Err(EditError::InvalidValue));
+        c.length_beats = 24.0;
+        c.offset_beats = 4.0;
+        d.apply(Command::UpdateClip { clip: c.clone() }, false).unwrap();
+        assert_eq!(d.model().clip(&c.id).unwrap().offset_beats, 4.0);
+        d.apply(Command::RemoveClip { id: c.id }, false).unwrap();
+        assert_eq!(d.model().clips.len(), 2);
+        assert_eq!(d.apply(Command::RemoveClip { id: c.id }, false), Err(EditError::NoSuchClip));
+    }
+
+    #[test]
+    fn sections_carry_their_own_key() {
+        let mut d = doc();
+        d.apply(Command::SetKey { key: KeyState::locked(0, ScaleType::Major) }, false).unwrap();
+        d.apply(Command::AddSection { name: "verse".into(), start_beat: 0.0 }, false).unwrap();
+        d.apply(Command::AddSection { name: "".into(), start_beat: 16.0 }, false).unwrap();
+        assert_eq!(d.model().sections[1].name, "section 2");
+        let mut bridge = d.model().sections[1].clone();
+        bridge.key = Some(KeyState::locked(9, ScaleType::Minor));
+        d.apply(Command::UpdateSection { section: bridge.clone() }, false).unwrap();
+        assert_eq!(d.model().key_at(3.0).root_pitch_class, Some(0));
+        assert_eq!(d.model().key_at(20.0).root_pitch_class, Some(9));
+        assert_eq!(d.model().section_at(20.0).map(|s| s.name.as_str()), Some("section 2"));
+        d.apply(Command::RemoveSection { id: bridge.id }, false).unwrap();
+        assert_eq!(d.model().key_at(20.0).root_pitch_class, Some(0));
     }
 
     #[test]
@@ -501,10 +610,22 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_drops_unknown_pattern_ids() {
+    fn time_signature_is_validated() {
         let mut d = doc();
-        let pid = d.model().patterns[0].id;
-        d.apply(Command::SetArrangement { arrangement: vec![pid, Uuid::new_v4()] }, false).unwrap();
-        assert_eq!(d.model().arrangement, vec![pid]);
+        d.apply(Command::SetTimeSignature { numerator: 7, denominator: 8 }, false).unwrap();
+        assert_eq!(d.model().time_signature.beats_per_bar(), 3.5);
+        assert_eq!(d.apply(Command::SetTimeSignature { numerator: 0, denominator: 4 }, false), Err(EditError::InvalidValue));
+        assert_eq!(d.apply(Command::SetTimeSignature { numerator: 4, denominator: 3 }, false), Err(EditError::InvalidValue));
     }
+
+    #[test]
+    fn intentional_flag_survives_set_notes() {
+        let mut d = doc();
+        let (pid, tid) = (d.model().patterns[0].id, d.model().tracks[0].id);
+        let mut n = NoteEvent::new(0.0, 1.0, 65);
+        n.intentional = true;
+        d.apply(Command::SetNotes { pattern_id: pid, track_id: tid, notes: vec![n] }, false).unwrap();
+        assert!(d.model().patterns[0].notes(&tid)[0].intentional);
+    }
+
 }

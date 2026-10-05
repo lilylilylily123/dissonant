@@ -1683,3 +1683,29 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Section markers in the arrangement ruler */
+.arr .marker {
+  position: absolute;
+  top: 2px;
+  height: 13px;
+  display: flex;
+  align-items: center;
+  border-left: 2px solid;
+  padding-left: 4px;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: grab;
+  white-space: nowrap;
+  overflow: visible;
+  z-index: 2;
+}
+.arr .marker .popover {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--text-1);
+  cursor: default;
+}

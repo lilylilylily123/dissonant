@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, PlayMode, Snapshot, SongPattern, Track } from "./types";
+import type { AudioStatus, Command, KeyState, MidiStatus, PlayMode, Snapshot, SongPattern, Track } from "./types";
+import { beatsPerBar as bpbOf, keyAt } from "./types";
 
 export interface Toast {
   text: string;
@@ -8,6 +9,7 @@ export interface Toast {
 }
 
 export type BottomPanel = "devices" | "mixer";
+export type LiveKeyboard = "off" | "tier" | "chromatic";
 
 interface State {
   snapshot: Snapshot | null;
@@ -28,6 +30,14 @@ interface State {
   trackPeaks: number[];
   audio: AudioStatus | null;
   toast: Toast | null;
+  looping: boolean;
+  loopRegion: [number, number] | null;
+  armed: boolean;
+  midi: MidiStatus | null;
+  midiActivityAt: number;
+  liveKeyboard: LiveKeyboard;
+  magnet: boolean;
+  stamp: boolean;
 
   init(): Promise<void>;
   dispatch(command: Command, transient?: boolean): Promise<void>;
@@ -52,6 +62,17 @@ interface State {
   seek(beat: number): void;
   tapTempo(): void;
   audition(pitch: number, velocity?: number): void;
+  setLoopRegion(region: [number, number] | null): void;
+  toggleLooping(): void;
+  toggleRecord(): void;
+  openMidi(name?: string): Promise<void>;
+  closeMidi(): Promise<void>;
+  refreshMidi(): Promise<void>;
+  setLiveKeyboard(mode: LiveKeyboard): void;
+  noteOn(pitch: number, velocity?: number): void;
+  noteOff(pitch: number): void;
+  toggleMagnet(): void;
+  toggleStamp(): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
   saveProject(saveAs?: boolean): Promise<void>;
@@ -103,15 +124,27 @@ export const useStore = create<State>((set, get) => {
     trackPeaks: [],
     audio: null,
     toast: null,
+    looping: true,
+    loopRegion: null,
+    armed: false,
+    midi: null,
+    midiActivityAt: 0,
+    liveKeyboard: "off",
+    magnet: false,
+    stamp: false,
 
     async init() {
       const b = await getBridge();
       applySnapshot(await b.getState());
       await syncPlayback();
+      await b.setLiveTrack(get().selectedTrackId);
       b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks }));
+      b.onDocument((snap) => applySnapshot(snap));
+      b.onMidiActivity(() => set({ midiActivityAt: performance.now() }));
       const audio = await b.audioStatus();
       set({ audio });
       if (!audio.running && b.isTauri) get().showToast(`audio: ${audio.error ?? "not running"}`, true);
+      void get().refreshMidi();
     },
 
     async dispatch(command, transient = false) {
@@ -144,8 +177,10 @@ export const useStore = create<State>((set, get) => {
     },
     selectTrack(id) {
       set({ selectedTrackId: id, selectedNoteIds: [] });
+      void getBridge().then((b) => b.setLiveTrack(id));
     },
     selectPattern(id) {
+      if (id !== get().selectedPatternId) get().setLoopRegion(null);
       set({ selectedPatternId: id, selectedNoteIds: [] });
       void syncPlayback();
     },
@@ -154,6 +189,7 @@ export const useStore = create<State>((set, get) => {
     },
     setNoteLength(len) {
       set({ noteLength: len });
+      if (get().armed) void getBridge().then((b) => b.setRecord(true, len));
     },
     setZoom(zoom) {
       set({ zoom: Math.min(3, Math.max(0.25, zoom)) });
@@ -209,6 +245,57 @@ export const useStore = create<State>((set, get) => {
       const id = get().selectedTrackId;
       if (!id) return;
       void getBridge().then((b) => b.audition(id, pitch, velocity));
+    },
+
+    setLoopRegion(region) {
+      set({ loopRegion: region });
+      void getBridge().then((b) => (region ? b.setLoop(region[0], region[1]) : b.clearLoop()));
+    },
+    toggleLooping() {
+      const on = !get().looping;
+      set({ looping: on });
+      void getBridge().then((b) => b.setLooping(on));
+    },
+    toggleRecord() {
+      const armed = !get().armed;
+      set({ armed });
+      void getBridge().then(async (b) => set({ midi: await b.setRecord(armed, get().noteLength) }));
+    },
+    async openMidi(name) {
+      const b = await getBridge();
+      try {
+        set({ midi: await b.openMidiInput(name) });
+        get().showToast(`MIDI in: ${get().midi?.open ?? "—"}`);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async closeMidi() {
+      const b = await getBridge();
+      set({ midi: await b.closeMidiInput() });
+    },
+    async refreshMidi() {
+      const b = await getBridge();
+      try {
+        set({ midi: await b.midiStatus() });
+      } catch {
+        /* no midi backend */
+      }
+    },
+    setLiveKeyboard(mode) {
+      set({ liveKeyboard: mode });
+    },
+    noteOn(pitch, velocity = 100) {
+      void getBridge().then((b) => b.noteOn(pitch, velocity));
+    },
+    noteOff(pitch) {
+      void getBridge().then((b) => b.noteOff(pitch));
+    },
+    toggleMagnet() {
+      set((s) => ({ magnet: !s.magnet }));
+    },
+    toggleStamp() {
+      set((s) => ({ stamp: !s.stamp }));
     },
 
     async newProject() {
@@ -322,4 +409,20 @@ export function peakDb(peak: number): number {
 /** 0..1 meter position for a peak, on a -48 dB … 0 dB scale. */
 export function meterPos(peak: number): number {
   return Math.min(1, Math.max(0, (peakDb(peak) + 48) / 48));
+}
+
+export function beatsPerBar(s: State): number {
+  return bpbOf(s.snapshot?.model.timeSignature);
+}
+
+/**
+ * The key the selected pattern is tiered against: if the pattern sits in a section with
+ * its own key (its first clip), that key; otherwise the project key.
+ */
+export function effectiveKey(s: State): KeyState {
+  const m = s.snapshot?.model;
+  if (!m) return { rootPitchClass: null, scale: "major", isLocked: false };
+  const p = selectedPattern(s);
+  const clip = p ? m.clips.find((c) => c.patternId === p.id) : undefined;
+  return clip ? keyAt(m, clip.startBeat) : m.key;
 }

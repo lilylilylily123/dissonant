@@ -24,7 +24,29 @@ export interface NoteEvent {
   lengthBeats: number;
   pitch: number;
   velocity: number;
+  /** The player marked this dissonance as deliberate. */
+  intentional?: boolean;
 }
+
+export interface TimeSignature {
+  numerator: number;
+  denominator: number;
+}
+
+/** Quarter-note beats per bar. */
+export function beatsPerBar(ts: TimeSignature | undefined): number {
+  if (!ts) return 4;
+  return (ts.numerator * 4) / Math.max(1, ts.denominator);
+}
+
+export const TIME_SIGNATURES: TimeSignature[] = [
+  { numerator: 2, denominator: 4 },
+  { numerator: 3, denominator: 4 },
+  { numerator: 4, denominator: 4 },
+  { numerator: 5, denominator: 4 },
+  { numerator: 6, denominator: 8 },
+  { numerator: 7, denominator: 8 },
+];
 
 export interface Track {
   id: string;
@@ -53,6 +75,25 @@ export interface SongPattern {
   notesByTrack: Record<string, NoteEvent[]>;
 }
 
+/** A pattern placed on the song; loops from `offsetBeats` for `lengthBeats`. */
+export interface Clip {
+  id: string;
+  patternId: string;
+  startBeat: number;
+  lengthBeats: number;
+  offsetBeats: number;
+  muted: boolean;
+}
+
+/** A song marker, optionally with its own key (modulation). */
+export interface Section {
+  id: string;
+  name: string;
+  startBeat: number;
+  key: KeyState | null;
+  color: string | null;
+}
+
 export interface MasterSettings {
   gain: number;
   reverbWet: number;
@@ -69,8 +110,24 @@ export interface ProjectModel {
   key: KeyState;
   tracks: Track[];
   patterns: SongPattern[];
-  arrangement: string[];
+  clips: Clip[];
+  sections: Section[];
   master: MasterSettings;
+  timeSignature?: TimeSignature;
+}
+
+export function songLength(m: ProjectModel): number {
+  return m.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
+}
+
+export function sectionAt(m: ProjectModel, beat: number): Section | null {
+  let best: Section | null = null;
+  for (const s of m.sections) if (s.startBeat <= beat && (!best || s.startBeat >= best.startBeat)) best = s;
+  return best;
+}
+
+export function keyAt(m: ProjectModel, beat: number): KeyState {
+  return sectionAt(m, beat)?.key ?? m.key;
 }
 
 export interface Snapshot {
@@ -104,8 +161,14 @@ export type Command =
   | { type: "setPatternLength"; id: string; beats: number }
   | { type: "setNotes"; patternId: string; trackId: string; notes: NoteEvent[] }
   | { type: "setChords"; patternId: string; chords: ChordEvent[] }
-  | { type: "setArrangement"; arrangement: string[] }
-  | { type: "setMaster"; master: MasterSettings };
+  | { type: "addClip"; patternId: string; startBeat: number; lengthBeats: number | null }
+  | { type: "updateClip"; clip: Clip }
+  | { type: "removeClip"; id: string }
+  | { type: "addSection"; name: string; startBeat: number }
+  | { type: "updateSection"; section: Section }
+  | { type: "removeSection"; id: string }
+  | { type: "setMaster"; master: MasterSettings }
+  | { type: "setTimeSignature"; numerator: number; denominator: number };
 
 export interface PlayheadEvent {
   beat: number;
@@ -118,6 +181,12 @@ export interface AudioStatus {
   running: boolean;
   sampleRate: number | null;
   error: string | null;
+}
+
+export interface MidiStatus {
+  inputs: string[];
+  open: string | null;
+  armed: boolean;
 }
 
 export const VOICES = ["saw", "square", "triangle", "sine", "pad", "pluck"] as const;
