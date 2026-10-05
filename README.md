@@ -42,28 +42,50 @@ pnpm ui                 # http://localhost:5173
 ## Test
 
 ```sh
-cargo test --workspace --exclude dissonant-app   # 65 Rust tests: theory, document, engine timing, render
-pnpm --dir ui test                               # 17 UI tests: theory mirror, note-editing math
+cargo test --workspace --exclude dissonant-app   # 73 Rust tests: theory, document, engine timing, render
+pnpm --dir ui test                               # 27 UI tests: theory mirror, note tools
 pnpm --dir ui typecheck
 cargo clippy --workspace --all-targets
 ```
 
 ## Using it
 
+Two screens, switched with the **PAT | SONG** control (or Tab):
+
 | Where | How |
 |---|---|
-| Piano roll | click places a note (keep dragging to move it) · drag a note to move, its right edge to resize · ⌥-drag to paint or duplicate · ⇧-drag marquee · right-click erases · ⌫ ⌘A ⌘C ⌘X ⌘V ⌘D · arrows nudge (⇧ = octave / bar) · `[` `]` velocity · ⌘± zoom · click the ruler to seek |
-| Chord lane | pick a starter (in the project key) · drag a chord to move, its right edge to resize · click to free-build · right-click to delete · **♪ chords** to hear the bed |
-| Key | place notes and the key chip offers "looks like X — lock?" · × clears |
-| Patterns | new / dup / rename / del · 1–8 bars · **song** mode arranges them |
-| Drums | left-click/drag adds hits, right-click removes · 1/8 or 1/16 steps |
-| Mixer | per-track vol / pan / reverb / tone · master gain / reverb / cuts / 3-band EQ · meters |
-| Transport | space play/stop · R rewind · ⌘Z/⇧⌘Z undo/redo · ⌘S save · ⌘O open · ⌘E export WAV (offline render, faster than real time) |
+| **PAT** · piano roll | click places a note (keep dragging to move it) · drag a note to move (⇧ locks to one axis), its right edge to resize · ⌥-drag a note duplicates · ⌥ on empty space places off the grid (or paints, per Settings) · **brush** paints · ⇧/⌘-drag marquee · double-click a key selects that pitch (⌘: pitch class) · Tab/⇧Tab next/previous note · right-click erases · ⌫ ⌘A ⌘C ⌘X ⌘V ⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one loop later · 0 mute (hollow, not played) · arrows nudge (⇧ = octave / bar, ⌥ = fine) · `[` `]` velocity · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor · ⇧-wheel scrolls · velocity lane: drag the stems, ⌥-drag draws a ramp · click the ruler to seek · drag the ruler's top strip for a loop region (right-click clears) · **follow** keeps the playhead in view · **fit** zooms to the pattern · **fold** shows only rows with notes (plus nearby chord tones) · **ghost** draws another track's notes behind yours, dashed, with their tiers · hover a cell for a plain-words explanation · **tiers** tints rows by fit, **map** paints the whole progression · HARMONY → select by tier picks every chord tone / tension / dissonant note · NOTES → length chips and mute for the selection |
+| Transform | inspector → TRANSFORM: quantize, humanize (chord tones stay tighter), legato, arp ↑/↓/⇅/random, strum, chop, ×2 slower / ½ faster, reverse, invert · Edit menu: transpose by semitone / octave, split, glue, duplicate-loop, mute · **magnet** pulls placed/dragged notes to the nearest chord tone · **stamp chord** places the chord under the cursor |
+| Resolve / keep | select one dissonant note: the inspector says why, offers ↓/↑ resolve targets, or **keep** marks it deliberate (hatch stays, the "!" goes) |
+| Chord lane | starters live under HARMONY in the inspector (always in the key) · drag a chord to move, its right edge to resize · click to free-build · right-click to delete · **chords** to hear the bed |
+| Play live | **KEYS** tier: home row = chord tones, top row = tensions of the chord under the playhead, remapped as it moves · chrom: Z/Q rows chromatic · −/+ octave · **MIDI IN** picks a controller · **REC** (R) while playing writes what you play into the pattern, quantized to the grid |
+| Key | place notes and the KEY cell offers "X? lock" · × unlocks · or pick root + scale under HARMONY · a section with its own key modulates the patterns inside it |
+| Drums | step grid: left-click/drag adds hits, right-click removes · step follows snap (1/8, 1/16, 1/32) |
+| **SONG** · arrangement | **tempo lane** under the ruler: double-click adds a tempo change at that beat, drag a point up/down for bpm (⇧ fine) and sideways to move it, ⌥-click makes it a ramp (a glide from the previous tempo), right-click removes; the transport clock and the engine follow the map, pattern mode plays at the base tempo · ＋ on a pattern (left) appends a clip · drag a clip to move (snaps to bars, ⇧ for beats), its right edge to trim or loop-extend, ⌥-drag to copy, right-click to remove, double-click to edit · double-click the ruler's top strip to add a section; click it to name it, give it a key or color; drag to move; right-click to remove · track headers: M/S, volume slider, meters · click the ruler to seek |
+| Bottom panel | **DEVICES**: instrument, track bus (vol / pan / tone / reverb), master (gain, cuts, 3-band EQ, reverb) · **MIXER**: faders, pan, meters, M/S |
+| Transport | space play/stop · Enter return to start · L loop · R record · M metronome (count-in and pre-roll when record is armed; volume in Settings) · BPM: click to type (↑↓ ±1, ⇧ ±10), drag up/down, scroll, double-click resets, ÷2 ×2 · tap tempo (last 8 taps) · SWING 50–75 on 8ths or 16ths (the roll shows where swung notes land) · SIG time signature · ⌘Z/⇧⌘Z undo/redo (the Edit menu names the step) · ⌘S save · ⌘O open · ⌘E export WAV (offline render, faster than real time) · ⌘, settings · ⌘Q quit |
+| Files | **⌘E** export audio: song or pattern, loop count, chord bed, **stems** (one WAV per track), rate / depth / dither / normalize / tail, with a progress strip · File → Export MIDI (one MIDI track per track, chord names as markers) and Import MIDI into the selected pattern (new tracks, one undo step) · File → New from template / Save as template (templates live in the app data folder) · unsaved changes are prompted on close, new and open · autosave every 30 s while dirty (`<project>.autosave.json`, restore offered on launch) · File → recent files · drop a `.dissonant` on the window to open it · the engine restarts by itself when the output device changes or disappears |
+| Settings (⌘,) | **audio**: output device, sample rate, buffer size with latency, test tone, engine load / xruns, metronome volume, count-in, pre-roll · **midi**: default input with auto-reconnect, velocity curve, channel, octave · **editing**: default grid / velocity, audition on place, ⌥ = no-snap or paint, confirmations, new-project defaults · **export**: rate, 16/24/32-bit, dither, normalize, tail · **appearance**: UI scale, row height, reduced motion, accent and tier colors (color-blind-safe preset) |
+
+The look follows the UI handoff in `docs/design/2026-10-02-ui-handoff-violet.md` (violet accent, IBM Plex
+Sans Condensed + JetBrains Mono, bundled). Controls only exist for features that are built; the
+metronome, count-in, tools, ghost notes, CC lane, browser and plugin devices from the mock arrive
+with their features.
 
 Projects are JSON (`.dissonant`). The format is documented by `crates/dissonant-core/src/model.rs`.
 
 ## Roadmap
 
-See `docs/brainstorms/2026-10-02-full-daw-brainstorm.md` for the full plan (playlist of clips,
-session view, device chains, CLAP plugins, MIDI input, audio recording, and the harmony-native
-features nobody else has) and `docs/decisions/` for why the stack changed.
+The plan lives in `docs/brainstorms/2026-10-02-full-daw-brainstorm.md`; `docs/decisions/` explains
+the stack change. Status against it:
+
+| Phase | Done | Open |
+|---|---|---|
+| 0 Foundations | audio-clock scheduler, render-block synth, command bus + undo (labelled), offline render, pan, loop region, time signature, legacy import, tempo map with ramps, swing, metronome + count-in, settings, autosave, device-loss recovery | integer ticks |
+| 1 Roll | full editing, velocity lane, zoom, transform tools, magnet, stamp, resolve/keep, explain-this-note, live tier keyboard, MIDI in + record, ghost notes, fold, per-note mute, select by tier, velocity ramp, split / glue / duplicate-loop | per-note probability / slide |
+| 2 Arrangement | clips with trim / loop-extend / offset, sections with per-section key, tempo lane, MIDI file export / import, templates, stems | ripple edits, variation generator |
+| 3 Mix & devices | track bus, master chain, mixer, meters | device chains, native effects, CLAP hosting, automation, sidechain |
+| 4 Instruments | waveform synth, procedural kit | real subtractive synth, sampler, drum machine upgrade, browser |
+| 5 Audio | — | recording, clips, warp, audio → notes / chords |
+| 6 Harmony | tiers, key detection, starters, free-build chords | reharmonize from melody, function-preserving transpose, voicing engine, next-chord suggestions |
+| 7 Jam & polish | — | session view, modulators, command palette, layouts |

@@ -5,7 +5,9 @@
 //! continuous controls (sliders) send `transient` commands which coalesce into one undo step
 //! per gesture.
 
-use crate::model::{ChordEvent, KeyState, MasterSettings, NoteEvent, ProjectModel, SongPattern, Track};
+use crate::midi_file::ImportedTrack;
+use crate::model::{ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track};
+use crate::tempo::TempoPoint;
 use crate::theory::harmony;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -34,6 +36,8 @@ pub enum Command {
     MoveTrack { id: Uuid, up: bool },
     SetTrackVoice { id: Uuid, voice: String },
     SetTrackParam { id: Uuid, param: TrackParam, value: f64 },
+    /// `#rrggbb`, or `None` to fall back to the palette.
+    SetTrackColor { id: Uuid, color: Option<String> },
     AddPattern,
     DuplicatePattern { id: Uuid },
     DeletePattern { id: Uuid },
@@ -43,8 +47,25 @@ pub enum Command {
     SetNotes { pattern_id: Uuid, track_id: Uuid, notes: Vec<NoteEvent> },
     /// Replace a pattern's chord track.
     SetChords { pattern_id: Uuid, chords: Vec<ChordEvent> },
-    SetArrangement { arrangement: Vec<Uuid> },
+    /// Place a pattern on the song. `length_beats` defaults to the pattern length.
+    AddClip { pattern_id: Uuid, start_beat: f64, length_beats: Option<f64> },
+    /// Move / resize / re-offset / mute a clip (matched by id).
+    UpdateClip { clip: Clip },
+    RemoveClip { id: Uuid },
+    AddSection { name: String, start_beat: f64 },
+    UpdateSection { section: Section },
+    RemoveSection { id: Uuid },
     SetMaster { master: MasterSettings },
+    SetTimeSignature { numerator: u32, denominator: u32 },
+    /// Global swing in percent (50–75) and its grid in beats (0.5 or 0.25).
+    SetSwing { swing: f64, grid: f64 },
+    /// Add one track per imported MIDI track, with its notes in `pattern_id`, in one undo step.
+    /// The pattern grows to `length_beats` when that is longer.
+    ImportTracks { pattern_id: Uuid, tracks: Vec<ImportedTrack>, length_beats: f64 },
+    /// A tempo change on the song timeline (replaces any point already on that beat).
+    AddTempoPoint { beat: f64, bpm: f64, ramp: bool },
+    UpdateTempoPoint { point: TempoPoint },
+    RemoveTempoPoint { id: Uuid },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -59,17 +80,32 @@ pub enum EditError {
     LastPattern,
     #[error("invalid value")]
     InvalidValue,
+    #[error("no such clip")]
+    NoSuchClip,
+    #[error("no such section")]
+    NoSuchSection,
+    #[error("no such tempo point")]
+    NoSuchTempoPoint,
+}
+
+/// One undo step: the model before the edit, and what the edit was ("move notes").
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    model: ProjectModel,
+    label: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Document {
     model: ProjectModel,
-    undo: Vec<ProjectModel>,
-    redo: Vec<ProjectModel>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
     /// Snapshot taken at the start of a transient gesture, pushed to `undo` when it ends.
-    pending: Option<ProjectModel>,
+    pending: Option<HistoryEntry>,
     pub path: Option<std::path::PathBuf>,
     dirty: bool,
+    /// Bumps on every change to the model (edits, undo, redo, replace). Autosave compares it.
+    revision: u64,
 }
 
 const MAX_UNDO: usize = 200;
@@ -83,6 +119,7 @@ impl Document {
             pending: None,
             path: None,
             dirty: false,
+            revision: 0,
         }
     }
 
@@ -106,10 +143,36 @@ impl Document {
         !self.redo.is_empty()
     }
 
+    /// What the next undo would revert ("move notes"), if anything.
+    pub fn undo_label(&self) -> Option<&str> {
+        self.pending
+            .as_ref()
+            .map(|e| e.label.as_str())
+            .or_else(|| self.undo.last().map(|e| e.label.as_str()))
+    }
+
+    /// What the next redo would re-apply, if anything.
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|e| e.label.as_str())
+    }
+
+    /// Monotonic change counter; two equal revisions mean the model has not changed.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Apply a command. `transient` edits (slider drags) don't create their own undo step;
     /// the first one in a run snapshots the model and the next non-transient command (or
     /// [`Document::commit_gesture`]) turns that snapshot into a single undo entry.
     pub fn apply(&mut self, command: Command, transient: bool) -> Result<(), EditError> {
+        self.apply_labeled(command, transient, None)
+    }
+
+    /// [`Document::apply`] with an explicit undo label. The UI knows *what* an edit was
+    /// ("resize notes") better than the command does ("edit notes"); when it does not say,
+    /// [`Command::label`] is used.
+    pub fn apply_labeled(&mut self, command: Command, transient: bool, label: Option<String>) -> Result<(), EditError> {
+        let label = label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| command.label());
         let before = self.model.clone();
         let mut next = self.model.clone();
         apply_to(&mut next, command)?;
@@ -118,23 +181,23 @@ impl Document {
         }
         if transient {
             if self.pending.is_none() {
-                self.pending = Some(before);
+                self.pending = Some(HistoryEntry { model: before, label });
             }
         } else {
             self.commit_gesture();
-            self.push_undo(before);
+            self.push_undo(HistoryEntry { model: before, label });
         }
         self.redo.clear();
         self.model = next;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
     /// End a run of transient edits, making it one undo step.
     pub fn commit_gesture(&mut self) {
-        if let Some(snapshot) = self.pending.take() {
-            if snapshot != self.model {
-                self.push_undo(snapshot);
+        if let Some(entry) = self.pending.take() {
+            if entry.model != self.model {
+                self.push_undo(entry);
             }
         }
     }
@@ -142,9 +205,10 @@ impl Document {
     pub fn undo(&mut self) -> bool {
         self.commit_gesture();
         match self.undo.pop() {
-            Some(previous) => {
-                self.redo.push(std::mem::replace(&mut self.model, previous));
-                self.dirty = true;
+            Some(entry) => {
+                let current = std::mem::replace(&mut self.model, entry.model);
+                self.redo.push(HistoryEntry { model: current, label: entry.label });
+                self.touch();
                 true
             }
             None => false,
@@ -154,9 +218,10 @@ impl Document {
     pub fn redo(&mut self) -> bool {
         self.commit_gesture();
         match self.redo.pop() {
-            Some(next) => {
-                self.undo.push(std::mem::replace(&mut self.model, next));
-                self.dirty = true;
+            Some(entry) => {
+                let current = std::mem::replace(&mut self.model, entry.model);
+                self.undo.push(HistoryEntry { model: current, label: entry.label });
+                self.touch();
                 true
             }
             None => false,
@@ -171,13 +236,75 @@ impl Document {
         self.pending = None;
         self.path = path;
         self.dirty = false;
+        self.revision += 1;
     }
 
-    fn push_undo(&mut self, snapshot: ProjectModel) {
-        self.undo.push(snapshot);
+    /// Replace the model but keep it marked dirty — used when restoring an autosave, which is
+    /// by definition unsaved work.
+    pub fn restore(&mut self, model: ProjectModel, path: Option<std::path::PathBuf>) {
+        self.replace(model, path);
+        self.dirty = true;
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    fn push_undo(&mut self, entry: HistoryEntry) {
+        self.undo.push(entry);
         if self.undo.len() > MAX_UNDO {
             self.undo.remove(0);
         }
+    }
+}
+
+impl Command {
+    /// A short, lower-case description for the Edit menu ("Undo set tempo").
+    pub fn label(&self) -> String {
+        use Command::*;
+        match self {
+            SetTempo { .. } => "set tempo",
+            SetKey { .. } => "set key",
+            AddTrack { is_drum: true } => "add drum track",
+            AddTrack { .. } => "add track",
+            DeleteTrack { .. } => "delete track",
+            RenameTrack { .. } => "rename track",
+            SetTrackMuted { muted: true, .. } => "mute track",
+            SetTrackMuted { .. } => "unmute track",
+            SetTrackSoloed { soloed: true, .. } => "solo track",
+            SetTrackSoloed { .. } => "unsolo track",
+            MoveTrack { .. } => "reorder tracks",
+            SetTrackVoice { .. } => "change instrument",
+            SetTrackParam { param, .. } => match param {
+                TrackParam::Volume => "change volume",
+                TrackParam::ReverbSend => "change reverb send",
+                TrackParam::Tone => "change tone",
+                TrackParam::Pan => "change pan",
+            },
+            SetTrackColor { .. } => "color track",
+            AddPattern => "add pattern",
+            DuplicatePattern { .. } => "duplicate pattern",
+            DeletePattern { .. } => "delete pattern",
+            RenamePattern { .. } => "rename pattern",
+            SetPatternLength { .. } => "change pattern length",
+            SetNotes { .. } => "edit notes",
+            SetChords { .. } => "edit chords",
+            AddClip { .. } => "add clip",
+            UpdateClip { .. } => "edit clip",
+            RemoveClip { .. } => "remove clip",
+            AddSection { .. } => "add section",
+            UpdateSection { .. } => "edit section",
+            RemoveSection { .. } => "remove section",
+            SetMaster { .. } => "change master",
+            SetTimeSignature { .. } => "set time signature",
+            SetSwing { .. } => "set swing",
+            ImportTracks { .. } => "import MIDI",
+            AddTempoPoint { .. } => "add tempo change",
+            UpdateTempoPoint { .. } => "edit tempo change",
+            RemoveTempoPoint { .. } => "remove tempo change",
+        }
+        .to_string()
     }
 }
 
@@ -235,6 +362,15 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 TrackParam::Pan => t.pan = value.clamp(-1.0, 1.0),
             }
         }
+        SetTrackColor { id, color } => {
+            if let Some(c) = &color {
+                let ok = c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
+                if !ok {
+                    return Err(EditError::InvalidValue);
+                }
+            }
+            m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.color = color.map(|c| c.to_lowercase());
+        }
         AddPattern => {
             let mut p = SongPattern::new(format!("pattern {}", m.patterns.len() + 1));
             let root = m.key.root_pitch_class.unwrap_or(0);
@@ -279,7 +415,7 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             if m.patterns.len() == before {
                 return Err(EditError::NoSuchPattern);
             }
-            m.arrangement.retain(|pid| *pid != id);
+            m.clips.retain(|c| c.pattern_id != id);
         }
         RenamePattern { id, name } => {
             if name.trim().is_empty() {
@@ -320,8 +456,121 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 .collect();
             p.chords = crate::chord_track::ChordTrack::new(chords);
         }
-        SetArrangement { arrangement } => {
-            m.arrangement = arrangement.into_iter().filter(|id| m.patterns.iter().any(|p| &p.id == id)).collect();
+        AddClip { pattern_id, start_beat, length_beats } => {
+            let p = m.pattern(&pattern_id).ok_or(EditError::NoSuchPattern)?;
+            let len = length_beats.unwrap_or(p.length_beats);
+            if !start_beat.is_finite() || start_beat < 0.0 || !len.is_finite() || len <= 0.0 {
+                return Err(EditError::InvalidValue);
+            }
+            m.clips.push(Clip::new(pattern_id, start_beat, len));
+            m.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        UpdateClip { clip } => {
+            if m.pattern(&clip.pattern_id).is_none() {
+                return Err(EditError::NoSuchPattern);
+            }
+            let bad = [clip.start_beat, clip.length_beats, clip.offset_beats].iter().any(|v| !v.is_finite());
+            if bad || clip.start_beat < 0.0 || clip.length_beats <= 0.0 || clip.offset_beats < 0.0 {
+                return Err(EditError::InvalidValue);
+            }
+            let slot = m.clips.iter_mut().find(|c| c.id == clip.id).ok_or(EditError::NoSuchClip)?;
+            *slot = clip;
+            m.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        RemoveClip { id } => {
+            let before = m.clips.len();
+            m.clips.retain(|c| c.id != id);
+            if m.clips.len() == before {
+                return Err(EditError::NoSuchClip);
+            }
+        }
+        AddSection { name, start_beat } => {
+            if !start_beat.is_finite() || start_beat < 0.0 {
+                return Err(EditError::InvalidValue);
+            }
+            let name = if name.trim().is_empty() { format!("section {}", m.sections.len() + 1) } else { name };
+            m.sections.push(Section::new(name, start_beat));
+            m.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        UpdateSection { section } => {
+            if !section.start_beat.is_finite() || section.start_beat < 0.0 || section.name.trim().is_empty() {
+                return Err(EditError::InvalidValue);
+            }
+            let slot = m.sections.iter_mut().find(|s| s.id == section.id).ok_or(EditError::NoSuchSection)?;
+            *slot = section;
+            m.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        }
+        RemoveSection { id } => {
+            let before = m.sections.len();
+            m.sections.retain(|s| s.id != id);
+            if m.sections.len() == before {
+                return Err(EditError::NoSuchSection);
+            }
+        }
+        SetTimeSignature { numerator, denominator } => {
+            if !(1..=16).contains(&numerator) || ![2, 4, 8, 16].contains(&denominator) {
+                return Err(EditError::InvalidValue);
+            }
+            m.time_signature = crate::model::TimeSignature { numerator, denominator };
+        }
+        ImportTracks { pattern_id, tracks, length_beats } => {
+            if m.pattern(&pattern_id).is_none() {
+                return Err(EditError::NoSuchPattern);
+            }
+            if tracks.is_empty() || !length_beats.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            for t in tracks {
+                let mut track = if t.is_drum { Track::drums(&t.name) } else { Track::new(&t.name) };
+                if track.name.trim().is_empty() {
+                    track.name = format!("track {}", m.tracks.len() + 1);
+                }
+                let mut notes: Vec<NoteEvent> = t.notes.into_iter().map(NoteEvent::sanitized).collect();
+                notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat).then(a.pitch.cmp(&b.pitch)));
+                let id = track.id;
+                m.tracks.push(track);
+                if !notes.is_empty() {
+                    m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?.notes_by_track.insert(id, notes);
+                }
+            }
+            let p = m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?;
+            if length_beats > p.length_beats {
+                p.length_beats = length_beats;
+            }
+        }
+        AddTempoPoint { beat, bpm, ramp } => {
+            if !beat.is_finite() || beat < 0.0 || !bpm.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            let bpm = bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM);
+            m.tempo_points.retain(|p| (p.beat - beat).abs() > 1e-9);
+            m.tempo_points.push(TempoPoint::new(beat, bpm, ramp));
+            m.tempo_points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        }
+        UpdateTempoPoint { point } => {
+            if !point.beat.is_finite() || point.beat < 0.0 || !point.bpm.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            let slot = m.tempo_points.iter_mut().find(|p| p.id == point.id).ok_or(EditError::NoSuchTempoPoint)?;
+            *slot = TempoPoint { bpm: point.bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM), ..point };
+            // Keep one point per beat: the edited one wins.
+            let (id, beat) = (slot.id, slot.beat);
+            m.tempo_points.retain(|p| p.id == id || (p.beat - beat).abs() > 1e-9);
+            m.tempo_points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        }
+        RemoveTempoPoint { id } => {
+            let before = m.tempo_points.len();
+            m.tempo_points.retain(|p| p.id != id);
+            if m.tempo_points.len() == before {
+                return Err(EditError::NoSuchTempoPoint);
+            }
+        }
+        SetSwing { swing, grid } => {
+            if !swing.is_finite() || !(grid == 0.5 || grid == 0.25) {
+                return Err(EditError::InvalidValue);
+            }
+            m.swing = swing.clamp(50.0, 75.0);
+            m.swing_grid = grid;
         }
         SetMaster { master } => {
             let v = [
@@ -447,15 +696,58 @@ mod tests {
     }
 
     #[test]
-    fn delete_pattern_updates_arrangement_and_guards_last() {
+    fn delete_pattern_removes_its_clips_and_guards_last() {
         let mut d = doc();
         let first = d.model().patterns[0].id;
         assert_eq!(d.apply(Command::DeletePattern { id: first }, false), Err(EditError::LastPattern));
         d.apply(Command::DuplicatePattern { id: first }, false).unwrap();
         let second = d.model().patterns[1].id;
-        d.apply(Command::SetArrangement { arrangement: vec![first, second, first] }, false).unwrap();
+        d.apply(Command::AddClip { pattern_id: second, start_beat: 16.0, length_beats: None }, false).unwrap();
+        d.apply(Command::AddClip { pattern_id: first, start_beat: 32.0, length_beats: Some(8.0) }, false).unwrap();
+        assert_eq!(d.model().clips.len(), 3);
         d.apply(Command::DeletePattern { id: first }, false).unwrap();
-        assert_eq!(d.model().arrangement, vec![second]);
+        assert_eq!(d.model().clips.len(), 1);
+        assert_eq!(d.model().clips[0].pattern_id, second);
+    }
+
+    #[test]
+    fn clips_are_validated_sorted_and_removable() {
+        let mut d = doc();
+        let pid = d.model().patterns[0].id;
+        assert_eq!(d.apply(Command::AddClip { pattern_id: Uuid::new_v4(), start_beat: 0.0, length_beats: None }, false), Err(EditError::NoSuchPattern));
+        assert_eq!(d.apply(Command::AddClip { pattern_id: pid, start_beat: -1.0, length_beats: None }, false), Err(EditError::InvalidValue));
+        d.apply(Command::AddClip { pattern_id: pid, start_beat: 64.0, length_beats: Some(8.0) }, false).unwrap();
+        d.apply(Command::AddClip { pattern_id: pid, start_beat: 32.0, length_beats: Some(8.0) }, false).unwrap();
+        let starts: Vec<f64> = d.model().clips.iter().map(|c| c.start_beat).collect();
+        assert_eq!(starts, vec![0.0, 32.0, 64.0]);
+        assert_eq!(d.model().song_length(), 72.0);
+        let mut c = d.model().clips[1].clone();
+        c.length_beats = 0.0;
+        assert_eq!(d.apply(Command::UpdateClip { clip: c.clone() }, false), Err(EditError::InvalidValue));
+        c.length_beats = 24.0;
+        c.offset_beats = 4.0;
+        d.apply(Command::UpdateClip { clip: c.clone() }, false).unwrap();
+        assert_eq!(d.model().clip(&c.id).unwrap().offset_beats, 4.0);
+        d.apply(Command::RemoveClip { id: c.id }, false).unwrap();
+        assert_eq!(d.model().clips.len(), 2);
+        assert_eq!(d.apply(Command::RemoveClip { id: c.id }, false), Err(EditError::NoSuchClip));
+    }
+
+    #[test]
+    fn sections_carry_their_own_key() {
+        let mut d = doc();
+        d.apply(Command::SetKey { key: KeyState::locked(0, ScaleType::Major) }, false).unwrap();
+        d.apply(Command::AddSection { name: "verse".into(), start_beat: 0.0 }, false).unwrap();
+        d.apply(Command::AddSection { name: "".into(), start_beat: 16.0 }, false).unwrap();
+        assert_eq!(d.model().sections[1].name, "section 2");
+        let mut bridge = d.model().sections[1].clone();
+        bridge.key = Some(KeyState::locked(9, ScaleType::Minor));
+        d.apply(Command::UpdateSection { section: bridge.clone() }, false).unwrap();
+        assert_eq!(d.model().key_at(3.0).root_pitch_class, Some(0));
+        assert_eq!(d.model().key_at(20.0).root_pitch_class, Some(9));
+        assert_eq!(d.model().section_at(20.0).map(|s| s.name.as_str()), Some("section 2"));
+        d.apply(Command::RemoveSection { id: bridge.id }, false).unwrap();
+        assert_eq!(d.model().key_at(20.0).root_pitch_class, Some(0));
     }
 
     #[test]
@@ -476,10 +768,141 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_drops_unknown_pattern_ids() {
+    fn track_color_is_validated() {
+        let mut d = doc();
+        let id = d.model().tracks[0].id;
+        d.apply(Command::SetTrackColor { id, color: Some("#FF3B30".into()) }, false).unwrap();
+        assert_eq!(d.model().tracks[0].color.as_deref(), Some("#ff3b30"));
+        assert_eq!(
+            d.apply(Command::SetTrackColor { id, color: Some("red".into()) }, false),
+            Err(EditError::InvalidValue)
+        );
+        d.apply(Command::SetTrackColor { id, color: None }, false).unwrap();
+        assert!(d.model().tracks[0].color.is_none());
+    }
+
+    #[test]
+    fn time_signature_is_validated() {
+        let mut d = doc();
+        d.apply(Command::SetTimeSignature { numerator: 7, denominator: 8 }, false).unwrap();
+        assert_eq!(d.model().time_signature.beats_per_bar(), 3.5);
+        assert_eq!(d.apply(Command::SetTimeSignature { numerator: 0, denominator: 4 }, false), Err(EditError::InvalidValue));
+        assert_eq!(d.apply(Command::SetTimeSignature { numerator: 4, denominator: 3 }, false), Err(EditError::InvalidValue));
+    }
+
+    #[test]
+    fn undo_labels_follow_the_history() {
+        let mut d = doc();
+        assert_eq!(d.undo_label(), None);
+        d.apply(Command::SetTempo { bpm: 90.0 }, false).unwrap();
+        assert_eq!(d.undo_label(), Some("set tempo"));
+        let (pid, tid) = (d.model().patterns[0].id, d.model().tracks[0].id);
+        d.apply_labeled(
+            Command::SetNotes { pattern_id: pid, track_id: tid, notes: vec![NoteEvent::new(0.0, 1.0, 60)] },
+            false,
+            Some("place note".into()),
+        )
+        .unwrap();
+        assert_eq!(d.undo_label(), Some("place note"));
+        assert_eq!(d.redo_label(), None);
+        d.undo();
+        assert_eq!(d.undo_label(), Some("set tempo"));
+        assert_eq!(d.redo_label(), Some("place note"));
+        d.redo();
+        assert_eq!(d.undo_label(), Some("place note"));
+        // A transient gesture carries its label while it is still open.
+        let id = tid;
+        d.apply(Command::SetTrackParam { id, param: TrackParam::Pan, value: 0.3 }, true).unwrap();
+        assert_eq!(d.undo_label(), Some("change pan"));
+        d.commit_gesture();
+        assert_eq!(d.undo_label(), Some("change pan"));
+        // An empty label falls back to the command's own.
+        d.apply_labeled(Command::SetTempo { bpm: 95.0 }, false, Some("  ".into())).unwrap();
+        assert_eq!(d.undo_label(), Some("set tempo"));
+    }
+
+    #[test]
+    fn revision_bumps_on_every_change_and_restore_stays_dirty() {
+        let mut d = doc();
+        let r0 = d.revision();
+        d.apply(Command::SetTempo { bpm: 120.0 }, false).unwrap(); // no-op
+        assert_eq!(d.revision(), r0);
+        d.apply(Command::SetTempo { bpm: 99.0 }, false).unwrap();
+        assert!(d.revision() > r0);
+        let r1 = d.revision();
+        d.undo();
+        assert!(d.revision() > r1);
+        d.mark_saved();
+        assert!(!d.is_dirty());
+        d.restore(ProjectModel::starter(), None);
+        assert!(d.is_dirty());
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn import_tracks_is_one_undo_step() {
         let mut d = doc();
         let pid = d.model().patterns[0].id;
-        d.apply(Command::SetArrangement { arrangement: vec![pid, Uuid::new_v4()] }, false).unwrap();
-        assert_eq!(d.model().arrangement, vec![pid]);
+        let before = d.model().tracks.len();
+        d.apply(
+            Command::ImportTracks {
+                pattern_id: pid,
+                tracks: vec![
+                    ImportedTrack { name: "piano".into(), is_drum: false, notes: vec![NoteEvent::new(0.0, 1.0, 60)] },
+                    ImportedTrack { name: "kit".into(), is_drum: true, notes: vec![NoteEvent::new(0.0, 0.25, 36)] },
+                ],
+                length_beats: 32.0,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(d.model().tracks.len(), before + 2);
+        assert!(d.model().tracks[before + 1].is_drum);
+        assert_eq!(d.model().patterns[0].length_beats, 32.0);
+        assert_eq!(d.undo_label(), Some("import MIDI"));
+        d.undo();
+        assert_eq!(d.model().tracks.len(), before);
+        assert_eq!(d.model().patterns[0].length_beats, 16.0);
     }
+
+    #[test]
+    fn tempo_points_are_edited_one_per_beat() {
+        let mut d = doc();
+        d.apply(Command::AddTempoPoint { beat: 16.0, bpm: 90.0, ramp: false }, false).unwrap();
+        d.apply(Command::AddTempoPoint { beat: 16.0, bpm: 95.0, ramp: true }, false).unwrap();
+        assert_eq!(d.model().tempo_points.len(), 1);
+        assert_eq!(d.model().tempo_points[0].bpm, 95.0);
+        assert!(d.model().tempo_points[0].ramp);
+        assert_eq!(d.model().tempo_map().bpm_at(20.0), 95.0);
+        let mut p = d.model().tempo_points[0].clone();
+        p.beat = 8.0;
+        p.bpm = 999.0;
+        d.apply(Command::UpdateTempoPoint { point: p.clone() }, false).unwrap();
+        assert_eq!(d.model().tempo_points[0].bpm, 300.0);
+        assert_eq!(d.model().tempo_points[0].beat, 8.0);
+        d.apply(Command::RemoveTempoPoint { id: p.id }, false).unwrap();
+        assert!(d.model().tempo_points.is_empty());
+        assert_eq!(d.apply(Command::RemoveTempoPoint { id: p.id }, false), Err(EditError::NoSuchTempoPoint));
+        assert_eq!(d.apply(Command::AddTempoPoint { beat: -1.0, bpm: 100.0, ramp: false }, false), Err(EditError::InvalidValue));
+    }
+
+    #[test]
+    fn swing_is_validated() {
+        let mut d = doc();
+        d.apply(Command::SetSwing { swing: 90.0, grid: 0.25 }, false).unwrap();
+        assert_eq!(d.model().swing, 75.0);
+        assert_eq!(d.model().swing_grid, 0.25);
+        assert_eq!(d.apply(Command::SetSwing { swing: 60.0, grid: 0.3 }, false), Err(EditError::InvalidValue));
+    }
+
+    #[test]
+    fn intentional_flag_survives_set_notes() {
+        let mut d = doc();
+        let (pid, tid) = (d.model().patterns[0].id, d.model().tracks[0].id);
+        let mut n = NoteEvent::new(0.0, 1.0, 65);
+        n.intentional = true;
+        d.apply(Command::SetNotes { pattern_id: pid, track_id: tid, notes: vec![n] }, false).unwrap();
+        assert!(d.model().patterns[0].notes(&tid)[0].intentional);
+    }
+
 }

@@ -5,6 +5,7 @@
 use crate::arrangement::Arrangement;
 use crate::chord_track::ChordTrack;
 use crate::model::{NoteEvent, ProjectModel, Track};
+use crate::tempo::TempoMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +54,13 @@ pub struct Sequence {
     pub chords: ChordTrack,
     pub length_beats: f64,
     pub tempo_bpm: f64,
+    /// Swing percent (50 = none) and grid, applied by the scheduler to note starts and ends.
+    pub swing: f64,
+    pub swing_grid: f64,
+    /// Quarter-note beats per bar, for the metronome accent.
+    pub beats_per_bar: f64,
+    /// Beats ⇄ seconds. Constant at `tempo_bpm` in pattern mode; the song's map in song mode.
+    pub tempo_map: TempoMap,
 }
 
 impl Sequence {
@@ -68,6 +76,10 @@ impl Sequence {
             chords: pattern.chords.clone(),
             length_beats: pattern.length_beats.max(1.0),
             tempo_bpm: model.tempo,
+            swing: model.swing,
+            swing_grid: model.swing_grid,
+            beats_per_bar: model.time_signature.beats_per_bar(),
+            tempo_map: TempoMap::constant(model.tempo),
         })
     }
 
@@ -78,17 +90,21 @@ impl Sequence {
             .map(|t| {
                 SequenceTrack::from_track(
                     t,
-                    Arrangement::flattened_notes(&t.id, &model.patterns, &model.arrangement),
+                    Arrangement::flattened_notes(&t.id, &model.patterns, &model.clips),
                 )
             })
             .collect();
-        let total = Arrangement::total_length(&model.patterns, &model.arrangement);
+        let total = Arrangement::total_length(&model.clips);
         let fallback = model.patterns.first().map(|p| p.length_beats).unwrap_or(16.0);
         Sequence {
             tracks,
-            chords: Arrangement::flattened_chords(&model.patterns, &model.arrangement),
+            chords: Arrangement::flattened_chords(&model.patterns, &model.clips),
             length_beats: if total > 0.0 { total } else { fallback },
             tempo_bpm: model.tempo,
+            swing: model.swing,
+            swing_grid: model.swing_grid,
+            beats_per_bar: model.time_signature.beats_per_bar(),
+            tempo_map: model.tempo_map(),
         }
     }
 
@@ -109,7 +125,7 @@ mod tests {
         model.patterns[0]
             .notes_by_track
             .insert(track_id, vec![NoteEvent::new(0.0, 1.0, 60)]);
-        model.arrangement = vec![pattern_id, pattern_id];
+        model.clips = vec![crate::model::Clip::new(pattern_id, 0.0, 16.0), crate::model::Clip::new(pattern_id, 16.0, 16.0)];
 
         let p = Sequence::from_pattern(&model, &pattern_id).unwrap();
         assert_eq!(p.length_beats, 16.0);

@@ -11,6 +11,7 @@
 pub mod arrangement;
 pub mod chord_track;
 pub mod document;
+pub mod midi_file;
 pub mod model;
 pub mod sequence;
 pub mod tempo;
@@ -19,12 +20,13 @@ pub mod theory;
 pub use arrangement::Arrangement;
 pub use chord_track::ChordTrack;
 pub use document::{Command, Document, EditError, TrackParam};
+pub use midi_file::{ImportedMidi, ImportedTrack, MidiError, MidiScope};
 pub use model::{
-    ChordEvent, KeyState, MasterSettings, NoteEvent, ProjectModel, ScaleType, SongPattern, Track,
+    ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, ScaleType, Section, SongPattern, TimeSignature, Track,
     SCHEMA_VERSION,
 };
 pub use sequence::{Sequence, SequenceTrack};
-pub use tempo::Tempo;
+pub use tempo::{swing_warp, Tempo, TempoMap, TempoPoint};
 pub use theory::harmony::{self, ChordSuggestion, ProgressionStarter};
 pub use theory::highlight::HighlightEngine;
 pub use theory::key_detector::{KeyCandidate, KeyDetectionResult, KeyDetector};
