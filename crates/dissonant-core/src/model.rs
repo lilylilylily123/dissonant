@@ -355,16 +355,23 @@ impl ProjectModel {
     }
 
     /// Normalize after decoding a foreign/older file: bump the schema, make sure there is at
-    /// least one track and one pattern, and clamp every note.
+    /// least one track and one pattern, clamp every note, and drop references to things that
+    /// aren't in the project any more.
     pub fn normalized(mut self) -> Self {
-        self.schema_version = SCHEMA_VERSION;
+        // Only ever bump forward: relabelling a newer file as ours would make the next save
+        // overwrite it with fields this version dropped.
+        self.schema_version = self.schema_version.max(SCHEMA_VERSION);
         if self.tracks.is_empty() {
             self.tracks = default_tracks();
         }
         if self.patterns.is_empty() {
             self.patterns = default_patterns();
         }
+        let track_ids: Vec<Uuid> = self.tracks.iter().map(|t| t.id).collect();
         for pattern in &mut self.patterns {
+            // Notes keyed by a track that no longer exists are invisible and never played, but
+            // survive every save; drop them instead of growing the file forever.
+            pattern.notes_by_track.retain(|tid, _| track_ids.contains(tid));
             for notes in pattern.notes_by_track.values_mut() {
                 for n in notes.iter_mut() {
                     *n = n.clone().sanitized();
@@ -381,6 +388,21 @@ impl ProjectModel {
     }
 
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
-        serde_json::from_str::<ProjectModel>(json).map(ProjectModel::normalized)
+        use serde::de::Error;
+        // Every field defaults, and serde also accepts a struct in sequence form — so `[]` and
+        // `[1,2]` would both decode as a blank project and the next save would destroy whatever
+        // file the user actually opened. A project is an object.
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        if !value.is_object() {
+            return Err(serde_json::Error::custom("not a dissonant project: expected a JSON object"));
+        }
+        let decoded: ProjectModel = serde_json::from_value(value)?;
+        if decoded.schema_version > SCHEMA_VERSION {
+            return Err(serde_json::Error::custom(format!(
+                "project was saved by a newer version of dissonant (schema {}, this build reads {})",
+                decoded.schema_version, SCHEMA_VERSION
+            )));
+        }
+        Ok(decoded.normalized())
     }
 }

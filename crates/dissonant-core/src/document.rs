@@ -71,7 +71,9 @@ pub struct Document {
     /// Snapshot taken at the start of a transient gesture, pushed to `undo` when it ends.
     pending: Option<ProjectModel>,
     pub path: Option<std::path::PathBuf>,
-    dirty: bool,
+    /// The model as it was at the last save point; `is_dirty` is a comparison against it rather
+    /// than a sticky flag, so undoing back to the saved state really is "no unsaved changes".
+    saved: Option<ProjectModel>,
 }
 
 const MAX_UNDO: usize = 200;
@@ -79,12 +81,12 @@ const MAX_UNDO: usize = 200;
 impl Document {
     pub fn new(model: ProjectModel) -> Self {
         Document {
+            saved: Some(model.clone()),
             model,
             undo: vec![],
             redo: vec![],
             pending: None,
             path: None,
-            dirty: false,
         }
     }
 
@@ -92,16 +94,21 @@ impl Document {
         &self.model
     }
 
+    /// Unsaved changes, measured against the last save point rather than "an edit happened" —
+    /// undoing back to the saved state (or a gesture that returns to its starting value) leaves
+    /// the document clean, so the quit prompt only fires when the file really differs.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.saved.as_ref() != Some(&self.model)
     }
 
     pub fn mark_saved(&mut self) {
-        self.dirty = false;
+        self.saved = Some(self.model.clone());
     }
 
+    /// True only when an undo would actually change something: an open gesture that has not
+    /// moved off its starting value is not undoable, and promising one lights a dead menu item.
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty() || self.pending.is_some()
+        !self.undo.is_empty() || self.pending.as_ref().is_some_and(|p| p != &self.model)
     }
 
     pub fn can_redo(&self) -> bool {
@@ -128,7 +135,6 @@ impl Document {
         }
         self.redo.clear();
         self.model = next;
-        self.dirty = true;
         Ok(())
     }
 
@@ -146,7 +152,6 @@ impl Document {
         match self.undo.pop() {
             Some(previous) => {
                 self.redo.push(std::mem::replace(&mut self.model, previous));
-                self.dirty = true;
                 true
             }
             None => false,
@@ -158,7 +163,6 @@ impl Document {
         match self.redo.pop() {
             Some(next) => {
                 self.undo.push(std::mem::replace(&mut self.model, next));
-                self.dirty = true;
                 true
             }
             None => false,
@@ -167,12 +171,12 @@ impl Document {
 
     /// Replace the whole model (new / open). Clears history.
     pub fn replace(&mut self, model: ProjectModel, path: Option<std::path::PathBuf>) {
+        self.saved = Some(model.clone());
         self.model = model;
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
         self.path = path;
-        self.dirty = false;
     }
 
     fn push_undo(&mut self, snapshot: ProjectModel) {
@@ -214,7 +218,13 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 p.notes_by_track.remove(&id);
             }
         }
-        RenameTrack { id, name } => m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.name = name,
+        RenameTrack { id, name } => {
+            // Matches RenamePattern: a blank name makes the track unidentifiable everywhere.
+            if name.trim().is_empty() {
+                return Err(EditError::InvalidValue);
+            }
+            m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.name = name;
+        }
         SetTrackMuted { id, muted } => m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.muted = muted,
         SetTrackSoloed { id, soloed } => m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.soloed = soloed,
         MoveTrack { id, up } => {

@@ -87,7 +87,10 @@ impl Sequence {
         Sequence {
             tracks,
             chords: Arrangement::flattened_chords(&model.patterns, &model.arrangement),
-            length_beats: if total > 0.0 { total } else { fallback },
+            // Same floor as `from_pattern`: a loaded project can carry a zero, negative or
+            // non-finite `length_beats` (nothing clamps it on decode), and a non-positive loop
+            // length stops song mode from ever wrapping and makes offline render bail out.
+            length_beats: if total > 0.0 { total } else { fallback }.max(1.0),
             tempo_bpm: model.tempo,
         }
     }
