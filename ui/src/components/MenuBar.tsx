@@ -39,6 +39,7 @@ export function MenuBar() {
       { sep: true },
       { label: "Export WAV…", sc: `${mod}E`, action: () => s.exportWav() },
       { sep: true },
+      { label: "Settings…", sc: `${mod},`, action: () => s.openSettings(true) },
       { label: "Quit", sc: `${mod}Q`, action: () => s.requestClose() },
     ],
     edit: [

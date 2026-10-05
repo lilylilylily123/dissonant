@@ -22,6 +22,12 @@ pub struct RenderOptions {
     pub tail_seconds: f64,
     pub hear_chords: bool,
     pub master: MasterSettings,
+    /// 16 or 24 (integer PCM) or 32 (float).
+    pub bit_depth: u16,
+    /// Scale the whole render so its peak lands at this dBFS (e.g. -1.0); `None` leaves it.
+    pub normalize_db: Option<f32>,
+    /// TPDF dither when writing 16-bit.
+    pub dither: bool,
 }
 
 impl Default for RenderOptions {
@@ -31,6 +37,9 @@ impl Default for RenderOptions {
             tail_seconds: 1.5,
             hear_chords: false,
             master: MasterSettings::default(),
+            bit_depth: 16,
+            normalize_db: None,
+            dither: true,
         }
     }
 }
@@ -63,18 +72,69 @@ pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Res
     Ok(out)
 }
 
-/// Render to a 16-bit stereo WAV file.
+/// Peak-normalize in place to `target_db` dBFS (no-op on silence).
+pub fn normalize(samples: &mut [f32], target_db: f32) {
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak <= 1e-6 {
+        return;
+    }
+    let gain = 10f32.powf(target_db / 20.0) / peak;
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
+}
+
+/// Render to a stereo WAV file at the options' bit depth.
 pub fn render_wav(sequence: Arc<Sequence>, path: &Path, options: &RenderOptions) -> Result<(), RenderError> {
-    let samples = render_to_buffer(sequence, options)?;
+    let mut samples = render_to_buffer(sequence, options)?;
+    if let Some(db) = options.normalize_db {
+        normalize(&mut samples, db);
+    }
+    write_wav(path, &samples, options)
+}
+
+/// Write interleaved stereo f32 as 16 / 24-bit PCM or 32-bit float.
+pub fn write_wav(path: &Path, samples: &[f32], options: &RenderOptions) -> Result<(), RenderError> {
+    let depth = match options.bit_depth {
+        24 => 24,
+        32 => 32,
+        _ => 16,
+    };
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: options.sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        bits_per_sample: depth,
+        sample_format: if depth == 32 { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
     };
     let mut writer = hound::WavWriter::create(path, spec)?;
-    for s in samples {
-        writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+    match depth {
+        32 => {
+            for &s in samples {
+                writer.write_sample(s)?;
+            }
+        }
+        24 => {
+            let scale = 8_388_607.0f32;
+            for &s in samples {
+                writer.write_sample((s.clamp(-1.0, 1.0) * scale).round() as i32)?;
+            }
+        }
+        _ => {
+            // TPDF dither: the sum of two uniform ±0.5 LSB noises, decorrelating quantization.
+            let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+            let mut uniform = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 11) as f32 / (1u64 << 53) as f32 - 0.5
+            };
+            let scale = i16::MAX as f32;
+            for &s in samples {
+                let d = if options.dither { uniform() + uniform() } else { 0.0 };
+                let v = (s.clamp(-1.0, 1.0) * scale + d).round().clamp(i16::MIN as f32, i16::MAX as f32);
+                writer.write_sample(v as i16)?;
+            }
+        }
     }
     writer.finalize()?;
     Ok(())
@@ -105,6 +165,29 @@ mod tests {
         assert_eq!(reader.duration(), 110_250);
         let peak = reader.into_samples::<i16>().map(|s| s.unwrap().abs()).max().unwrap();
         assert!(peak > 1000);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn normalize_hits_the_target_peak_and_24_bit_round_trips() {
+        let mut buf = vec![0.1f32, -0.25, 0.05, 0.0];
+        normalize(&mut buf, -6.0);
+        let peak = buf.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!((peak - 10f32.powf(-6.0 / 20.0)).abs() < 1e-5);
+        let mut silent = vec![0.0f32; 4];
+        normalize(&mut silent, -1.0);
+        assert!(silent.iter().all(|s| *s == 0.0));
+
+        let dir = std::env::temp_dir().join(format!("dissonant-wav-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for depth in [16u16, 24, 32] {
+            let path = dir.join(format!("{depth}.wav"));
+            let opts = RenderOptions { bit_depth: depth, dither: false, ..Default::default() };
+            write_wav(&path, &[0.5, -0.5, 0.25, -0.25], &opts).unwrap();
+            let reader = hound::WavReader::open(&path).unwrap();
+            assert_eq!(reader.spec().bits_per_sample, depth);
+            assert_eq!(reader.duration(), 2);
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 

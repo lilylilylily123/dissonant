@@ -10,6 +10,8 @@ import type {
   MasterSettings,
   MidiStatus,
   NoteEvent,
+  OutputDevice,
+  Settings,
   PlayheadEvent,
   PlayMode,
   ProjectModel,
@@ -18,7 +20,7 @@ import type {
   Track,
   SongPattern,
 } from "./types";
-import { uuid } from "./types";
+import { uuid, withDefaults } from "./types";
 import { normalize, progression, STARTERS } from "./theory";
 
 export interface Bridge {
@@ -74,6 +76,13 @@ export interface Bridge {
   restoreAutosave(autosavePath: string): Promise<Snapshot>;
   discardAutosave(autosavePath: string): Promise<void>;
   autosaveNow(): Promise<string | null>;
+  getSettings(): Promise<Settings>;
+  /** Persist settings; the backend restarts audio / reopens MIDI as needed and returns the audio status. */
+  setSettings(settings: Settings): Promise<AudioStatus>;
+  outputDevices(): Promise<OutputDevice[]>;
+  testTone(): Promise<void>;
+  /** The backend opened or dropped a MIDI input on its own. */
+  onMidiStatus(cb: (s: MidiStatus) => void): () => void;
 }
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -158,6 +167,11 @@ async function tauriBridge(): Promise<Bridge> {
     restoreAutosave: (autosavePath) => invoke<Snapshot>("restore_autosave", { autosavePath }),
     discardAutosave: (autosavePath) => invoke("discard_autosave", { autosavePath }),
     autosaveNow: () => invoke<string | null>("autosave_now"),
+    getSettings: async () => withDefaults(await invoke<Partial<Settings>>("get_settings")),
+    setSettings: (settings) => invoke<AudioStatus>("set_settings", { settings }),
+    outputDevices: () => invoke<OutputDevice[]>("output_devices"),
+    testTone: () => invoke("test_tone"),
+    onMidiStatus: (cb) => subscribe<MidiStatus>("midi-status", cb),
   };
 }
 
@@ -668,6 +682,27 @@ function mockBridge(): Bridge {
     restoreAutosave: async () => snapshot(),
     discardAutosave: async () => {},
     autosaveNow: async () => null,
+    getSettings: async () => {
+      try {
+        return withDefaults(JSON.parse(localStorage.getItem("dissonant.mock.settings") ?? "null"));
+      } catch {
+        return withDefaults(null);
+      }
+    },
+    setSettings: async (settings) => {
+      try {
+        localStorage.setItem("dissonant.mock.settings", JSON.stringify(settings));
+      } catch {
+        /* storage unavailable */
+      }
+      return { running: false, sampleRate: null, error: "browser mock: no engine" };
+    },
+    outputDevices: async () => [
+      { name: "System default", isDefault: true, sampleRates: [44100, 48000, 96000], defaultSampleRate: 48000 },
+      { name: "Mock interface", isDefault: false, sampleRates: [44100, 48000, 88200, 96000, 192000], defaultSampleRate: 44100 },
+    ],
+    testTone: async () => blip(69, 100),
+    onMidiStatus: () => () => {},
   };
 }
 

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, KeyState, MidiStatus, PlayMode, RecoveryCandidate, Snapshot, SongPattern, Track } from "./types";
-import { beatsPerBar as bpbOf, fileNameOf, keyAt } from "./types";
+import type { AudioStatus, Command, KeyState, MidiStatus, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, Track } from "./types";
+import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
   text: string;
@@ -49,6 +49,9 @@ interface State {
   toast: Toast | null;
   dialog: DialogSpec | null;
   recent: string[];
+  settings: Settings;
+  settingsOpen: boolean;
+  outputDevices: OutputDevice[];
   looping: boolean;
   loopRegion: [number, number] | null;
   armed: boolean;
@@ -114,6 +117,31 @@ interface State {
   requestClose(): Promise<void>;
   refreshRecent(): Promise<void>;
   clearRecent(): Promise<void>;
+  openSettings(open?: boolean): void;
+  /** Merge a partial patch into one settings section, persist, and apply it. */
+  updateSettings<K extends keyof Settings>(section: K, patch: Partial<Settings[K]>): Promise<void>;
+  refreshOutputDevices(): Promise<void>;
+  testTone(): void;
+  refreshAudio(): Promise<void>;
+}
+
+/** Push the appearance section into CSS variables, the live tier palette and the page zoom. */
+export function applyAppearance(a: Settings["appearance"]) {
+  const root = document.documentElement;
+  TIER_COLORS.chordTone = a.tierColors.chordTone;
+  TIER_COLORS.tension = a.tierColors.tension;
+  TIER_COLORS.dissonance = a.tierColors.dissonance;
+  root.style.setProperty("--tier-solid", a.tierColors.chordTone);
+  root.style.setProperty("--tier-tension", a.tierColors.tension);
+  root.style.setProperty("--tier-dissonance", a.tierColors.dissonance);
+  root.style.setProperty("--ok", a.tierColors.chordTone);
+  root.style.setProperty("--accent", a.accent);
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(a.accent.slice(i, i + 2), 16));
+  root.style.setProperty("--accent-rgb", `${r}, ${g}, ${b}`);
+  root.style.setProperty("--accent-bg", `rgba(${r}, ${g}, ${b}, 0.16)`);
+  root.style.setProperty("--accent-border", `rgba(${r}, ${g}, ${b}, 0.45)`);
+  (root.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(a.uiScale);
+  root.classList.toggle("reduced-motion", a.reducedMotion);
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -199,6 +227,9 @@ export const useStore = create<State>((set, get) => {
     toast: null,
     dialog: null,
     recent: [],
+    settings: DEFAULT_SETTINGS,
+    settingsOpen: false,
+    outputDevices: [],
     looping: true,
     loopRegion: null,
     armed: false,
@@ -210,6 +241,13 @@ export const useStore = create<State>((set, get) => {
 
     async init() {
       const b = await getBridge();
+      try {
+        const settings = await b.getSettings();
+        set({ settings, noteLength: settings.editing.defaultGrid });
+        applyAppearance(settings.appearance);
+      } catch (e) {
+        console.warn("settings unavailable", e);
+      }
       applySnapshot(await b.getState());
       await syncPlayback();
       await b.setLiveTrack(get().selectedTrackId);
@@ -222,6 +260,14 @@ export const useStore = create<State>((set, get) => {
         set({ audio: e.status });
         get().showToast(e.message, !e.status.running);
       });
+      b.onMidiStatus((midi) => {
+        const before = get().midi?.open ?? null;
+        set({ midi });
+        if (midi.open && midi.open !== before) get().showToast(`MIDI in: ${midi.open}`);
+        else if (!midi.open && before) get().showToast(`MIDI in: ${before} disconnected`, true);
+      });
+      // Engine load / xruns in the status bar.
+      setInterval(() => void get().refreshAudio(), 2000);
       const audio = await b.audioStatus();
       set({ audio });
       if (!audio.running && b.isTauri) get().showToast(`audio: ${audio.error ?? "not running"}`, true);
@@ -482,6 +528,7 @@ export const useStore = create<State>((set, get) => {
       resolve?.(value);
     },
     async confirm(title, message, okLabel = "OK", danger = false) {
+      if (danger && !get().settings.editing.confirmDestructive) return true;
       const v = await get().ask({
         title,
         message,
@@ -539,6 +586,46 @@ export const useStore = create<State>((set, get) => {
       const b = await getBridge();
       await b.clearRecent();
       set({ recent: [] });
+    },
+
+    openSettings(open = true) {
+      set({ settingsOpen: open });
+      if (open) {
+        void get().refreshOutputDevices();
+        void get().refreshMidi();
+      }
+    },
+    async updateSettings(section, patch) {
+      const b = await getBridge();
+      const next: Settings = { ...get().settings, [section]: { ...get().settings[section], ...patch } };
+      set({ settings: next });
+      if (section === "appearance") applyAppearance(next.appearance);
+      try {
+        const audio = await b.setSettings(next);
+        if (b.isTauri) set({ audio });
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async refreshOutputDevices() {
+      const b = await getBridge();
+      try {
+        set({ outputDevices: await b.outputDevices() });
+      } catch {
+        /* no backend */
+      }
+    },
+    testTone() {
+      void getBridge().then((b) => b.testTone());
+    },
+    async refreshAudio() {
+      const b = await getBridge();
+      if (!b.isTauri) return;
+      try {
+        set({ audio: await b.audioStatus() });
+      } catch {
+        /* ignore */
+      }
     },
   };
 });

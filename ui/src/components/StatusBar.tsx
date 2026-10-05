@@ -30,6 +30,11 @@ export function StatusBar() {
         {snapshot.undoLabel && <span style={{ color: "var(--text-5)", marginLeft: 4 }}>{snapshot.undoLabel}</span>}
       </span>
       <span title={snapshot.redoLabel ? `redo ${snapshot.redoLabel}` : "nothing to redo"}>REDO {snapshot.canRedo ? "●" : "○"}</span>
+      {audio?.running && audio.blockFrames ? (
+        <span title={`engine load · ${audio.blockFrames} frames per block · ${(audio.latencyMs ?? 0).toFixed(1)} ms`} style={{ color: (audio.load ?? 0) > 0.8 ? "var(--warn)" : undefined }}>
+          cpu {Math.round((audio.load ?? 0) * 100)}%{audio.xruns ? ` · ${audio.xruns} xrun${audio.xruns === 1 ? "" : "s"}` : ""}
+        </span>
+      ) : null}
       <span>{audio?.sampleRate ? `${audio.sampleRate / 1000} kHz` : "—"}</span>
       <span style={{ color: "var(--text-3)" }}>v0.2.0</span>
     </div>

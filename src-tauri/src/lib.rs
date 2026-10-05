@@ -2,8 +2,11 @@
 //! and streams the playhead back as events. All model edits go through `apply`, which keeps
 //! undo/redo in one place and re-feeds the engine a fresh [`Sequence`] after every change.
 
+pub mod settings;
+
 use dissonant_core::{Command, Document, MasterSettings, NoteEvent, ProjectModel, Sequence};
-use dissonant_engine::{default_output_name, render_wav, AudioDevice, EngineCommand, RenderOptions};
+use dissonant_engine::{default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, EngineCommand, RenderOptions};
+use settings::{NewProjectKind, Settings};
 use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -73,6 +76,7 @@ pub struct AppState {
     autosave_path: Mutex<Option<PathBuf>>,
     /// Set by `quit` so the close handler lets the window go.
     force_close: AtomicBool,
+    settings: Mutex<Settings>,
 }
 
 /// What every editing command returns to the UI.
@@ -132,6 +136,24 @@ pub struct AudioStatus {
     pub sample_rate: Option<u32>,
     pub error: Option<String>,
     pub device_name: Option<String>,
+    /// The fixed buffer size in force, if one was requested and accepted.
+    pub buffer_size: Option<u32>,
+    /// Frames per callback as last observed (what latency really is).
+    pub block_frames: u32,
+    /// Output latency implied by the block size, in ms.
+    pub latency_ms: f64,
+    /// 0…1+: render time over block time, smoothed.
+    pub load: f32,
+    pub xruns: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDevice {
+    pub name: String,
+    pub is_default: bool,
+    pub sample_rates: Vec<u32>,
+    pub default_sample_rate: u32,
 }
 
 impl AppState {
@@ -150,6 +172,24 @@ impl AppState {
             autosaved_revision: AtomicU64::new(0),
             autosave_path: Mutex::new(None),
             force_close: AtomicBool::new(false),
+            settings: Mutex::new(Settings::default()),
+        }
+    }
+
+    fn settings(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    fn settings_path(&self) -> Option<PathBuf> {
+        self.data_dir().map(|d| d.join("settings.json"))
+    }
+
+    fn audio_config(&self) -> AudioConfig {
+        let a = self.settings.lock().unwrap().audio.clone();
+        AudioConfig {
+            device: a.device,
+            sample_rate: a.sample_rate,
+            buffer_size: a.buffer_size,
         }
     }
 
@@ -180,11 +220,19 @@ impl AppState {
 
     fn audio_status(&self) -> AudioStatus {
         let audio = self.audio.lock().unwrap();
+        let shared = audio.as_ref().map(|a| a.shared());
+        let block = shared.map(|s| s.block_frames()).unwrap_or(0);
+        let sr = audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
         AudioStatus {
             running: audio.is_some(),
             sample_rate: audio.as_ref().map(|a| a.sample_rate),
             error: self.audio_error.lock().unwrap().clone(),
             device_name: audio.as_ref().map(|a| a.device_name.clone()),
+            buffer_size: audio.as_ref().and_then(|a| a.buffer_size),
+            block_frames: block,
+            latency_ms: if sr > 0 { block as f64 * 1000.0 / sr as f64 } else { 0.0 },
+            load: shared.map(|s| s.load()).unwrap_or(0.0),
+            xruns: shared.map(|s| s.xruns()).unwrap_or(0),
         }
     }
 
@@ -382,7 +430,7 @@ impl AppState {
 
     fn start_audio(&self) {
         let master = self.doc.lock().unwrap().model().master.clone();
-        match AudioDevice::start(master) {
+        match AudioDevice::start_with(master, self.audio_config()) {
             Ok(device) => {
                 *self.audio.lock().unwrap() = Some(device);
                 *self.audio_error.lock().unwrap() = None;
@@ -454,13 +502,38 @@ fn redo(state: State<'_, AppState>) -> Snapshot {
     state.snapshot()
 }
 
+/// A new project shaped by the editing defaults (tempo, time signature, pattern length,
+/// starter vs empty). An explicit `starter` overrides the setting.
 #[tauri::command]
 fn new_project(state: State<'_, AppState>, starter: Option<bool>) -> Snapshot {
-    let model = if starter.unwrap_or(true) {
-        ProjectModel::starter()
-    } else {
-        ProjectModel::empty()
-    };
+    let e = state.settings().editing;
+    let starter = starter.unwrap_or(e.new_project == NewProjectKind::Starter);
+    let mut model = if starter { ProjectModel::starter() } else { ProjectModel::empty() };
+    model.tempo = e.default_tempo;
+    model.time_signature = e.default_time_signature;
+    let beats = e.default_pattern_bars as f64 * e.default_time_signature.beats_per_bar();
+    if beats != model.patterns[0].length_beats && !starter {
+        model.patterns[0].length_beats = beats;
+    } else if beats != model.patterns[0].length_beats {
+        // Keep the starter's progression but stretch its chords and clip to the new length.
+        let scale = beats / model.patterns[0].length_beats;
+        let chords: Vec<_> = model.patterns[0]
+            .chords
+            .chords()
+            .iter()
+            .cloned()
+            .map(|mut c| {
+                c.start_beat *= scale;
+                c.length_beats *= scale;
+                c
+            })
+            .collect();
+        model.patterns[0].chords = dissonant_core::ChordTrack::new(chords);
+        model.patterns[0].length_beats = beats;
+        for clip in &mut model.clips {
+            clip.length_beats = beats;
+        }
+    }
     state.load_model(model, None, false);
     state.snapshot()
 }
@@ -629,6 +702,10 @@ fn midi_inputs() -> Vec<String> {
 fn live_note_on(app: &AppHandle, pitch: u8, velocity: u8) {
     let state = app.state::<AppState>();
     let Some(track_id) = state.live_track() else { return };
+    let velocity = {
+        let s = state.settings.lock().unwrap();
+        s.midi.velocity_curve.apply(velocity, s.editing.default_velocity)
+    };
     state.send(EngineCommand::NoteOn { track_id, pitch, velocity });
     state.midi_last_ms.store(now_ms(), Ordering::Relaxed);
     let mut rec = state.recorder.lock().unwrap();
@@ -689,17 +766,27 @@ fn live_note_off(app: &AppHandle, pitch: u8) {
     }
 }
 
-#[tauri::command]
-fn midi_status(state: State<'_, AppState>) -> MidiStatus {
-    MidiStatus {
-        inputs: midi_inputs(),
-        open: state.midi_port.lock().unwrap().clone(),
-        armed: state.recorder.lock().unwrap().armed,
+impl AppState {
+    fn midi_status(&self) -> MidiStatus {
+        MidiStatus {
+            inputs: midi_inputs(),
+            open: self.midi_port.lock().unwrap().clone(),
+            armed: self.recorder.lock().unwrap().armed,
+        }
     }
 }
 
 #[tauri::command]
+fn midi_status(state: State<'_, AppState>) -> MidiStatus {
+    state.midi_status()
+}
+
+#[tauri::command]
 fn open_midi_input(app: AppHandle, state: State<'_, AppState>, name: Option<String>) -> Result<MidiStatus, String> {
+    open_midi(&app, &state, name)
+}
+
+fn open_midi(app: &AppHandle, state: &AppState, name: Option<String>) -> Result<MidiStatus, String> {
     let input = MidiInput::new("dissonant").map_err(|e| e.to_string())?;
     let ports = input.ports();
     let port = match &name {
@@ -718,9 +805,20 @@ fn open_midi_input(app: AppHandle, state: State<'_, AppState>, name: Option<Stri
                 if message.len() < 3 {
                     return;
                 }
+                let (channel_filter, octave) = {
+                    let s = handle.state::<AppState>();
+                    let s = s.settings.lock().unwrap();
+                    (s.midi.channel, s.midi.octave_offset)
+                };
+                if let Some(ch) = channel_filter {
+                    if (message[0] & 0x0F) + 1 != ch {
+                        return;
+                    }
+                }
+                let pitch = (message[1] as i32 + octave as i32 * 12).clamp(0, 127) as u8;
                 match message[0] & 0xF0 {
-                    0x90 if message[2] > 0 => live_note_on(&handle, message[1], message[2]),
-                    0x80 | 0x90 => live_note_off(&handle, message[1]),
+                    0x90 if message[2] > 0 => live_note_on(&handle, pitch, message[2]),
+                    0x80 | 0x90 => live_note_off(&handle, pitch),
                     _ => {}
                 }
             },
@@ -729,7 +827,7 @@ fn open_midi_input(app: AppHandle, state: State<'_, AppState>, name: Option<Stri
         .map_err(|e| e.to_string())?;
     *state.midi.lock().unwrap() = Some(conn);
     *state.midi_port.lock().unwrap() = Some(port_name);
-    Ok(midi_status(state))
+    Ok(state.midi_status())
 }
 
 #[tauri::command]
@@ -737,6 +835,33 @@ fn close_midi_input(state: State<'_, AppState>) -> MidiStatus {
     *state.midi.lock().unwrap() = None;
     *state.midi_port.lock().unwrap() = None;
     midi_status(state)
+}
+
+/// Keeps the default MIDI input open: reopens it when it reappears and drops the connection
+/// (telling the UI) when the device goes away. Runs every few seconds.
+fn midi_housekeeping(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let (wanted, auto) = {
+        let s = state.settings.lock().unwrap();
+        (s.midi.default_input.clone(), s.midi.auto_reconnect)
+    };
+    let open = state.midi_port.lock().unwrap().clone();
+    let inputs = midi_inputs();
+    if let Some(name) = &open {
+        if !inputs.contains(name) {
+            *state.midi.lock().unwrap() = None;
+            *state.midi_port.lock().unwrap() = None;
+            let _ = app.emit("midi-status", state.midi_status());
+            return;
+        }
+    }
+    if auto && open.is_none() {
+        if let Some(name) = wanted.filter(|n| inputs.contains(n)) {
+            if open_midi(app, &state, Some(name)).is_ok() {
+                let _ = app.emit("midi-status", state.midi_status());
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -805,11 +930,15 @@ async fn export_wav(state: State<'_, AppState>, path: String, tail_seconds: Opti
         };
         (seq, doc.model().master.clone(), ctx.hear_chords)
     };
+    let x = state.settings().export;
     let options = RenderOptions {
-        sample_rate: 44_100,
-        tail_seconds: tail_seconds.unwrap_or(1.5),
+        sample_rate: x.sample_rate,
+        tail_seconds: tail_seconds.unwrap_or(x.tail_seconds),
         hear_chords,
         master,
+        bit_depth: x.bit_depth,
+        normalize_db: if x.normalize { Some(x.normalize_db) } else { None },
+        dither: x.dither,
     };
     let target = PathBuf::from(&path);
     let result = tauri::async_runtime::spawn_blocking(move || render_wav(Arc::new(sequence), &target, &options))
@@ -818,6 +947,57 @@ async fn export_wav(state: State<'_, AppState>, path: String, tail_seconds: Opti
         .and_then(|r| r.map_err(|e| e.to_string()));
     state.exporting.store(false, Ordering::SeqCst);
     result.map(|_| path)
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Settings {
+    state.settings()
+}
+
+/// Store new settings and apply the ones that need the backend: the audio device config
+/// (restarting the engine when it changed) and the default MIDI input.
+#[tauri::command]
+fn set_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<AudioStatus, String> {
+    let settings = settings.sanitized();
+    let (audio_changed, midi_changed) = {
+        let mut current = state.settings.lock().unwrap();
+        let audio_changed = current.audio != settings.audio;
+        let midi_changed = current.midi.default_input != settings.midi.default_input;
+        *current = settings.clone();
+        (audio_changed, midi_changed)
+    };
+    if let Some(path) = state.settings_path() {
+        settings.save(&path).map_err(|e| format!("could not save settings: {e}"))?;
+    }
+    if audio_changed {
+        state.restart_audio();
+    }
+    if midi_changed {
+        if let Some(name) = &settings.midi.default_input {
+            let _ = open_midi(&app, &state, Some(name.clone()));
+        }
+    }
+    Ok(state.audio_status())
+}
+
+#[tauri::command]
+fn output_devices() -> Vec<OutputDevice> {
+    list_output_devices()
+        .into_iter()
+        .map(|d| OutputDevice {
+            name: d.name,
+            is_default: d.is_default,
+            sample_rates: d.sample_rates,
+            default_sample_rate: d.default_sample_rate,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn test_tone(state: State<'_, AppState>) {
+    state.send(EngineCommand::TestTone);
 }
 
 // ─── Wiring ──────────────────────────────────────────────────────────────────────────────────
@@ -872,8 +1052,13 @@ fn spawn_audio_watchdog(app: AppHandle) {
         .name("dissonant-audio-watchdog".into())
         .spawn(move || {
             let mut last_attempt = std::time::Instant::now();
+            let mut tick = 0u32;
             loop {
                 std::thread::sleep(Duration::from_millis(1000));
+                tick = tick.wrapping_add(1);
+                if tick.is_multiple_of(3) {
+                    midi_housekeeping(&app);
+                }
                 let state = app.state::<AppState>();
                 let (running, failed, current) = {
                     let audio = state.audio.lock().unwrap();
@@ -940,12 +1125,18 @@ pub fn run() {
             match app.path().app_data_dir() {
                 Ok(dir) => {
                     let _ = std::fs::create_dir_all(&dir);
+                    *state.settings.lock().unwrap() = Settings::load(&dir.join("settings.json"));
                     *state.data_dir.lock().unwrap() = Some(dir);
                 }
                 Err(e) => log::warn!("no app data dir: {e}"),
             }
             state.start_audio();
             state.sync_engine();
+            if let Some(name) = state.settings().midi.default_input {
+                if let Err(e) = open_midi(app.handle(), &state, Some(name)) {
+                    log::info!("default MIDI input not opened: {e}");
+                }
+            }
             spawn_playhead_emitter(app.handle().clone());
             spawn_audio_watchdog(app.handle().clone());
             spawn_autosaver(app.handle().clone());
@@ -1012,6 +1203,10 @@ pub fn run() {
             restore_autosave,
             discard_autosave,
             autosave_now,
+            get_settings,
+            set_settings,
+            output_devices,
+            test_tone,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

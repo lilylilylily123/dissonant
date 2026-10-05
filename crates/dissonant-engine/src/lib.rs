@@ -20,6 +20,6 @@ pub mod engine;
 pub mod render;
 pub mod synth;
 
-pub use device::{default_output_name, AudioDevice, DeviceError};
+pub use device::{default_output_name, list_output_devices, AudioConfig, AudioDevice, DeviceError, OutputDeviceInfo};
 pub use engine::{Engine, EngineCommand, Shared, MAX_TRACKS};
-pub use render::{render_wav, RenderError, RenderOptions};
+pub use render::{normalize, render_to_buffer, render_wav, write_wav, RenderError, RenderOptions};

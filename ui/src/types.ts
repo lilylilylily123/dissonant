@@ -197,6 +197,91 @@ export interface AudioStatus {
   sampleRate: number | null;
   error: string | null;
   deviceName?: string | null;
+  bufferSize?: number | null;
+  blockFrames?: number;
+  latencyMs?: number;
+  load?: number;
+  xruns?: number;
+}
+
+export interface OutputDevice {
+  name: string;
+  isDefault: boolean;
+  sampleRates: number[];
+  defaultSampleRate: number;
+}
+
+// ─── Settings (mirrors src-tauri/src/settings.rs) ──────────────────────────────────────────
+
+export type VelocityCurve = "linear" | "soft" | "hard" | "fixed";
+export type NewProjectKind = "starter" | "empty";
+export type AltKey = "noSnap" | "paint";
+
+export interface TierColors {
+  chordTone: string;
+  tension: string;
+  dissonance: string;
+}
+
+export interface Settings {
+  audio: { device: string | null; sampleRate: number | null; bufferSize: number | null };
+  midi: { defaultInput: string | null; autoReconnect: boolean; velocityCurve: VelocityCurve; channel: number | null; octaveOffset: number };
+  editing: {
+    defaultGrid: number;
+    defaultNoteLength: number;
+    defaultVelocity: number;
+    defaultPatternBars: number;
+    defaultTempo: number;
+    defaultTimeSignature: TimeSignature;
+    newProject: NewProjectKind;
+    auditionOnPlace: boolean;
+    confirmDestructive: boolean;
+    altKey: AltKey;
+    snapToChords: boolean;
+  };
+  export: { sampleRate: number; bitDepth: 16 | 24 | 32; dither: boolean; normalize: boolean; normalizeDb: number; tailSeconds: number };
+  appearance: { uiScale: number; rowHeight: number; reducedMotion: boolean; tierColors: TierColors; accent: string };
+}
+
+export const DEFAULT_TIER_COLORS: TierColors = { chordTone: "#3dffb0", tension: "#ff9d2a", dissonance: "#ff3b30" };
+
+/** Tier palettes: the default, and an Okabe–Ito set that survives red-green and blue-yellow CVD. */
+export const TIER_PRESETS: { name: string; colors: TierColors }[] = [
+  { name: "default", colors: DEFAULT_TIER_COLORS },
+  { name: "okabe–ito (color-blind safe)", colors: { chordTone: "#56b4e9", tension: "#f0e442", dissonance: "#d55e00" } },
+  { name: "cool", colors: { chordTone: "#4dd2ff", tension: "#c9b3ff", dissonance: "#ff5f9e" } },
+];
+
+export const DEFAULT_SETTINGS: Settings = {
+  audio: { device: null, sampleRate: null, bufferSize: null },
+  midi: { defaultInput: null, autoReconnect: true, velocityCurve: "linear", channel: null, octaveOffset: 0 },
+  editing: {
+    defaultGrid: 0.25,
+    defaultNoteLength: 0.25,
+    defaultVelocity: 100,
+    defaultPatternBars: 4,
+    defaultTempo: 120,
+    defaultTimeSignature: { numerator: 4, denominator: 4 },
+    newProject: "starter",
+    auditionOnPlace: true,
+    confirmDestructive: true,
+    altKey: "noSnap",
+    snapToChords: false,
+  },
+  export: { sampleRate: 44100, bitDepth: 16, dither: true, normalize: false, normalizeDb: -1, tailSeconds: 1.5 },
+  appearance: { uiScale: 1, rowHeight: 18, reducedMotion: false, tierColors: DEFAULT_TIER_COLORS, accent: "#b48cff" },
+};
+
+/** Deep-merge a (possibly partial / older) settings object over the defaults. */
+export function withDefaults(s: Partial<Settings> | null | undefined): Settings {
+  const d = DEFAULT_SETTINGS;
+  return {
+    audio: { ...d.audio, ...(s?.audio ?? {}) },
+    midi: { ...d.midi, ...(s?.midi ?? {}) },
+    editing: { ...d.editing, ...(s?.editing ?? {}), defaultTimeSignature: { ...d.editing.defaultTimeSignature, ...(s?.editing?.defaultTimeSignature ?? {}) } },
+    export: { ...d.export, ...(s?.export ?? {}) },
+    appearance: { ...d.appearance, ...(s?.appearance ?? {}), tierColors: { ...d.appearance.tierColors, ...(s?.appearance?.tierColors ?? {}) } },
+  };
 }
 
 export interface AudioStatusEvent {
@@ -232,11 +317,22 @@ export function trackColor(track: Track, index: number): string {
   return track.color ?? TRACK_PALETTE[index % 11];
 }
 
-export const TIER_COLORS: Record<Tier, string> = {
-  chordTone: "#3dffb0",
-  tension: "#ff9d2a",
-  dissonance: "#ff3b30",
-};
+/** Live tier colors. Mutated in place by the appearance settings so every canvas reads the current set. */
+export const TIER_COLORS: Record<Tier, string> = { ...DEFAULT_TIER_COLORS };
+
+/** `#rrggbb` → [r, g, b] */
+export function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.replace("#", ""), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** Blend `hex` toward `toward` (another hex) by `t` in 0…1. */
+export function mixHex(hex: string, toward: string, t: number): string {
+  const a = hexToRgb(hex);
+  const b = hexToRgb(toward);
+  const c = a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  return `#${c.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
 
 /** Drum kit rows, top to bottom. Mirrors `dissonant_engine::drums::KIT`. */
 export const DRUM_KIT: { name: string; pitch: number }[] = [

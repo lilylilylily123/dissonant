@@ -19,6 +19,12 @@ pub struct Shared {
     /// Per-track peak (index = position in the current sequence), as f32 bits.
     track_peaks: [AtomicU32; MAX_TRACKS],
     master_peak: [AtomicU32; 2],
+    /// Frames per device callback, as last observed.
+    block_frames: AtomicU32,
+    /// Render time / block time, smoothed, as f32 bits (1.0 = no headroom left).
+    load: AtomicU32,
+    /// Callback gaps detected since the stream started.
+    xruns: AtomicU32,
 }
 
 impl Default for Shared {
@@ -29,6 +35,9 @@ impl Default for Shared {
             sample_rate: AtomicU32::new(44_100),
             track_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
             master_peak: [AtomicU32::new(0), AtomicU32::new(0)],
+            block_frames: AtomicU32::new(0),
+            load: AtomicU32::new(0),
+            xruns: AtomicU32::new(0),
         }
     }
 }
@@ -55,6 +64,23 @@ impl Shared {
             f32::from_bits(self.master_peak[1].load(Ordering::Relaxed)),
         )
     }
+    pub fn block_frames(&self) -> u32 {
+        self.block_frames.load(Ordering::Relaxed)
+    }
+    /// 0.0 … 1.0+ : fraction of each block's time budget spent rendering.
+    pub fn load(&self) -> f32 {
+        f32::from_bits(self.load.load(Ordering::Relaxed))
+    }
+    pub fn xruns(&self) -> u32 {
+        self.xruns.load(Ordering::Relaxed)
+    }
+    pub fn set_stats(&self, block_frames: u32, load: f32) {
+        self.block_frames.store(block_frames, Ordering::Relaxed);
+        self.load.store(load.to_bits(), Ordering::Relaxed);
+    }
+    pub fn note_xrun(&self) {
+        self.xruns.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Messages from the application to the audio thread.
@@ -79,6 +105,8 @@ pub enum EngineCommand {
     Audition { track_id: Uuid, pitch: u8, velocity: u8 },
     /// Release an audition note early (typing keyboard key-up).
     AuditionOff { track_id: Uuid, pitch: u8 },
+    /// A short sine on the master bus, for checking the output device from Settings.
+    TestTone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,6 +149,8 @@ pub struct Engine {
     events: Vec<Event>,
     sounding_chord: Option<Uuid>,
     auditions: Vec<Audition>,
+    /// Samples of test tone left to play, and its phase.
+    test_tone: (usize, f32),
 }
 
 impl Engine {
@@ -145,7 +175,12 @@ impl Engine {
             events: Vec::with_capacity(512),
             sounding_chord: None,
             auditions: Vec::with_capacity(32),
+            test_tone: (0, 0.0),
         }
+    }
+
+    pub fn shared(&self) -> &Arc<Shared> {
+        &self.shared
     }
 
     pub fn position(&self) -> f64 {
@@ -220,6 +255,7 @@ impl Engine {
                 }
                 self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
+            EngineCommand::TestTone => self.test_tone = ((self.sample_rate * 0.6) as usize, 0.0),
         }
         self.publish();
     }
@@ -332,6 +368,25 @@ impl Engine {
 
         let (l, r) = (&mut self.mix_l[..frames], &mut self.mix_r[..frames]);
         self.master.process(l, r);
+        if self.test_tone.0 > 0 {
+            // 440 Hz at -12 dBFS with a 10 ms fade at both ends, after the master chain so it
+            // reaches the device no matter how the mix is set.
+            let total = (self.sample_rate * 0.6) as usize;
+            let fade = (self.sample_rate * 0.01).max(1.0) as usize;
+            let step = 2.0 * std::f32::consts::PI * 440.0 / self.sample_rate;
+            for i in 0..frames {
+                if self.test_tone.0 == 0 {
+                    break;
+                }
+                let done = total - self.test_tone.0;
+                let env = (done.min(fade) as f32 / fade as f32).min(self.test_tone.0.min(fade) as f32 / fade as f32);
+                let s = self.test_tone.1.sin() * 0.25 * env;
+                l[i] += s;
+                r[i] += s;
+                self.test_tone.1 = (self.test_tone.1 + step) % (2.0 * std::f32::consts::PI);
+                self.test_tone.0 -= 1;
+            }
+        }
         for i in 0..frames {
             out[2 * i] = l[i];
             out[2 * i + 1] = r[i];

@@ -1778,3 +1778,103 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ─── Settings window ───────────────────────────────────────────────────────────────────── */
+.modal.settings {
+  width: 640px;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.settings .shead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-1);
+}
+.settings .sbody {
+  display: flex;
+  min-height: 360px;
+}
+.settings .stabs {
+  width: 120px;
+  border-right: 1px solid var(--line-1);
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-1);
+}
+.settings .stabs > div {
+  padding: 6px 8px;
+  border-radius: 2px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  cursor: default;
+}
+.settings .stabs > div:hover {
+  color: var(--text-2);
+}
+.settings .stabs > div.on {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.settings .spane {
+  flex: 1;
+  padding: 10px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+}
+.settings .srow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+}
+.settings .slabel {
+  width: 150px;
+  flex: none;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+.settings .sctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.settings .sctl .k {
+  font-size: 10px;
+  color: var(--text-5);
+}
+.settings .sdiv {
+  height: 1px;
+  background: var(--line-1);
+  margin: 6px 0;
+}
+.settings .scap {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-5);
+}
+.settings input[type="color"] {
+  width: 28px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  background: transparent;
+}
+:root.reduced-motion * {
+  transition: none !important;
+  animation: none !important;
+}
