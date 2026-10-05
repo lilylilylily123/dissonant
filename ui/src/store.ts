@@ -51,7 +51,8 @@ interface State {
   rewind(): void;
   seek(beat: number): void;
   tapTempo(): void;
-  audition(pitch: number, velocity?: number): void;
+  /** Preview a pitch. `beats` defaults to the current grid, so a preview never outlasts the note. */
+  audition(pitch: number, velocity?: number, beats?: number): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
   saveProject(saveAs?: boolean): Promise<void>;
@@ -205,10 +206,12 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    audition(pitch, velocity = 100) {
-      const id = get().selectedTrackId;
+    audition(pitch, velocity = 100, beats) {
+      const { selectedTrackId: id, noteLength, snapshot } = get();
       if (!id) return;
-      void getBridge().then((b) => b.audition(id, pitch, velocity));
+      const bpm = snapshot?.model.tempo ?? 120;
+      const seconds = ((beats ?? noteLength) * 60) / bpm;
+      void getBridge().then((b) => b.audition(id, pitch, velocity, seconds));
     },
 
     async newProject() {

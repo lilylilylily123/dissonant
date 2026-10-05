@@ -252,11 +252,12 @@ fn set_hear_chords(state: State<'_, AppState>, on: bool) {
 }
 
 #[tauri::command]
-fn audition(state: State<'_, AppState>, track_id: Uuid, pitch: u8, velocity: Option<u8>) {
+fn audition(state: State<'_, AppState>, track_id: Uuid, pitch: u8, velocity: Option<u8>, seconds: Option<f32>) {
     state.send(EngineCommand::Audition {
         track_id,
         pitch,
         velocity: velocity.unwrap_or(100),
+        seconds: seconds.unwrap_or(0.25),
     });
 }
 

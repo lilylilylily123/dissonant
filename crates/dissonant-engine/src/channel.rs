@@ -110,6 +110,9 @@ impl Channel {
             self.mono.resize(frames, 0.0);
         }
         if self.instrument.is_silent() && self.reverb.wet <= 0.0001 {
+            // Nothing to render, but the meter still has to fall back to zero — otherwise it
+            // freezes at whatever the last audible block measured and the UI stays lit.
+            self.hold_peak(0.0, frames);
             return;
         }
         let mono = &mut self.mono[..frames];
@@ -124,7 +127,38 @@ impl Channel {
             mix_r[i] += r;
             peak = peak.max(l.abs().max(r.abs()));
         }
-        self.peak = peak.max(self.peak * 0.8);
+        self.hold_peak(peak, frames);
+    }
+
+    fn hold_peak(&mut self, block_peak: f32, frames: usize) {
+        self.peak = hold(block_peak, self.peak, frames, self.sample_rate);
+    }
+
+    /// Let the meter fall for a block this channel didn't render at all (muted and finished
+    /// releasing); without it the meter freezes lit at whatever the last audible block measured.
+    pub fn decay_meter(&mut self, frames: usize) {
+        self.hold_peak(0.0, frames);
+    }
+}
+
+/// How much of a peak survives one second of silence (≈ -26 dB/s). The decay is per unit time,
+/// not per call: the engine renders a sub-block per note event and the device picks the buffer
+/// size, so a per-call factor makes the meters fall between 7× faster and slower for identical
+/// audio.
+const METER_DECAY_PER_SECOND: f32 = 0.05;
+
+/// Below this the UI already draws an empty meter (`peakDb` floors at -60 dB), so snap to zero
+/// rather than asymptote — the meter lands on 0 and the audio thread never grinds on denormals.
+const METER_FLOOR: f32 = 1e-3;
+
+#[inline]
+fn hold(block_peak: f32, previous: f32, frames: usize, sample_rate: f32) -> f32 {
+    let decay = METER_DECAY_PER_SECOND.powf(frames as f32 / sample_rate);
+    let held = block_peak.max(previous * decay);
+    if held < METER_FLOOR {
+        0.0
+    } else {
+        held
     }
 }
 
@@ -196,7 +230,8 @@ impl Master {
             pl = pl.max(a.abs());
             pr = pr.max(b.abs());
         }
-        self.peak_l = pl.max(self.peak_l * 0.8);
-        self.peak_r = pr.max(self.peak_r * 0.8);
+        let frames = l.len();
+        self.peak_l = hold(pl, self.peak_l, frames, self.sample_rate);
+        self.peak_r = hold(pr, self.peak_r, frames, self.sample_rate);
     }
 }

@@ -114,8 +114,14 @@ impl PolySynth {
             },
         };
         let v = &mut self.voices[idx];
-        v.env.reset();
-        v.osc.reset();
+        if !v.env.is_active() {
+            // A free voice is already at zero; resetting keeps renders deterministic.
+            v.env.reset();
+            v.osc.reset();
+        }
+        // A *stolen* voice keeps its phase and envelope level: slamming either to zero while
+        // it is still sounding is a step discontinuity, i.e. an audible click. The attack
+        // simply ramps on from wherever the old note had got to.
         v.osc.set_frequency(midi_to_hz(pitch as f32), self.sample_rate);
         v.amp = (velocity as f32 / 127.0) * self.preset.level;
         v.pitch = Some(pitch);
@@ -123,10 +129,20 @@ impl PolySynth {
         v.env.gate_on();
     }
 
+    /// Release *one* voice: the oldest one still holding `pitch`. Note-ons and note-offs are
+    /// 1:1, so releasing every matching voice would make two overlapping notes of the same
+    /// pitch cut each other short — the first note's end would silence the second.
     pub fn note_off(&mut self, pitch: u8) {
-        for v in self.voices.iter_mut().filter(|v| v.pitch == Some(pitch)) {
-            v.env.gate_off();
-            v.pitch = None;
+        let oldest = self
+            .voices
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.pitch == Some(pitch))
+            .min_by_key(|(_, v)| v.started_at)
+            .map(|(i, _)| i);
+        if let Some(i) = oldest {
+            self.voices[i].env.gate_off();
+            self.voices[i].pitch = None;
         }
     }
 

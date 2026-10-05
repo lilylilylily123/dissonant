@@ -10,6 +10,11 @@ use uuid::Uuid;
 
 pub const MAX_TRACKS: usize = 64;
 
+/// Audition hold bounds. The floor keeps very fine grids audible; the ceiling stops a stray
+/// value from leaving a voice ringing.
+pub const MIN_AUDITION_SECS: f32 = 0.12;
+pub const MAX_AUDITION_SECS: f32 = 4.0;
+
 /// What the real-time side publishes for the UI to read without locks.
 #[derive(Debug)]
 pub struct Shared {
@@ -69,8 +74,10 @@ pub enum EngineCommand {
     SetSequence(Arc<Sequence>),
     SetHearChords(bool),
     SetMaster(MasterSettings),
-    /// Sound a note on a track right now (placement audition / typing keyboard).
-    Audition { track_id: Uuid, pitch: u8, velocity: u8 },
+    /// Sound a note on a track right now (placement audition / typing keyboard). `seconds` is
+    /// how long to hold it before the automatic release — the roll passes the length of the note
+    /// being previewed, so auditions don't outlast the note the user is drawing.
+    Audition { track_id: Uuid, pitch: u8, velocity: u8, seconds: f32 },
     /// Release an audition note early (typing keyboard key-up).
     AuditionOff { track_id: Uuid, pitch: u8 },
 }
@@ -114,6 +121,8 @@ pub struct Engine {
     events: Vec<Event>,
     sounding_chord: Option<Uuid>,
     auditions: Vec<Audition>,
+    /// Set by Play/Seek: the next block starts any note the playhead is sitting inside.
+    resume_notes: bool,
 }
 
 impl Engine {
@@ -137,6 +146,7 @@ impl Engine {
             events: Vec::with_capacity(512),
             sounding_chord: None,
             auditions: Vec::with_capacity(32),
+            resume_notes: false,
         }
     }
 
@@ -152,6 +162,9 @@ impl Engine {
         match cmd {
             EngineCommand::Play => {
                 self.playing = true;
+                // Starting mid-note (after a stop or a seek) must sound that note, not wait for
+                // the next one.
+                self.resume_notes = true;
             }
             EngineCommand::Stop => {
                 self.playing = false;
@@ -163,6 +176,7 @@ impl Engine {
                 if self.looping && self.position >= self.sequence.length_beats {
                     self.position = 0.0;
                 }
+                self.resume_notes = true;
             }
             EngineCommand::SetLooping(on) => self.looping = on,
             EngineCommand::SetSequence(seq) => self.set_sequence(seq),
@@ -174,10 +188,10 @@ impl Engine {
                 }
             }
             EngineCommand::SetMaster(settings) => self.master.apply(&settings),
-            EngineCommand::Audition { track_id, pitch, velocity } => {
+            EngineCommand::Audition { track_id, pitch, velocity, seconds } => {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     ch.instrument.note_on(pitch, velocity);
-                    let hold = (self.sample_rate * 0.8) as usize;
+                    let hold = (self.sample_rate * seconds.clamp(MIN_AUDITION_SECS, MAX_AUDITION_SECS)) as usize;
                     if let Some(a) = self.auditions.iter_mut().find(|a| a.track_id == track_id && a.pitch == pitch) {
                         a.samples_left = hold;
                     } else {
@@ -309,6 +323,10 @@ impl Engine {
         for (ch, track) in self.channels.iter_mut().zip(self.sequence.tracks.iter()) {
             if track.audible(any_solo) || !ch.instrument.is_silent() {
                 ch.render_add(l, r);
+            } else {
+                // Muted and finished releasing: nothing to mix, but the meter still has to fall
+                // instead of staying lit at the level it had when the track was muted.
+                ch.decay_meter(to - from);
             }
         }
         if !self.chord_bed.is_silent() {
@@ -378,6 +396,10 @@ impl Engine {
         let start = self.position;
         let end = start + block_beats;
 
+        if std::mem::take(&mut self.resume_notes) {
+            self.resume_notes_under(start);
+        }
+
         if self.looping && len > 0.0 && end >= len {
             // Two segments: [start, len) then [0, end - len), with a release at the seam.
             let seam = ((len - start) * spb).round() as usize;
@@ -388,6 +410,33 @@ impl Engine {
             self.collect_segment(start, end, 0, spb);
         }
         self.events.sort_by_key(|e| e.offset);
+    }
+
+    /// Notes already sounding at `from` — the ones the playhead landed inside. Scheduling only
+    /// fires a note at its start beat, so without this, seeking into (or starting playback in)
+    /// the middle of a long note gives silence until the next note begins. The chord bed has
+    /// always resumed this way; notes now match it.
+    fn resume_notes_under(&mut self, from: f64) {
+        let any_solo = self.sequence.any_solo();
+        let seq = Arc::clone(&self.sequence);
+        for (ti, track) in seq.tracks.iter().enumerate() {
+            // A drum hit is a one-shot: re-firing it mid-note would retrigger the sample.
+            if !track.audible(any_solo) || track.is_drum {
+                continue;
+            }
+            for note in &track.notes {
+                if note.start_beat < from && note.end_beat().min(seq.length_beats) > from {
+                    self.events.push(Event {
+                        offset: 0,
+                        kind: EventKind::NoteOn {
+                            track: ti,
+                            pitch: note.pitch.clamp(0, 127) as u8,
+                            velocity: note.velocity.clamp(1, 127) as u8,
+                        },
+                    });
+                }
+            }
+        }
     }
 
     fn collect_segment(&mut self, from: f64, to: f64, base_offset: usize, spb: f64) {
@@ -597,10 +646,41 @@ mod tests {
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100 });
+        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100, seconds: 0.8 });
         let left = render(&mut e, 44_100 * 2, 512);
         assert!(left[..4000].iter().any(|s| s.abs() > 0.01));
         assert!(left[70_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    /// A preview must not outlast the note being drawn: at a 1/16 grid (0.125 s at 120 bpm) the
+    /// voice has to be releasing long before the fixed 0.8 s hold this used to apply, otherwise
+    /// painting a fast run stacks overlapping voices into a wash that sounds like reverb.
+    #[test]
+    fn audition_honors_the_requested_length() {
+        let model = ProjectModel::empty();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100, seconds: 0.125 });
+        let left = render(&mut e, SR as usize, 512);
+        let sr = SR as usize;
+        let loud = |from: usize, to: usize| left[from..to].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(loud(0, sr / 20) > 0.01, "the preview must speak");
+        // Held 0.125 s, then the voice's release (~0.14 s) runs out: silent well before 0.5 s.
+        assert!(loud(sr / 2, sr) < 1e-4, "preview outlived the note it previewed");
+    }
+
+    /// A grid finer than the floor still has to be audible rather than clicking off instantly.
+    #[test]
+    fn audition_length_is_clamped_to_a_floor() {
+        let model = ProjectModel::empty();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100, seconds: 0.0 });
+        let left = render(&mut e, SR as usize, 512);
+        let at_floor = (SR * MIN_AUDITION_SECS * 0.8) as usize;
+        assert!(left[..at_floor].iter().any(|s| s.abs() > 0.01), "a sub-floor preview must still speak");
     }
 
     #[test]

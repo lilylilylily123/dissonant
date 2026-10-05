@@ -376,7 +376,11 @@ impl Allpass {
     }
 }
 
-/// Freeverb-style stereo reverb. `wet` is a 0–1 dry/wet mix.
+/// Brings the comb/allpass network to unity against the dry signal. Its own broadband rms
+/// gain measures 0.652 at 44.1 kHz and 0.645 at 48 kHz, so one constant covers both.
+const WET_MAKEUP: f32 = 1.53;
+
+/// Freeverb-style stereo reverb. `wet` is a 0–1 dry/wet mix, crossfaded at constant power.
 #[derive(Debug, Clone)]
 pub struct Reverb {
     combs_l: Vec<Comb>,
@@ -422,8 +426,12 @@ impl Reverb {
         for a in &mut self.allpass_r {
             wr = a.process(wr);
         }
-        let dry = 1.0 - self.wet;
-        (l * dry + wl * self.wet * 3.0, r * dry + wr * self.wet * 3.0)
+        // Dry and wet are uncorrelated, so crossfade with constant power — the same law the
+        // pan knob uses. With a unity-calibrated wet path this makes the mix knob change the
+        // amount of ambience without changing how loud the bus is.
+        let dry_g = (1.0 - self.wet).sqrt();
+        let wet_g = self.wet.sqrt() * WET_MAKEUP;
+        (l * dry_g + wl * wet_g, r * dry_g + wr * wet_g)
     }
 }
 

@@ -520,7 +520,7 @@ export function PianoRoll() {
     if (e.altKey) {
       const placed = placeNote(notes, beat, pitch, noteLength, noteLength);
       const base = placed ? [...notes, placed] : notes;
-      if (placed) audition(pitch, placed.velocity);
+      if (placed) audition(pitch, placed.velocity, placed.lengthBeats);
       dragRef.current = { kind: "paint", base };
       setPreview(base);
       return;
@@ -530,7 +530,7 @@ export function PianoRoll() {
       setSelection(new Set());
       return;
     }
-    audition(pitch, placed.velocity);
+    audition(pitch, placed.velocity, placed.lengthBeats);
     const base = [...notes, placed];
     const ids = new Set([placed.id]);
     setSelection(ids);
@@ -558,7 +558,7 @@ export function PianoRoll() {
         const moved = next.find((n) => n.id === d.anchor.id);
         if (moved && moved.pitch !== d.lastPitch) {
           d.lastPitch = moved.pitch;
-          audition(moved.pitch, moved.velocity);
+          audition(moved.pitch, moved.velocity, moved.lengthBeats);
         }
         setPreview(next);
         break;
@@ -576,7 +576,7 @@ export function PianoRoll() {
         const placed = placeNote(d.base, beat, pitch, noteLength, noteLength);
         if (placed) {
           d.base = [...d.base, placed];
-          audition(pitch, placed.velocity);
+          audition(pitch, placed.velocity, placed.lengthBeats);
           setPreview(d.base);
         }
         break;
