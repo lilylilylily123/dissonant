@@ -65,7 +65,7 @@ const noteSel = (t: Tier) => mixHex(TIER_COLORS[t], "#ffffff", 0.72);
 const tierColor = (t: Tier | null) => (t ? TIER_COLORS[t] : "#9a9aa4");
 
 type Drag =
-  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate"; axis?: "x" | "y" | null }
+  | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; startPitch: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate"; axis?: "x" | "y" | null }
   | { kind: "resize"; ids: Set<string>; anchor: NoteEvent; startX: number; base: NoteEvent[] }
   | { kind: "ramp"; ids: Set<string>; b0: number; v0: number; base: NoteEvent[] }
   | { kind: "paint"; base: NoteEvent[] }
@@ -115,6 +115,8 @@ export function PianoRoll() {
   const follow = useStore((s) => s.follow);
   const playing = useStore((s) => s.playing);
   const selectionRequest = useStore((s) => s.selectionRequest);
+  const fold = useStore((s) => s.fold);
+  const ghostTrackId = useStore((s) => s.ghostTrackId);
   const commitGesture = useStore((s) => s.commitGesture);
   const editing = useStore((s) => s.settings.editing);
   const swing = useStore((s) => s.snapshot?.model.swing ?? 50);
@@ -138,18 +140,37 @@ export function PianoRoll() {
   const [viewW, setViewW] = useState(800);
 
   const notes = useMemo(() => (pattern && track ? (pattern.notesByTrack[track.id] ?? []) : []), [pattern, track]);
+  const ghostNotes = useMemo(
+    () => (pattern && ghostTrackId && ghostTrackId !== track?.id ? (pattern.notesByTrack[ghostTrackId] ?? []) : []),
+    [pattern, ghostTrackId, track],
+  );
   const chords = pattern?.chords.chords ?? [];
   const beats = pattern?.lengthBeats ?? 16;
   const beatW = BASE_BEAT_W * zoom;
-  const rows = HIGH - LOW + 1;
   const gridW = beats * beatW;
-  const gridH = rows * ROW_H;
   const shown = preview ?? notes;
   const color = track ? trackColor(track, trackIdx) : C.accent;
   const rootPc = key.rootPitchClass;
 
-  const yForPitch = (p: number) => RULER_H + (HIGH - p) * ROW_H;
-  const pitchForY = (y: number) => HIGH - Math.floor((y - RULER_H) / ROW_H);
+  // Row layout: every pitch, or (folded) the pitches that carry notes plus the chord tones of
+  // the pattern's chords within an octave of them. Top row first.
+  const visiblePitches = useMemo(() => {
+    const all: number[] = [];
+    for (let p = HIGH; p >= LOW; p--) all.push(p);
+    if (!fold) return all;
+    const used = new Set<number>([...shown, ...ghostNotes].map((n) => n.pitch));
+    const pcs = new Set<number>(chords.flatMap((c) => c.pitchClasses.map((pc) => ((pc % 12) + 12) % 12)));
+    const lo = used.size ? Math.min(...used) - 12 : 48;
+    const hi = used.size ? Math.max(...used) + 12 : 72;
+    return all.filter((p) => used.has(p) || (p >= lo && p <= hi && pcs.has(p % 12)));
+  }, [fold, shown, ghostNotes, chords]);
+  const rowOf = useMemo(() => new Map(visiblePitches.map((p, i) => [p, i])), [visiblePitches]);
+  const rows = visiblePitches.length;
+  const gridH = rows * ROW_H;
+
+  /** Top of a pitch's row; hidden pitches land above the ruler (never drawn). */
+  const yForPitch = (p: number) => RULER_H + (rowOf.get(p) ?? -2) * ROW_H;
+  const pitchForY = (y: number) => visiblePitches[Math.floor((y - RULER_H) / ROW_H)] ?? NaN;
   const beatForX = (x: number) => (x - GUTTER) / beatW;
 
   const commit = useCallback(
@@ -213,7 +234,8 @@ export function PianoRoll() {
     if (!centered.current && scrollRef.current) {
       centered.current = true;
       const el = scrollRef.current;
-      el.scrollTop = Math.max(0, yForPitch(60) - el.clientHeight / 2);
+      const middle = rowOf.has(60) ? 60 : (visiblePitches[Math.floor(visiblePitches.length / 2)] ?? 60);
+      el.scrollTop = Math.max(0, yForPitch(middle) - el.clientHeight / 2);
     }
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -225,9 +247,10 @@ export function PianoRoll() {
 
     // Rows
     const live = tierMap(playhead, chords, key);
-    for (let p = LOW; p <= HIGH; p++) {
+    for (const [i, p] of visiblePitches.entries()) {
       const y = yForPitch(p);
       const blk = BLACK.has(p % 12);
+      const octaveBreak = fold ? visiblePitches[i + 1] !== undefined && Math.floor(visiblePitches[i + 1] / 12) !== Math.floor(p / 12) : p % 12 === 0;
       let bg = blk ? C.rowBlack : C.rowWhite;
       if (highlightRows && !showLandscape) {
         const t = live[p % 12];
@@ -238,7 +261,7 @@ export function PianoRoll() {
       }
       ctx.fillStyle = bg;
       ctx.fillRect(GUTTER, y, gridW, ROW_H);
-      ctx.fillStyle = p % 12 === 0 ? C.octave : C.rowSep;
+      ctx.fillStyle = octaveBreak ? C.octave : C.rowSep;
       ctx.fillRect(GUTTER, y + ROW_H - 1, gridW, 1);
     }
 
@@ -246,7 +269,7 @@ export function PianoRoll() {
     if (showLandscape) {
       for (let b = 0; b < beats; b++) {
         const map = tierMap(b + 0.5, chords, key);
-        for (let p = LOW; p <= HIGH; p++) {
+        for (const p of visiblePitches) {
           const t = map[p % 12];
           if (!t) continue;
           const x = GUTTER + b * beatW;
@@ -320,10 +343,33 @@ export function PianoRoll() {
       ctx.fillText(label, x + c.lengthBeats * beatW - tw - 4, 19);
     }
 
+    // Ghost notes: another track, dashed, behind everything else.
+    if (ghostNotes.length) {
+      ctx.setLineDash([3, 2]);
+      ctx.lineWidth = 1;
+      for (const g of ghostNotes) {
+        if (!rowOf.has(g.pitch)) continue;
+        const t = tierMap(g.startBeat, chords, key)[g.pitch % 12];
+        const x = GUTTER + g.startBeat * beatW;
+        const y = yForPitch(g.pitch);
+        const w = Math.max(3, g.lengthBeats * beatW - 1);
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = tierColor(t);
+        roundRect(ctx, x, y, w, ROW_H - 1, 2);
+        ctx.fill();
+        ctx.globalAlpha = 0.55;
+        ctx.strokeStyle = tierColor(t);
+        roundRect(ctx, x + 0.5, y + 0.5, w - 1, ROW_H - 2, 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.setLineDash([]);
+    }
+
     // Notes
     const velocityAlpha = (v: number) => 0.45 + 0.55 * (v / 127);
     for (const n of shown) {
-      if (n.pitch < LOW || n.pitch > HIGH) continue;
+      if (!rowOf.has(n.pitch)) continue;
       const t = tierMap(n.startBeat, chords, key)[n.pitch % 12];
       const sel = selection.has(n.id);
       const x = GUTTER + n.startBeat * beatW;
@@ -404,8 +450,8 @@ export function PianoRoll() {
       ctx.setLineDash([]);
     }
 
-    // Keyboard
-    for (let p = LOW; p <= HIGH; p++) {
+    // Keyboard (folded: every key is labelled, since neighbours are no longer adjacent)
+    for (const p of visiblePitches) {
       const y = yForPitch(p);
       const blk = BLACK.has(p % 12);
       ctx.fillStyle = blk ? C.keyBlackBase : C.keyWhite;
@@ -418,10 +464,10 @@ export function PianoRoll() {
       ctx.fillRect(0, y + ROW_H - 1, GUTTER, 1);
       const isC = p % 12 === 0;
       const isRoot = rootPc !== null && p % 12 === rootPc;
-      if (isC || isRoot) {
+      if (isC || isRoot || fold) {
         ctx.font = mono(600, 8.5);
-        ctx.fillStyle = isC ? "#2a2a31" : C.accent;
-        const label = isC ? midiName(p) : midiName(p).replace(/\d+$/, "");
+        ctx.fillStyle = isRoot ? C.accent : "#2a2a31";
+        const label = isC || fold ? midiName(p) : midiName(p).replace(/\d+$/, "");
         ctx.fillText(label, GUTTER - 4 - ctx.measureText(label).width - 6, y + ROW_H / 2);
       }
       // Tier dot at the key edge (guidance cue, mirrors the rows)
@@ -478,7 +524,7 @@ export function PianoRoll() {
       ctx.fillStyle = "#b8b8c0";
       ctx.fillText(why, hx + 6, hy + 20);
     }
-  }, [shown, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping, ROW_H, appearance, swing, swingGrid]);
+  }, [shown, ghostNotes, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping, ROW_H, appearance, swing, swingGrid, visiblePitches, rowOf, fold]);
 
   // ─── Velocity lane canvas ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -611,7 +657,7 @@ export function PianoRoll() {
       setSelection(ids);
       dragRef.current = hit.edge
         ? { kind: "resize", ids, anchor, startX: x, base }
-        : { kind: "move", ids, anchor, startX: x, startY: y, base, lastPitch: anchor.pitch, origin };
+        : { kind: "move", ids, anchor, startX: x, startY: y, startPitch: pitchForY(y), base, lastPitch: anchor.pitch, origin };
       setPreview(base);
       return;
     }
@@ -652,7 +698,7 @@ export function PianoRoll() {
     const base = [...notes, placed];
     const ids = new Set([placed.id]);
     setSelection(ids);
-    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, base, lastPitch: target, origin: "place" };
+    dragRef.current = { kind: "move", ids, anchor: placed, startX: x, startY: y, startPitch: pitch, base, lastPitch: target, origin: "place" };
     setPreview(base);
   };
 
@@ -687,7 +733,8 @@ export function PianoRoll() {
         const rawDelta = (x - d.startX) / beatW;
         const newStart = snapRound(d.anchor.startBeat + rawDelta, snapGrid);
         let dBeats = newStart - d.anchor.startBeat;
-        let dPitch = pitchForY(y) - pitchForY(d.startY);
+        const rowPitch = pitchForY(y);
+        let dPitch = Number.isNaN(rowPitch) ? 0 : rowPitch - d.startPitch;
         // ⇧ constrains to the axis that moved first (time or pitch).
         if (e.shiftKey) {
           d.axis ??= Math.abs(x - d.startX) >= Math.abs(y - d.startY) ? "x" : "y";

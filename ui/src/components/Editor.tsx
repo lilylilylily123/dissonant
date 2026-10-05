@@ -41,6 +41,16 @@ export function Editor() {
             <div className="vdiv" />
             <button className={`chip${s.brush ? " on" : ""}`} onClick={() => s.toggleBrush()} title="brush: left-drag on empty space paints notes (⌥-drag does this too when ⌥ is set to paint in Settings)">brush</button>
             <button className={`chip${s.follow ? " on" : ""}`} onClick={() => s.toggleFollow()} title="follow: keep the playhead in view while playing">follow</button>
+            <button className={`chip${s.fold ? " on" : ""}`} onClick={() => s.toggleFold()} title="fold: show only rows that have notes, plus chord tones around them">fold</button>
+            <div className="opt" title="ghost: draw another track's notes behind this one (dashed, with their tiers)">
+              <span className="k">ghost</span>
+              <select value={s.ghostTrackId ?? ""} onChange={(e) => s.setGhostTrack(e.target.value || null)} style={{ maxWidth: 110 }}>
+                <option value="">off</option>
+                {s.snapshot!.model.tracks.filter((t) => t.id !== track.id && !t.isDrum).map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
           </>
         )}
         <span className="spacer" />

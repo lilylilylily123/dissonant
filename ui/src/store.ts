@@ -66,6 +66,10 @@ interface State {
   brush: boolean;
   /** Keep the playhead in view while playing. */
   follow: boolean;
+  /** Fold: only rows with notes (or chord tones nearby) are shown. */
+  fold: boolean;
+  /** Another track whose notes are drawn as ghosts behind the roll. */
+  ghostTrackId: string | null;
   /** Something outside the roll (inspector, menu) asked for this selection. */
   selectionRequest: { ids: string[]; nonce: number } | null;
 
@@ -107,6 +111,8 @@ interface State {
   toggleStamp(): void;
   toggleBrush(): void;
   toggleFollow(): void;
+  toggleFold(): void;
+  setGhostTrack(id: string | null): void;
   requestSelection(ids: string[]): void;
   /** Apply a pure edit to the selected track's notes in the selected pattern (ids = current selection). */
   transformSelection(fn: (notes: NoteEvent[], ids: Set<string>) => NoteEvent[], label: string): void;
@@ -255,6 +261,8 @@ export const useStore = create<State>((set, get) => {
     stamp: false,
     brush: false,
     follow: true,
+    fold: false,
+    ghostTrackId: null,
     selectionRequest: null,
 
     async init() {
@@ -472,6 +480,12 @@ export const useStore = create<State>((set, get) => {
     },
     toggleFollow() {
       set((s) => ({ follow: !s.follow }));
+    },
+    toggleFold() {
+      set((s) => ({ fold: !s.fold }));
+    },
+    setGhostTrack(id) {
+      set({ ghostTrackId: id });
     },
     requestSelection(ids) {
       set((s) => ({ selectionRequest: { ids, nonce: (s.selectionRequest?.nonce ?? 0) + 1 } }));
