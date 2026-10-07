@@ -986,6 +986,10 @@ export function PianoRoll() {
   const onKeyDown = (e: React.KeyboardEvent) => {
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key;
+    // ⌥ + arrows is the roll's one alt chord (fine nudge). Every other alt combination belongs
+    // to the window manager, which binds alt-<key> for workspaces and focus; claiming them here
+    // would swallow those keys whenever the roll has focus.
+    if (e.altKey && !k.startsWith("Arrow")) return;
     const bounds = selectionBounds(notes, selection);
     const grid = noteLength;
 

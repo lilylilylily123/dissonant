@@ -34,6 +34,11 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTyping(e.target)) return;
+      // Alt belongs to the window manager. Tiling WMs (AeroSpace, yabai, i3-likes) bind
+      // alt-<key> for workspaces and focus, and nothing here is an alt chord — without this,
+      // `!mod` reads "no modifier" as true while alt is held and the app eats the user's keys.
+      // ⌥ still means "fine" inside the roll, which handles its own keys.
+      if (e.altKey) return;
       const s = useStore.getState();
       const mod = e.metaKey || e.ctrlKey;
       if (s.dialog) return; // the dialog owns the keyboard

@@ -584,8 +584,13 @@ select {
 .side.browser {
   width: 248px;
 }
+/* The inspector stacks more sections than fit on a short window (transform, harmony, starters),
+   so it scrolls. `.side` clips on both axes; only the vertical clip is lifted, because a
+   horizontal scrollbar here would just mean a control is mis-sized. */
 .side.inspector {
   width: 300px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .tabs {
   height: 28px;
