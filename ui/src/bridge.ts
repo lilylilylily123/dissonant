@@ -24,9 +24,12 @@ import type {
   SongPattern,
   TrackParam,
   TemplateInfo,
+  KeyState,
+  ScaleType,
+  VibeInfo,
 } from "./types";
 import { uuid, withDefaults } from "./types";
-import { normalize, progression, STARTERS } from "./theory";
+import { chordAt, normalize, progression, STARTERS } from "./theory";
 
 export interface Bridge {
   readonly isTauri: boolean;
@@ -36,6 +39,7 @@ export interface Bridge {
   commitGesture(): Promise<Snapshot>;
   undo(): Promise<Snapshot>;
   redo(): Promise<Snapshot>;
+  /** `starter` picks starter or empty; leave it out to follow the "new project opens" setting. */
   newProject(starter?: boolean): Promise<Snapshot>;
   openProject(path: string): Promise<Snapshot>;
   saveProject(path?: string): Promise<Snapshot>;
@@ -59,6 +63,10 @@ export interface Bridge {
   saveTemplate(name: string): Promise<TemplateInfo>;
   deleteTemplate(name: string): Promise<void>;
   newFromTemplate(name: string): Promise<Snapshot>;
+  /** The built-in vibes (`list_vibes`). */
+  listVibes(): Promise<VibeInfo[]>;
+  /** A new untitled project from a vibe (`new_from_vibe`). */
+  newFromVibe(id: string): Promise<Snapshot>;
   onPlayhead(cb: (e: PlayheadEvent) => void): () => void;
   /** The backend changed the document on its own (e.g. a recorded note landed). */
   onDocument(cb: (s: Snapshot) => void): () => void;
@@ -131,7 +139,7 @@ async function tauriBridge(): Promise<Bridge> {
     commitGesture: () => invoke<Snapshot>("commit_gesture"),
     undo: () => invoke<Snapshot>("undo"),
     redo: () => invoke<Snapshot>("redo"),
-    newProject: (starter = true) => invoke<Snapshot>("new_project", { starter }),
+    newProject: (starter) => invoke<Snapshot>("new_project", { starter: starter ?? null }),
     openProject: (path) => invoke<Snapshot>("open_project", { path }),
     saveProject: (path) => invoke<Snapshot>("save_project", { path: path ?? null }),
     setPlaybackContext: (mode, patternId) => invoke("set_playback_context", { mode, patternId }),
@@ -152,6 +160,8 @@ async function tauriBridge(): Promise<Bridge> {
     saveTemplate: (name) => invoke<TemplateInfo>("save_template", { name }),
     deleteTemplate: (name) => invoke("delete_template", { name }),
     newFromTemplate: (name) => invoke<Snapshot>("new_from_template", { name }),
+    listVibes: () => invoke<VibeInfo[]>("list_vibes"),
+    newFromVibe: (id) => invoke<Snapshot>("new_from_vibe", { id }),
     onPlayhead: (cb) => subscribe<PlayheadEvent>("playhead", cb),
     onDocument: (cb) => subscribe<Snapshot>("document", cb),
     onMidiActivity: (cb) => subscribe<number>("midi-activity", cb),
@@ -264,12 +274,124 @@ function emptyModel(): ProjectModel {
   };
 }
 
-/** `ProjectModel::starter()`: `empty()` plus a I–IV–V–vi progression, a drum track and a clip. */
+/** `STARTER_MELODY` in model.rs: (start, length, pitch, velocity) per 4-beat chord slot. */
+const STARTER_MELODY: [number, number, number, number][][] = [
+  [[0, 1.5, 76, 100], [1.5, 0.5, 74, 80], [2, 2, 72, 96]], // C:  E  D  C
+  [[0, 1, 69, 100], [1, 1, 72, 88], [2, 2, 77, 96]], // F:  A  C  F
+  [[0, 1.5, 74, 100], [1.5, 0.5, 71, 80], [2, 2, 67, 96]], // G:  D  B  G
+  [[0, 1.5, 72, 100], [1.5, 0.5, 71, 80], [2, 2, 69, 96]], // Am: C  B  A
+];
+
+type Groove = "backbeat" | "fourOnFloor" | "boomBap" | "halfTime" | "motorik" | "sparse";
+const [KICK, SNARE, CLAP, HAT] = [36, 38, 39, 42];
+const eighths = (on: number, off: number): [number, number, number][] => Array.from({ length: 8 }, (_, i) => [i * 0.5, HAT, i % 2 === 0 ? on : off]);
+
+/** `Groove::bar` in vibes.rs for a 4/4 bar: (offset, pitch, velocity). */
+const GROOVE_BARS: Record<Groove, [number, number, number][]> = {
+  backbeat: [[0, KICK, 120], [1, SNARE, 100], [2, KICK, 120], [3, SNARE, 100], ...eighths(80, 60)],
+  fourOnFloor: [[0, KICK, 120], [1, KICK, 115], [2, KICK, 120], [3, KICK, 115], [1, CLAP, 100], [3, CLAP, 100], ...[0.5, 1.5, 2.5, 3.5].map((o): [number, number, number] => [o, HAT, 85])],
+  boomBap: [[0, KICK, 120], [1.5, KICK, 100], [2.5, KICK, 110], [1, SNARE, 105], [3, SNARE, 105], ...eighths(70, 50)],
+  halfTime: [[0, KICK, 120], [2.5, KICK, 100], [2, SNARE, 110], ...eighths(70, 55)],
+  motorik: [[0, KICK, 115], [2, KICK, 115], [2.5, KICK, 95], [1, SNARE, 100], [3, SNARE, 100], ...eighths(80, 75)],
+  sparse: [[0, KICK, 90], [2, HAT, 45]],
+};
+
+/** `Groove::hits(16.0, 4.0)`: four bars of 4/4, sorted by time then pitch. */
+function grooveHits(groove: Groove): NoteEvent[] {
+  const hits: NoteEvent[] = [];
+  for (let bar = 0; bar < 16; bar += 4) {
+    for (const [offset, pitch, velocity] of GROOVE_BARS[groove]) hits.push({ id: uuid(), startBeat: bar + offset, lengthBeats: 0.25, pitch, velocity });
+  }
+  return hits.sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
+}
+
+/** `vibes::bass_line` over 16 beats of 4/4: the chord root under each hit, G♯1–G2. */
+function bassLine(chords: ChordEvent[], rhythm: [number, number][]): NoteEvent[] {
+  const notes: NoteEvent[] = [];
+  for (let bar = 0; bar < 16; bar += 4) {
+    rhythm.forEach(([offset, len], i) => {
+      const start = bar + offset;
+      const chord = chordAt(chords, start);
+      if (!chord || !chord.pitchClasses.length) return;
+      const pc = normalize(chord.pitchClasses[0]);
+      notes.push({ id: uuid(), startBeat: start, lengthBeats: Math.min(len, 16 - start), pitch: 36 + pc - (pc >= 8 ? 12 : 0), velocity: i === 0 ? 105 : 92 });
+    });
+  }
+  return notes;
+}
+
+type Sound = [voice: string, tone: number, reverb: number];
+const SOUND: Record<string, Sound> = {
+  softKeys: ["triangle", 6000, 0.25],
+  warmPad: ["pad", 4000, 0.45],
+  glassPluck: ["pluck", 12000, 0.3],
+  buzzyBass: ["saw", 1200, 0],
+  roundBass: ["sine", 2000, 0],
+  leadWithBite: ["square", 9000, 0.15],
+};
+
+interface MockVibe extends VibeInfo {
+  swing: number;
+  swingGrid: number;
+  degrees: number[];
+  chordBeats: number;
+  groove: Groove;
+  bass: [number, number][];
+  bassSound: Sound;
+  leadName: string;
+  leadSound: Sound;
+}
+
+const lockedKey = (rootPitchClass: number, scale: ScaleType): KeyState => ({ rootPitchClass, scale, isLocked: true });
+const EIGHTH_BASS: [number, number][] = Array.from({ length: 8 }, (_, i) => [i * 0.5, 0.45]);
+
+/** `VIBES` in vibes.rs. `bridge.test.ts` pins the same values `vibe_values_shared_with_the_ui` does. */
+const MOCK_VIBES: MockVibe[] = [
+  { id: "lofi", name: "lo-fi bedroom", blurb: "dusty, swung and slow: jazzy chords, lazy drums, room for a melody", tempo: 80, key: lockedKey(5, "major"), swing: 60, swingGrid: 0.25, degrees: [1, 4, 0, 5], chordBeats: 4, groove: "boomBap", bass: [[0, 1.25], [1.5, 1.5], [3.5, 0.5]], bassSound: SOUND.roundBass, leadName: "keys", leadSound: SOUND.softKeys },
+  { id: "postpunk", name: "post-punk", blurb: "fast, tense and driving: 8th-note bass, motorik drums, minor chords", tempo: 148, key: lockedKey(4, "minor"), swing: 50, swingGrid: 0.5, degrees: [0, 5, 2, 6], chordBeats: 4, groove: "motorik", bass: EIGHTH_BASS, bassSound: SOUND.buzzyBass, leadName: "lead", leadSound: SOUND.leadWithBite },
+  { id: "ambient", name: "ambient texture", blurb: "a slow two-chord drift: barely a beat, long notes, lots of space", tempo: 70, key: lockedKey(2, "major"), swing: 50, swingGrid: 0.5, degrees: [0, 3], chordBeats: 8, groove: "sparse", bass: [[0, 4]], bassSound: SOUND.roundBass, leadName: "pad", leadSound: SOUND.warmPad },
+  { id: "songwriter", name: "songwriter demo", blurb: "four friendly chords and a plain beat to sing or play over", tempo: 96, key: lockedKey(7, "major"), swing: 50, swingGrid: 0.5, degrees: [0, 4, 5, 3], chordBeats: 4, groove: "backbeat", bass: [[0, 2], [2, 2]], bassSound: SOUND.roundBass, leadName: "melody", leadSound: SOUND.glassPluck },
+  { id: "club", name: "club loop", blurb: "four-on-the-floor, offbeat bass and a minor loop that keeps going", tempo: 124, key: lockedKey(9, "minor"), swing: 50, swingGrid: 0.5, degrees: [0, 6, 5, 6], chordBeats: 4, groove: "fourOnFloor", bass: [[0.5, 0.4], [1.5, 0.4], [2.5, 0.4], [3.5, 0.4]], bassSound: SOUND.buzzyBass, leadName: "lead", leadSound: SOUND.leadWithBite },
+];
+
+const withSound = (t: Track, [voice, tone, reverb]: Sound): Track => ({ ...t, voice, tone, reverbSend: reverb });
+
+/** `ProjectModel::from_vibe`. */
+function vibeModel(id: string): ProjectModel | null {
+  const v = MOCK_VIBES.find((x) => x.id === id);
+  if (!v) return null;
+  const m = emptyModel();
+  m.tempo = v.tempo;
+  m.swing = v.swing;
+  m.swingGrid = v.swingGrid;
+  m.key = { ...v.key };
+  const chords = progression(v.degrees, v.key.rootPitchClass!, v.key.scale, 16, v.chordBeats);
+  const lead = withSound({ ...m.tracks[0], name: v.leadName }, v.leadSound);
+  const bass = withSound(newTrack(false, "bass"), v.bassSound);
+  const drums = newTrack(true, "drums");
+  m.tracks = [lead, bass, drums];
+  const p = m.patterns[0];
+  p.chords = { chords };
+  p.notesByTrack = { [bass.id]: bassLine(chords, v.bass), [drums.id]: grooveHits(v.groove) };
+  m.clips = [{ id: uuid(), patternId: p.id, startBeat: 0, lengthBeats: 16, offsetBeats: 0, muted: false }];
+  return m;
+}
+
+/** `ProjectModel::starter()`: I–IV–V–vi in C (key locked), a pluck melody, a drum groove, one clip. */
 function starterModel(): ProjectModel {
   const m = emptyModel();
+  m.key = { rootPitchClass: 0, scale: "major", isLocked: true };
   m.patterns[0].chords = { chords: progression([0, 3, 4, 5], 0, "major", 16) };
-  m.tracks.push(newTrack(true, "drums"));
+  const melody = m.tracks[0];
+  melody.voice = "pluck";
+  melody.reverbSend = 0.2;
+  const drums = newTrack(true, "drums");
+  m.tracks.push(drums);
   const p = m.patterns[0];
+  p.notesByTrack[melody.id] = STARTER_MELODY.flatMap((phrase, i) =>
+    phrase.map(([start, lengthBeats, pitch, velocity]) => ({ id: uuid(), startBeat: i * 4 + start, lengthBeats, pitch, velocity })),
+  );
+  p.notesByTrack[drums.id] = grooveHits("backbeat");
   m.clips = [{ id: uuid(), patternId: p.id, startBeat: 0, lengthBeats: p.lengthBeats, offsetBeats: 0, muted: false }];
   return m;
 }
@@ -703,8 +825,17 @@ function mockBridge(): Bridge {
       }
       return snapshot();
     },
-    newProject: async (starter = true) => {
-      replace(starter ? starterModel() : emptyModel(), null);
+    newProject: async (starter) => {
+      // Like `new_project`: no explicit choice means the "new project opens" setting.
+      let useStarter = starter;
+      if (useStarter === undefined) {
+        try {
+          useStarter = withDefaults(JSON.parse(localStorage.getItem("dissonant.mock.settings") ?? "null")).editing.newProject === "starter";
+        } catch {
+          useStarter = true;
+        }
+      }
+      replace(useStarter ? starterModel() : emptyModel(), null);
       return snapshot();
     },
     openProject: async (p) => {
@@ -774,6 +905,11 @@ function mockBridge(): Bridge {
       const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
       delete all[name];
       localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
+    },
+    listVibes: async () => MOCK_VIBES.map(({ id, name, blurb, tempo, key }) => ({ id, name, blurb, tempo, key: { ...key } })),
+    newFromVibe: async (id) => {
+      replace(vibeModel(id) ?? fail(`no vibe called ${id}`), null);
+      return snapshot();
     },
     newFromTemplate: async (name) => {
       const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;

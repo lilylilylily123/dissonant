@@ -397,6 +397,16 @@ fn default_tempo() -> f64 {
 fn default_schema() -> u32 {
     SCHEMA_VERSION
 }
+/// The starter melody: one phrase per chord of I–IV–V–vi in C, as `(start, length, pitch,
+/// velocity)` inside a 4-beat chord slot. Mostly chord tones, plus two tensions (D over C,
+/// B leaning into C over Am) so the roll shows more than one tier on the first look.
+const STARTER_MELODY: [[(f64, f64, i32, i32); 3]; 4] = [
+    [(0.0, 1.5, 76, 100), (1.5, 0.5, 74, 80), (2.0, 2.0, 72, 96)], // C:  E  D  C
+    [(0.0, 1.0, 69, 100), (1.0, 1.0, 72, 88), (2.0, 2.0, 77, 96)], // F:  A  C  F
+    [(0.0, 1.5, 74, 100), (1.5, 0.5, 71, 80), (2.0, 2.0, 67, 96)], // G:  D  B  G
+    [(0.0, 1.5, 72, 100), (1.5, 0.5, 71, 80), (2.0, 2.0, 69, 96)], // Am: C  B  A
+];
+
 fn default_tracks() -> Vec<Track> {
     vec![Track::new("melody")]
 }
@@ -484,13 +494,51 @@ impl ProjectModel {
         crate::tempo::TempoMap::new(self.tempo, &self.tempo_points)
     }
 
-    /// A new project pre-seeded with a I–IV–V–vi progression in C in its first pattern,
-    /// plus a drum track, so the first loop is seconds away.
+    /// A new project that plays music the moment space is pressed: I–IV–V–vi in C (key
+    /// locked), a short melody over it and a drum groove, over one 4-bar 4/4 pattern placed
+    /// in the song. See [`ProjectModel::starter_shaped`].
     pub fn starter() -> Self {
+        Self::starter_shaped(16.0, 4.0)
+    }
+
+    /// The starter at any pattern length and bar size (the new-project defaults). The four
+    /// chords split the pattern evenly and the melody stretches with them, so every note
+    /// keeps its tier. The groove repeats per bar at its own speed instead of stretching.
+    pub fn starter_shaped(length_beats: f64, beats_per_bar: f64) -> Self {
+        let length = if length_beats.is_finite() && length_beats > 0.0 { length_beats } else { default_pattern_length() };
+        let bar = if beats_per_bar.is_finite() && beats_per_bar > 0.0 { beats_per_bar } else { 4.0 };
         let mut model = ProjectModel::empty();
-        let chords = crate::theory::harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 16.0, 4.0);
-        model.patterns[0].chords = crate::chord_track::ChordTrack::new(chords);
-        model.tracks.push(Track::drums("drums"));
+        model.key = KeyState::locked(0, ScaleType::Major);
+        let slot = length / STARTER_MELODY.len() as f64;
+        model.patterns[0].length_beats = length;
+        model.patterns[0].chords = crate::chord_track::ChordTrack::new(crate::theory::harmony::progression(
+            &[0, 3, 4, 5],
+            0,
+            ScaleType::Major,
+            length,
+            slot,
+        ));
+
+        model.tracks[0].voice = "pluck".into();
+        model.tracks[0].reverb_send = 0.2;
+        let melody_id = model.tracks[0].id;
+        let scale = slot / 4.0;
+        let melody = STARTER_MELODY
+            .iter()
+            .enumerate()
+            .flat_map(|(i, phrase)| {
+                phrase.iter().map(move |&(start, len, pitch, vel)| {
+                    NoteEvent::new(i as f64 * slot + start * scale, len * scale, pitch).with_velocity(vel)
+                })
+            })
+            .collect();
+        model.patterns[0].notes_by_track.insert(melody_id, melody);
+
+        let drums = Track::drums("drums");
+        let drums_id = drums.id;
+        model.tracks.push(drums);
+        model.patterns[0].notes_by_track.insert(drums_id, crate::vibes::Groove::Backbeat.hits(length, bar));
+
         let p = &model.patterns[0];
         model.clips = vec![Clip::new(p.id, 0.0, p.length_beats)];
         model

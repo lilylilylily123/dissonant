@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, TemplateInfo, Track } from "./types";
+import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, SoundPreset, TemplateInfo, Track, VibeInfo } from "./types";
 import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
@@ -60,7 +60,11 @@ interface State {
   exportOpen: boolean;
   exporting: ExportProgress | null;
   templates: TemplateInfo[];
-  templatesOpen: boolean;
+  /** The new-project screen (vibes, starter, templates, recent files). */
+  newProjectOpen: boolean;
+  /** It was opened at launch, over the fresh starter the app starts with. */
+  newProjectAtLaunch: boolean;
+  vibes: VibeInfo[];
   looping: boolean;
   loopRegion: [number, number] | null;
   armed: boolean;
@@ -84,6 +88,8 @@ interface State {
   /** `label` names the edit in the Edit menu ("move notes"); defaults to the command's name. */
   dispatch(command: Command, transient?: boolean, label?: string): Promise<void>;
   commitGesture(): Promise<void>;
+  /** Voice, tone and reverb from a named preset, as one undo step. */
+  applySoundPreset(trackId: string, preset: SoundPreset): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   setMode(mode: PlayMode): void;
@@ -140,7 +146,8 @@ interface State {
   setDialogText(text: string): void;
   /** A dialog with one text field; resolves with the text, or null on cancel. */
   askInput(title: string, message: string, placeholder?: string, okLabel?: string, initial?: string): Promise<string | null>;
-  openTemplates(open?: boolean): void;
+  openNewProject(open?: boolean): void;
+  newFromVibe(id: string): Promise<void>;
   refreshTemplates(): Promise<void>;
   saveAsTemplate(): Promise<void>;
   deleteTemplate(name: string): Promise<void>;
@@ -218,6 +225,17 @@ export const useStore = create<State>((set, get) => {
     }
   };
 
+  /**
+   * A fresh, untitled starter or vibe also turns the chord bed on, so the first press of space
+   * plays the progression with everything else. A no-op for a project without chords.
+   */
+  const hearBedForFresh = (snapshot: Snapshot) => {
+    if (snapshot.path !== null || snapshot.dirty || get().hearChords) return;
+    if (!snapshot.model.patterns.some((p) => p.chords.chords.length > 0)) return;
+    set({ hearChords: true });
+    void getBridge().then((b) => b.setHearChords(true));
+  };
+
   /** Offer to restore autosaves left by an earlier run, newest first. */
   const offerRecovery = async (candidates: RecoveryCandidate[]) => {
     const b = await getBridge();
@@ -277,7 +295,9 @@ export const useStore = create<State>((set, get) => {
     exportOpen: false,
     exporting: null,
     templates: [],
-    templatesOpen: false,
+    newProjectOpen: false,
+    newProjectAtLaunch: false,
+    vibes: [],
     looping: true,
     loopRegion: null,
     armed: false,
@@ -301,8 +321,10 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         console.warn("settings unavailable", e);
       }
-      applySnapshot(await b.getState());
+      const first = await b.getState();
+      applySnapshot(first);
       await syncPlayback();
+      hearBedForFresh(first);
       await b.setLiveTrack(get().selectedTrackId);
       b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks, countIn: e.countIn ?? 0 }));
       b.onDocument((snap) => applySnapshot(snap));
@@ -328,10 +350,22 @@ export const useStore = create<State>((set, get) => {
       void get().refreshMidi();
       void get().refreshRecent();
       try {
+        set({ vibes: await b.listVibes() });
+      } catch {
+        /* no vibes backend */
+      }
+      let recovering = false;
+      try {
         const candidates = await b.recoveryCandidates();
-        if (candidates.length) void offerRecovery(candidates);
+        recovering = candidates.length > 0;
+        if (recovering) void offerRecovery(candidates);
       } catch {
         /* no recovery backend */
+      }
+      // The new-project screen greets a fresh launch; a recovery offer takes its place.
+      if (!recovering && get().settings.editing.showWelcome) {
+        get().openNewProject(true);
+        set({ newProjectAtLaunch: true });
       }
     },
 
@@ -347,6 +381,15 @@ export const useStore = create<State>((set, get) => {
     async commitGesture() {
       const b = await getBridge();
       applySnapshot(await b.commitGesture());
+    },
+
+    async applySoundPreset(trackId, preset) {
+      // Three transient edits folded into one undo step by commitGesture, like a knob drag.
+      const label = `sound: ${preset.name}`;
+      await get().dispatch({ type: "setTrackVoice", id: trackId, voice: preset.voice }, true, label);
+      await get().dispatch({ type: "setTrackParam", id: trackId, param: "tone", value: preset.tone }, true, label);
+      await get().dispatch({ type: "setTrackParam", id: trackId, param: "reverbSend", value: preset.reverbSend }, true, label);
+      await get().commitGesture();
     },
 
     async undo() {
@@ -534,8 +577,11 @@ export const useStore = create<State>((set, get) => {
     async newProject() {
       const b = await getBridge();
       if (!(await get().confirmDiscard("creating a new project"))) return;
-      applySnapshot(await b.newProject(true));
+      // No explicit choice: the backend follows the "new project opens" setting.
+      const snap = await b.newProject();
+      applySnapshot(snap);
       await syncPlayback();
+      hearBedForFresh(snap);
     },
 
     async openProject() {
@@ -650,9 +696,25 @@ export const useStore = create<State>((set, get) => {
       });
       return v === "ok" ? get().dialogText.trim() || null : null;
     },
-    openTemplates(open = true) {
-      set({ templatesOpen: open });
-      if (open) void get().refreshTemplates();
+    openNewProject(open = true) {
+      set({ newProjectOpen: open, newProjectAtLaunch: false });
+      if (open) {
+        void get().refreshTemplates();
+        void get().refreshRecent();
+      }
+    },
+    async newFromVibe(id) {
+      const b = await getBridge();
+      if (!(await get().confirmDiscard("creating a new project"))) return;
+      set({ newProjectOpen: false, newProjectAtLaunch: false });
+      try {
+        const snap = await b.newFromVibe(id);
+        applySnapshot(snap);
+        await syncPlayback();
+        hearBedForFresh(snap);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
     },
     async refreshTemplates() {
       const b = await getBridge();
@@ -683,12 +745,24 @@ export const useStore = create<State>((set, get) => {
     },
     async newFromTemplate(name) {
       const b = await getBridge();
+      // At launch the open project already is a fresh starter: picking it just gets to work.
+      const snap0 = get().snapshot;
+      if (name === "starter" && get().newProjectAtLaunch && snap0 && snap0.path === null && !snap0.dirty && !snap0.canUndo) {
+        set({ newProjectOpen: false, newProjectAtLaunch: false });
+        return;
+      }
       if (!(await get().confirmDiscard("creating a new project"))) return;
-      set({ templatesOpen: false });
+      set({ newProjectOpen: false, newProjectAtLaunch: false });
       try {
-        if (name === "starter" || name === "empty") applySnapshot(await b.newProject(name === "starter"));
-        else applySnapshot(await b.newFromTemplate(name));
-        await syncPlayback();
+        if (name === "starter" || name === "empty") {
+          const snap = await b.newProject(name === "starter");
+          applySnapshot(snap);
+          await syncPlayback();
+          hearBedForFresh(snap);
+        } else {
+          applySnapshot(await b.newFromTemplate(name));
+          await syncPlayback();
+        }
       } catch (e) {
         get().showToast(String(e), true);
       }

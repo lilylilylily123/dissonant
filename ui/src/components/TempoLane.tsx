@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useStore } from "../store";
 import { tempoMap, type TempoPoint } from "../types";
+import { keys } from "../platform";
 
 const H = 40;
 
@@ -104,7 +105,7 @@ export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number;
           <g key={p.id} onPointerDown={(e) => onDown(e, p)} style={{ cursor: "ns-resize" }}>
             <circle cx={p.beat * pxPerBeat} cy={yFor(p.bpm)} r={8} fill="transparent" />
             <circle cx={p.beat * pxPerBeat} cy={yFor(p.bpm)} r={3.5} fill={p.ramp ? "var(--bg-0)" : "var(--accent)"} stroke="var(--accent)" strokeWidth={1.5} />
-            <title>{`${p.bpm.toFixed(1)} bpm at beat ${p.beat}${p.ramp ? " · ramp" : " · step"} · drag: move (⇧ fine) · ⌥-click: ${p.ramp ? "step" : "ramp"} · right-click: remove`}</title>
+            <title>{keys(`${p.bpm.toFixed(1)} bpm at beat ${p.beat}${p.ramp ? " · ramp" : " · step"} · drag: move (⇧ fine) · ⌥-click: ${p.ramp ? "step" : "ramp"} · right-click: remove`)}</title>
           </g>
         ))}
         {hover !== null && !drag.current && (

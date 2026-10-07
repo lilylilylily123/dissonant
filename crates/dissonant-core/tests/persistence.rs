@@ -119,3 +119,132 @@ fn imports_swift_flat_array_notes_by_track() {
     assert_eq!(m.time_signature, TimeSignature::default());
     assert_eq!(m.schema_version, SCHEMA_VERSION);
 }
+
+// ---------------------------------------------------------------- the starter project
+
+/// Every melody note's tier against the chord under it, with the starter's locked key.
+fn melody_tiers(model: &ProjectModel) -> Vec<Tier> {
+    let p = &model.patterns[0];
+    let scale = model.key.scale_pitch_classes();
+    p.notes(&model.tracks[0].id)
+        .iter()
+        .map(|n| {
+            let chord = p.chords.chord_at(n.start_beat).expect("every melody note sits on a chord");
+            TierClassifier.tier(n.pitch, &chord.pitch_classes, scale.as_deref())
+        })
+        .collect()
+}
+
+#[test]
+fn starter_has_a_melody_a_groove_and_a_locked_key() {
+    let m = ProjectModel::starter();
+    assert_eq!(m.key, KeyState::locked(0, ScaleType::Major));
+    let p = &m.patterns[0];
+    assert_eq!(p.length_beats, 16.0);
+    assert_eq!(p.chords.chords().iter().map(|c| c.start_beat).collect::<Vec<_>>(), vec![0.0, 4.0, 8.0, 12.0]);
+    assert!(!m.tracks[0].is_drum && m.tracks[1].is_drum);
+    assert!(!p.notes(&m.tracks[0].id).is_empty(), "the melody track plays something");
+    let hits = p.notes(&m.tracks[1].id);
+    let count = |pitch| hits.iter().filter(|n| n.pitch == pitch).count();
+    assert_eq!((count(36), count(38), count(42)), (8, 8, 32), "kick on 1 and 3, snare on 2 and 4, 8th hats, 4 bars");
+    assert_eq!(m.clips.len(), 1, "the pattern is already in the song");
+
+    let tiers = melody_tiers(&m);
+    assert!(tiers.iter().all(|t| *t != Tier::Dissonance), "the starter melody is never flagged: {tiers:?}");
+    assert!(tiers.contains(&Tier::ChordTone) && tiers.contains(&Tier::Tension), "it shows more than one tier");
+}
+
+#[test]
+fn starter_shaped_fits_any_length_and_meter() {
+    for (length, bar) in [(32.0, 4.0), (8.0, 4.0), (12.0, 3.0), (14.0, 3.5), (8.0, 2.0)] {
+        let m = ProjectModel::starter_shaped(length, bar);
+        let p = &m.patterns[0];
+        assert_eq!(p.length_beats, length);
+        assert_eq!(m.clips[0].length_beats, length);
+        assert_eq!(p.chords.chords().len(), 4, "{length}/{bar}: one pass of the progression");
+        assert_eq!(p.chords.chords().last().unwrap().end_beat(), length);
+        for n in p.notes_by_track.values().flatten() {
+            assert!(n.start_beat >= 0.0 && n.end_beat() <= length + 1e-9, "{length}/{bar}: note past the end: {n:?}");
+        }
+        assert!(melody_tiers(&m).iter().all(|t| *t != Tier::Dissonance), "{length}/{bar}: the melody keeps its tiers");
+        let hits = p.notes(&m.tracks[1].id);
+        let kicks: Vec<f64> = hits.iter().filter(|n| n.pitch == 36).map(|n| n.start_beat % bar).collect();
+        assert!(kicks.contains(&0.0), "{length}/{bar}: a kick on every downbeat");
+        assert!(hits.iter().any(|n| n.pitch == 38), "{length}/{bar}: there is a snare");
+    }
+    // Nonsense input falls back to the default shape instead of an empty pattern.
+    assert_eq!(ProjectModel::starter_shaped(0.0, f64::NAN).patterns[0].length_beats, 16.0);
+}
+
+// ---------------------------------------------------------------- vibes
+
+#[test]
+fn every_vibe_builds_a_playable_project() {
+    let infos = vibes();
+    assert_eq!(infos.len(), 5);
+    for info in &infos {
+        let m = ProjectModel::from_vibe(&info.id).unwrap_or_else(|| panic!("{} builds", info.id));
+        assert_eq!(m.tempo, info.tempo, "{}", info.id);
+        assert_eq!(m.key, info.key, "{}: key locked as advertised", info.id);
+        assert!(m.key.is_locked);
+        let p = &m.patterns[0];
+        assert_eq!(p.length_beats, 16.0);
+        assert_eq!(m.clips.len(), 1);
+        assert!(p.notes(&m.tracks[0].id).is_empty(), "{}: the lead is left for the player", info.id);
+        for n in p.notes_by_track.values().flatten() {
+            assert!(n.start_beat >= 0.0 && n.end_beat() <= 16.0 + 1e-9, "{}: {n:?} past the end", info.id);
+        }
+        // Every bass note is the root of the chord it sits on, low.
+        let bass = p.notes(&m.tracks[1].id);
+        assert!(!bass.is_empty());
+        for n in bass {
+            let chord = p.chords.chord_at(n.start_beat).unwrap();
+            assert_eq!(n.pitch.rem_euclid(12), chord.pitch_classes[0].rem_euclid(12), "{}: bass plays roots", info.id);
+            assert!((32..=43).contains(&n.pitch), "{}: bass pitch {} out of range", info.id, n.pitch);
+        }
+        // A kick on every downbeat, whatever the groove.
+        let kicks: Vec<f64> = p.notes(&m.tracks[2].id).iter().filter(|n| n.pitch == 36).map(|n| n.start_beat).collect();
+        for bar in 0..4 {
+            assert!(kicks.contains(&(bar as f64 * 4.0)), "{}: kick on bar {bar}", info.id);
+        }
+    }
+    assert!(ProjectModel::from_vibe("polka").is_none());
+}
+
+/// The browser mock (ui/src/bridge.ts) mirrors the vibes; `bridge.test.ts` asserts these same
+/// values, so a change on either side fails a test.
+#[test]
+fn vibe_values_shared_with_the_ui() {
+    let described: Vec<String> = vibes()
+        .iter()
+        .map(|info| {
+            let m = ProjectModel::from_vibe(&info.id).unwrap();
+            let p = &m.patterns[0];
+            let names: Vec<&str> = m.tracks.iter().map(|t| t.name.as_str()).collect();
+            let chords: Vec<&str> = p.chords.chords().iter().map(|c| c.name.as_deref().unwrap_or("")).collect();
+            let count = |track: usize, pitch: Option<i32>| p.notes(&m.tracks[track].id).iter().filter(|n| pitch.is_none_or(|x| n.pitch == x)).count();
+            format!(
+                "{}|{}|{}|{}|{}|{}|kick {}|bass {}|{}",
+                info.id,
+                info.tempo,
+                m.swing,
+                names.join(","),
+                chords.join(" "),
+                m.tracks[0].voice,
+                count(2, Some(36)),
+                count(1, None),
+                count(2, None),
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        [
+            "lofi|80|60|keys,bass,drums|Gm C F Dm|triangle|kick 12|bass 12|52",
+            "postpunk|148|50|lead,bass,drums|Em C G D|square|kick 12|bass 32|52",
+            "ambient|70|50|pad,bass,drums|D G|pad|kick 4|bass 4|8",
+            "songwriter|96|50|melody,bass,drums|G D Em C|pluck|kick 8|bass 8|48",
+            "club|124|50|lead,bass,drums|Am G F G|square|kick 16|bass 16|40",
+        ]
+    );
+}

@@ -3,6 +3,7 @@ import { peakDb, selectedPattern, useStore } from "../store";
 import { tempoMap, TIME_SIGNATURES } from "../types";
 import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
+import { keys } from "../platform";
 
 function pad(n: number, w: number) {
   return String(n).padStart(w, "0");
@@ -179,7 +180,7 @@ export function Transport() {
                 e.preventDefault();
                 setTempo(Math.round(model.tempo) + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 10 : 1));
               }}
-              title="click to type (↑↓ ±1, ⇧ ±10) · drag up/down · scroll to nudge · double-click resets"
+              title={keys("click to type (↑↓ ±1, ⇧ ±10) · drag up/down · scroll to nudge · double-click resets")}
             >
               {model.tempo.toFixed(3)}
             </span>

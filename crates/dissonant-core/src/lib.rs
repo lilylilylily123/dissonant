@@ -16,6 +16,7 @@ pub mod model;
 pub mod sequence;
 pub mod tempo;
 pub mod theory;
+pub mod vibes;
 
 pub use arrangement::Arrangement;
 pub use chord_track::ChordTrack;
@@ -31,3 +32,4 @@ pub use theory::harmony::{self, ChordSuggestion, ProgressionStarter};
 pub use theory::highlight::HighlightEngine;
 pub use theory::key_detector::{KeyCandidate, KeyDetectionResult, KeyDetector};
 pub use theory::tier::{Tier, TierClassifier};
+pub use vibes::{vibes, Groove, VibeInfo};

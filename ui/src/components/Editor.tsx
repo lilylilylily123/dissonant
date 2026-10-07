@@ -3,6 +3,7 @@ import { trackColor } from "../types";
 import { BASE_BEAT_W, GUTTER, ChordLane } from "./ChordLane";
 import { DrumGrid } from "./DrumGrid";
 import { PianoRoll } from "./PianoRoll";
+import { keys } from "../platform";
 
 /** PAT mode editor column: toolbar · chord lane · piano roll (or drum grid) · velocity lane. */
 export function Editor() {
@@ -39,7 +40,7 @@ export function Editor() {
         {!track.isDrum && (
           <>
             <div className="vdiv" />
-            <button className={`chip${s.brush ? " on" : ""}`} onClick={() => s.toggleBrush()} title="brush: left-drag on empty space paints notes (⌥-drag does this too when ⌥ is set to paint in Settings)">brush</button>
+            <button className={`chip${s.brush ? " on" : ""}`} onClick={() => s.toggleBrush()} title={keys("brush: left-drag on empty space paints notes (⌥-drag does this too when ⌥ is set to paint in Settings)")}>brush</button>
             <button className={`chip${s.follow ? " on" : ""}`} onClick={() => s.toggleFollow()} title="follow: keep the playhead in view while playing">follow</button>
             <button className={`chip${s.fold ? " on" : ""}`} onClick={() => s.toggleFold()} title="fold: show only rows that have notes, plus chord tones around them">fold</button>
             <div className="opt" title="ghost: draw another track's notes behind this one (dashed, with their tiers)">
@@ -74,9 +75,9 @@ export function Editor() {
         <span
           className="chip"
           style={{ cursor: "help" }}
-          title={
-            "click: place a note (keep dragging to move it) · ⌥: off the grid (or paint, per Settings)\ndrag: move (⇧ one axis) · right edge: resize · ⌥-drag a note: duplicate\n⇧/⌘-drag: marquee · ⇧-click: toggle · double-click a key: select that pitch (⌘: pitch class)\nright-click: erase · Tab/⇧Tab: next/previous note · 0: mute\n⌫ delete · ⌘A ⌘C ⌘X ⌘V ⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one loop later\narrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] velocity · ⌥-wheel transpose (⌥⇧ octave)\n⌘-wheel zoom at cursor · ⇧-wheel scroll · ruler: seek · velocity lane: drag stems, ⌥-drag ramp"
-          }
+          title={keys(
+            "click: place a note (keep dragging to move it) · ⌥: off the grid (or paint, per Settings)\ndrag: move (⇧ one axis) · right edge: resize · ⌥-drag a note: duplicate\n⇧/⌘-drag: marquee · ⇧-click: toggle · double-click a key: select that pitch (⌘: pitch class)\nright-click: erase · Tab/⇧Tab: next/previous note · 0: mute\n⌫ delete · ⌘A ⌘C ⌘X ⌘V ⌘D · ⇧⌘E split at playhead · ⌘J glue · ⌘B duplicate one loop later\narrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] velocity · ⌥-wheel transpose (⌥⇧ octave)\n⌘-wheel zoom at cursor · ⇧-wheel scroll · ruler: seek · velocity lane: drag stems, ⌥-drag ramp",
+          )}
         >
           ?
         </span>

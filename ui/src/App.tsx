@@ -10,9 +10,10 @@ import { Editor } from "./components/Editor";
 import { Dialog } from "./components/Dialog";
 import { SettingsWindow } from "./components/Settings";
 import { ExportDialog, ExportProgressBar } from "./components/ExportDialog";
-import { TemplatePicker } from "./components/TemplatePicker";
+import { NewProjectScreen } from "./components/NewProjectScreen";
 import { useStore } from "./store";
 import { useLiveKeyboard } from "./liveKeyboard";
+import { splitNotes } from "./noteEditing";
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -42,7 +43,7 @@ export default function App() {
         s.openSettings(!s.settingsOpen);
         return;
       }
-      if (s.settingsOpen || s.templatesOpen) return;
+      if (s.settingsOpen || s.newProjectOpen) return;
       if (s.exportOpen) {
         if (e.key === "Escape") s.openExport(false);
         return;
@@ -69,6 +70,10 @@ export default function App() {
       } else if (mod && k === "n") {
         e.preventDefault();
         void s.newProject();
+      } else if (mod && k === "e" && e.shiftKey) {
+        // Split at the playhead; the roll handles this itself when it has focus.
+        e.preventDefault();
+        if (s.mode === "pattern" && s.selectedNoteIds.length) s.transformSelection((ns, ids) => splitNotes(ns, ids, s.playhead), "split notes");
       } else if (mod && k === "e") {
         e.preventDefault();
         void s.exportWav();
@@ -122,7 +127,7 @@ export default function App() {
       {toast && <div className={`toast${toast.error ? " error" : ""}`}>{toast.text}</div>}
       <SettingsWindow />
       <ExportDialog />
-      <TemplatePicker />
+      <NewProjectScreen />
       <ExportProgressBar />
       <Dialog />
     </div>

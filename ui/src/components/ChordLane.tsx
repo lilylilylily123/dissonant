@@ -71,7 +71,7 @@ export function ChordLane() {
         <span className="cap">chords</span>
       </div>
       <div className="inner" style={{ width: pattern.lengthBeats * beatW }}>
-        {chords.length === 0 && <span className="hint">no chords — pick a starter under HARMONY, or ＋ chord</span>}
+        {chords.length === 0 && <span className="hint">no chords yet: pick a progression under HARMONY, or ＋ chord</span>}
         {chords.map((c) => (
           <div
             key={c.id}

@@ -11,6 +11,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
 import type { Command, MasterSettings, NoteEvent, ProjectModel } from "./types";
+import { SOUND_PRESETS, soundPresetOf } from "./types";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
 
@@ -71,7 +72,7 @@ describe("newProject", () => {
     const s = await b.newProject(true);
     expect(s.model.schemaVersion).toBe(5);
     expect(s.model.tempo).toBe(120);
-    expect(s.model.key).toEqual({ rootPitchClass: null, scale: "major", isLocked: false });
+    expect(s.model.key).toEqual({ rootPitchClass: 0, scale: "major", isLocked: true });
     expect(s.model.tracks.map((t) => [t.name, t.isDrum])).toEqual([
       ["melody", false],
       ["drums", true],
@@ -81,7 +82,13 @@ describe("newProject", () => {
     expect(s.model.patterns[0].lengthBeats).toBe(16);
     // I–IV–V–vi over 16 beats at 4 beats a chord.
     expect(s.model.patterns[0].chords.chords.map((c) => c.startBeat)).toEqual([0, 4, 8, 12]);
-    expect(s.model.patterns[0].notesByTrack).toEqual({});
+    // A melody (STARTER_MELODY) and a groove (starter_groove), so space plays music at once.
+    const [melody, drums] = s.model.tracks;
+    expect(melody.voice).toBe("pluck");
+    const notes = s.model.patterns[0].notesByTrack;
+    expect(notes[melody.id].map((n) => n.pitch)).toEqual([76, 74, 72, 69, 72, 77, 74, 71, 67, 72, 71, 69]);
+    const count = (pitch: number) => notes[drums.id].filter((n) => n.pitch === pitch).length;
+    expect([count(36), count(38), count(42)]).toEqual([8, 8, 32]);
     expect(s.model.clips.map((c) => c.patternId)).toEqual([s.model.patterns[0].id]);
     expect(s.model.master).toEqual({ gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 });
     expect([s.canUndo, s.canRedo, s.dirty, s.path]).toEqual([false, false, false, null]);
@@ -94,6 +101,14 @@ describe("newProject", () => {
     expect(s.model.patterns).toHaveLength(1);
     expect(s.model.patterns[0].chords.chords).toEqual([]);
     expect(s.model.clips).toEqual([]);
+  });
+
+  it("follows the new-project setting when no choice is passed (new_project's fallback)", async () => {
+    const settings = await b.getSettings();
+    await b.setSettings({ ...settings, editing: { ...settings.editing, newProject: "empty" } });
+    expect((await b.newProject()).model.tracks).toHaveLength(1);
+    await b.setSettings({ ...settings, editing: { ...settings.editing, newProject: "starter" } });
+    expect((await b.newProject()).model.tracks).toHaveLength(2);
   });
 
   it("drops a pending transient gesture (Document::replace clears `pending`)", async () => {
@@ -335,9 +350,9 @@ describe("setNotes", () => {
   it("drops the track's entry when the array is empty", async () => {
     const { melody, pattern } = await ids();
     await b.apply({ type: "setNotes", patternId: pattern, trackId: melody, notes: [note(0, 60)] });
-    expect(Object.keys((await model()).patterns[0].notesByTrack)).toEqual([melody]);
+    expect(Object.keys((await model()).patterns[0].notesByTrack)).toContain(melody);
     await b.apply({ type: "setNotes", patternId: pattern, trackId: melody, notes: [] });
-    expect((await model()).patterns[0].notesByTrack).toEqual({});
+    expect(Object.keys((await model()).patterns[0].notesByTrack)).not.toContain(melody);
   });
 
   it("rejects non-finite note fields instead of writing NaN into the model", async () => {
@@ -514,5 +529,58 @@ describe("save and open", () => {
     expect(s.canUndo).toBe(false);
     expect(s.canRedo).toBe(false);
     expect(s.model.tracks[0].name).toBe("lead");
+  });
+});
+
+// ─── sound presets ─────────────────────────────────────────────────────────────────────────
+
+describe("sound presets (store.applySoundPreset)", () => {
+  it("voice, tone and reverb as transient edits undo as one labelled step", async () => {
+    const { melody } = await ids();
+    const before = (await model()).tracks[0];
+    const preset = SOUND_PRESETS.find((p) => p.name === "warm pad")!;
+    const label = `sound: ${preset.name}`;
+    await b.apply({ type: "setTrackVoice", id: melody, voice: preset.voice }, true, label);
+    await b.apply({ type: "setTrackParam", id: melody, param: "tone", value: preset.tone }, true, label);
+    await b.apply({ type: "setTrackParam", id: melody, param: "reverbSend", value: preset.reverbSend }, true, label);
+    const s = await b.commitGesture();
+    expect(soundPresetOf(s.model.tracks[0])?.name).toBe("warm pad");
+    expect(s.undoLabel).toBe(label);
+    const back = await b.undo();
+    expect(back.model.tracks[0]).toEqual(before);
+    expect(back.canUndo).toBe(false);
+  });
+});
+
+// ─── vibes ─────────────────────────────────────────────────────────────────────────────────
+
+describe("vibes (ProjectModel::from_vibe)", () => {
+  it("match vibe_values_shared_with_the_ui in crates/dissonant-core/tests/persistence.rs", async () => {
+    const infos = await b.listVibes();
+    const described = [];
+    for (const info of infos) {
+      const s = await b.newFromVibe(info.id);
+      const m = s.model;
+      const p = m.patterns[0];
+      expect(m.key).toEqual(info.key);
+      expect([s.dirty, s.canUndo, s.path]).toEqual([false, false, null]);
+      const count = (track: number, pitch?: number) => (p.notesByTrack[m.tracks[track].id] ?? []).filter((n) => pitch === undefined || n.pitch === pitch).length;
+      described.push(
+        `${info.id}|${info.tempo}|${m.swing}|${m.tracks.map((t) => t.name).join(",")}|${p.chords.chords.map((c) => c.name).join(" ")}|${m.tracks[0].voice}|kick ${count(2, 36)}|bass ${count(1)}|${count(2)}`,
+      );
+    }
+    expect(described).toEqual([
+      "lofi|80|60|keys,bass,drums|Gm C F Dm|triangle|kick 12|bass 12|52",
+      "postpunk|148|50|lead,bass,drums|Em C G D|square|kick 12|bass 32|52",
+      "ambient|70|50|pad,bass,drums|D G|pad|kick 4|bass 4|8",
+      "songwriter|96|50|melody,bass,drums|G D Em C|pluck|kick 8|bass 8|48",
+      "club|124|50|lead,bass,drums|Am G F G|square|kick 16|bass 16|40",
+    ]);
+  });
+
+  it("rejects an unknown vibe and keeps the project", async () => {
+    const before = await model();
+    await expect(b.newFromVibe("polka")).rejects.toBeTruthy();
+    expect(await model()).toEqual(before);
   });
 });

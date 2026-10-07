@@ -903,6 +903,17 @@ mod tests {
         assert!(shared.master_peak().0 > 0.0);
     }
 
+    /// The starter has to make music on the first press of space, chord bed or not.
+    #[test]
+    fn starter_makes_sound_without_the_chord_bed() {
+        let model = ProjectModel::starter();
+        let pid = model.patterns[0].id;
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::Play);
+        assert!(render(&mut e, 20_000, 512).iter().any(|s| s.abs() > 0.05));
+    }
+
     #[test]
     fn audition_plays_then_stops_by_itself() {
         let model = ProjectModel::empty();
