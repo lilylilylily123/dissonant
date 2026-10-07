@@ -261,6 +261,7 @@ mod tests {
     fn song_export_follows_clips_and_empty_is_an_error() {
         let mut model = ProjectModel::starter();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        model.patterns[0].notes_by_track.clear();
         model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.0, 1.0, 60)]);
         model.clips = vec![Clip::new(pid, 0.0, 16.0), Clip::new(pid, 16.0, 16.0)];
         let back = import(&export(&model, MidiScope::Song).unwrap(), 4.0).unwrap();

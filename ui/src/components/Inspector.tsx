@@ -245,6 +245,11 @@ export function Inspector() {
           <span className="flabel">now</span>
           <span className="mono" style={{ fontSize: 11, color: chord ? "var(--text-1)" : "var(--text-5)" }}>{chord?.name ?? (root !== null ? "scale only" : "no guidance yet")}</span>
         </div>
+        {root === null && chords.length === 0 && (
+          <div className="mono" style={{ fontSize: 9.5, lineHeight: 1.45, color: "var(--text-4)" }}>
+            no key or chords yet, so every note looks the same. pick a starter below, or just play a few notes and lock the key the KEY cell hears.
+          </div>
+        )}
         <div className="scalestrip" title="how each pitch class fits the chord under the playhead">
           {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((pc) => (
             <div key={pc} className={map[pc] ?? ""} style={pc === root ? { boxShadow: "inset 0 0 0 1px var(--accent)" } : undefined}>

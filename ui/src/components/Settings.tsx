@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { GRID_OPTIONS, useStore } from "../store";
 import { TIER_PRESETS, TIME_SIGNATURES, type Settings as SettingsT } from "../types";
+import { keys } from "../platform";
 
 type Tab = "audio" | "midi" | "editing" | "export" | "appearance";
 const TABS: [Tab, string][] = [
@@ -251,7 +252,7 @@ function EditingTab() {
       <Row label="audition on place" hint="sound a note when it is placed or dragged to a new pitch">
         <Toggle on={e.auditionOnPlace} onChange={(v) => upd({ auditionOnPlace: v })} />
       </Row>
-      <Row label="⌥ while dragging" hint="no snap is the usual DAW convention; paint is the original dissonant mapping (⌥-drag on empty paints notes)">
+      <Row label={keys("⌥ while dragging")} hint={keys("no snap is the usual DAW convention; paint is the original dissonant mapping (⌥-drag on empty paints notes)")}>
         <Seg value={e.altKey} options={[["noSnap", "no snap"], ["paint", "paint"]]} onChange={(v) => upd({ altKey: v })} />
       </Row>
       <Row label="snap to chord changes" hint="a note placed within a grid step of a chord boundary lands on it">
@@ -263,7 +264,7 @@ function EditingTab() {
       <div className="sdiv" />
       <div className="scap">new projects</div>
       <Row label="start from">
-        <Seg value={e.newProject} options={[["starter", "starter (I–IV–V–vi + drums)"], ["empty", "empty"]]} onChange={(v) => upd({ newProject: v })} />
+        <Seg value={e.newProject} options={[["starter", "starter (I–IV–V–vi, melody + drums)"], ["empty", "empty"]]} onChange={(v) => upd({ newProject: v })} />
       </Row>
       <Row label="tempo">
         <Num value={e.defaultTempo} min={20} max={300} onCommit={(v) => upd({ defaultTempo: v })} />

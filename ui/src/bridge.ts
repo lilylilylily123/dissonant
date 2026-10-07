@@ -36,6 +36,7 @@ export interface Bridge {
   commitGesture(): Promise<Snapshot>;
   undo(): Promise<Snapshot>;
   redo(): Promise<Snapshot>;
+  /** `starter` picks starter or empty; leave it out to follow the "new project opens" setting. */
   newProject(starter?: boolean): Promise<Snapshot>;
   openProject(path: string): Promise<Snapshot>;
   saveProject(path?: string): Promise<Snapshot>;
@@ -131,7 +132,7 @@ async function tauriBridge(): Promise<Bridge> {
     commitGesture: () => invoke<Snapshot>("commit_gesture"),
     undo: () => invoke<Snapshot>("undo"),
     redo: () => invoke<Snapshot>("redo"),
-    newProject: (starter = true) => invoke<Snapshot>("new_project", { starter }),
+    newProject: (starter) => invoke<Snapshot>("new_project", { starter: starter ?? null }),
     openProject: (path) => invoke<Snapshot>("open_project", { path }),
     saveProject: (path) => invoke<Snapshot>("save_project", { path: path ?? null }),
     setPlaybackContext: (mode, patternId) => invoke("set_playback_context", { mode, patternId }),
@@ -264,12 +265,40 @@ function emptyModel(): ProjectModel {
   };
 }
 
-/** `ProjectModel::starter()`: `empty()` plus a I–IV–V–vi progression, a drum track and a clip. */
+/** `STARTER_MELODY` in model.rs: (start, length, pitch, velocity) per 4-beat chord slot. */
+const STARTER_MELODY: [number, number, number, number][][] = [
+  [[0, 1.5, 76, 100], [1.5, 0.5, 74, 80], [2, 2, 72, 96]], // C:  E  D  C
+  [[0, 1, 69, 100], [1, 1, 72, 88], [2, 2, 77, 96]], // F:  A  C  F
+  [[0, 1.5, 74, 100], [1.5, 0.5, 71, 80], [2, 2, 67, 96]], // G:  D  B  G
+  [[0, 1.5, 72, 100], [1.5, 0.5, 71, 80], [2, 2, 69, 96]], // Am: C  B  A
+];
+
+/** `starter_groove` in model.rs at 4/4 over 16 beats: kick on 1 and 3, snare on 2 and 4, 8th hats. */
+function starterGroove(): NoteEvent[] {
+  const hits: NoteEvent[] = [];
+  const hit = (startBeat: number, pitch: number, velocity: number) => hits.push({ id: uuid(), startBeat, lengthBeats: 0.25, pitch, velocity });
+  for (let bar = 0; bar < 16; bar += 4) {
+    for (let beat = 0; beat < 4; beat++) hit(bar + beat, beat % 2 === 0 ? 36 : 38, beat % 2 === 0 ? 120 : 100);
+    for (let step = 0; step < 4; step += 0.5) hit(bar + step, 42, Number.isInteger(step) ? 80 : 60);
+  }
+  return hits.sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
+}
+
+/** `ProjectModel::starter()`: I–IV–V–vi in C (key locked), a pluck melody, a drum groove, one clip. */
 function starterModel(): ProjectModel {
   const m = emptyModel();
+  m.key = { rootPitchClass: 0, scale: "major", isLocked: true };
   m.patterns[0].chords = { chords: progression([0, 3, 4, 5], 0, "major", 16) };
-  m.tracks.push(newTrack(true, "drums"));
+  const melody = m.tracks[0];
+  melody.voice = "pluck";
+  melody.reverbSend = 0.2;
+  const drums = newTrack(true, "drums");
+  m.tracks.push(drums);
   const p = m.patterns[0];
+  p.notesByTrack[melody.id] = STARTER_MELODY.flatMap((phrase, i) =>
+    phrase.map(([start, lengthBeats, pitch, velocity]) => ({ id: uuid(), startBeat: i * 4 + start, lengthBeats, pitch, velocity })),
+  );
+  p.notesByTrack[drums.id] = starterGroove();
   m.clips = [{ id: uuid(), patternId: p.id, startBeat: 0, lengthBeats: p.lengthBeats, offsetBeats: 0, muted: false }];
   return m;
 }
@@ -703,8 +732,17 @@ function mockBridge(): Bridge {
       }
       return snapshot();
     },
-    newProject: async (starter = true) => {
-      replace(starter ? starterModel() : emptyModel(), null);
+    newProject: async (starter) => {
+      // Like `new_project`: no explicit choice means the "new project opens" setting.
+      let useStarter = starter;
+      if (useStarter === undefined) {
+        try {
+          useStarter = withDefaults(JSON.parse(localStorage.getItem("dissonant.mock.settings") ?? "null")).editing.newProject === "starter";
+        } catch {
+          useStarter = true;
+        }
+      }
+      replace(useStarter ? starterModel() : emptyModel(), null);
       return snapshot();
     },
     openProject: async (p) => {

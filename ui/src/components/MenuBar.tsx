@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { selectedPattern, selectedTrack, useStore } from "../store";
 import { fileNameOf } from "../types";
 import { duplicateBySpan, glueNotes, moveNotes, splitNotes, toggleMute } from "../noteEditing";
+import { keys } from "../platform";
 
 type Item = { label: string; sc?: string; sub?: string; action?: () => void; disabled?: boolean; sep?: false } | { sep: true };
 
@@ -19,7 +20,8 @@ export function MenuBar() {
     return () => window.removeEventListener("pointerdown", close);
   }, [open]);
 
-  const mod = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
+  // Shortcuts are written with Mac glyphs and spelled out for the OS when drawn (`keys`).
+  const mod = "⌘";
   const hasSel = s.selectedNoteIds.length > 0;
   const range = { min: 24, max: 96 };
 
@@ -62,7 +64,7 @@ export function MenuBar() {
       { label: "Transpose up an octave", sc: "⇧↑", disabled: !hasSel, action: () => s.transformSelection((ns, ids) => moveNotes(ns, ids, 0, 12, range), "transpose notes") },
       { label: "Transpose down an octave", sc: "⇧↓", disabled: !hasSel, action: () => s.transformSelection((ns, ids) => moveNotes(ns, ids, 0, -12, range), "transpose notes") },
       { sep: true },
-      { label: "Split at playhead", sc: `${mod}E`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => splitNotes(ns, ids, s.playhead), "split notes") },
+      { label: "Split at playhead", sc: `⇧${mod}E`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => splitNotes(ns, ids, s.playhead), "split notes") },
       { label: "Glue notes", sc: `${mod}J`, disabled: !hasSel, action: () => s.transformSelection(glueNotes, "glue notes") },
       { label: "Duplicate one loop later", sc: `${mod}B`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => duplicateBySpan(ns, ids, pattern?.lengthBeats ?? 16).notes, "duplicate to next loop") },
       { label: "Mute / unmute notes", sc: "0", disabled: !hasSel, action: () => s.transformSelection(toggleMute, "mute notes") },
@@ -130,7 +132,7 @@ export function MenuBar() {
                       {(it as { label: string }).label}
                       {(it as { sub?: string }).sub && <span className="sub" title={(it as { sub?: string }).sub}>{(it as { sub?: string }).sub}</span>}
                     </span>
-                    <span className="sc">{(it as { sc?: string }).sc ?? ""}</span>
+                    <span className="sc">{keys((it as { sc?: string }).sc ?? "")}</span>
                   </div>
                 ),
               )}

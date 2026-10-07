@@ -4,6 +4,7 @@ import { DRUM_KIT, TRACK_PALETTE, trackColor, type Clip, type NoteEvent, type Sc
 import { NOTE_NAMES, noteName } from "../theory";
 import { VMeter } from "./Meter";
 import { TempoLane } from "./TempoLane";
+import { keys } from "../platform";
 
 const HEAD_W = 220;
 const SECTION_COLORS = ["#9a9aa4", "#ff9d2a", "#ff3b30", "#3dc8ff", "#b48cff", "#3dffb0"];
@@ -228,7 +229,7 @@ export function Arrangement() {
         ))}
 
         <div className="addrow" style={{ width: HEAD_W + timelineW + 12 }}>
-          <div>{model.clips.length === 0 ? "← press ＋ on a pattern to add it to the song" : "＋ patterns on the left · drag clips, trim their right edge, ⌥-drag to copy"}</div>
+          <div>{model.clips.length === 0 ? "← press ＋ on a pattern to add it to the song" : keys("＋ patterns on the left · drag clips, trim their right edge, ⌥-drag to copy")}</div>
         </div>
         <div className="playline" style={{ left: playX }} />
       </div>
@@ -430,7 +431,7 @@ function ClipView({
       onPointerMove={onMove}
       onPointerUp={onUp}
       onDoubleClick={onDoubleClick}
-      title={`${pattern.name} · ${notes.length} notes${repeats !== 1 ? ` · ×${+repeats.toFixed(2)}` : ""} · drag: move · right edge: trim/extend · ⌥-drag: copy · double-click: edit · right-click: remove`}
+      title={`${pattern.name} · ${notes.length} notes${repeats !== 1 ? ` · ×${+repeats.toFixed(2)}` : ""} · drag: move · right edge: trim/extend · ${keys("⌥-drag")}: copy · double-click: edit · right-click: remove`}
     >
       <div className="ch" style={{ background: color }}>
         {pattern.name}

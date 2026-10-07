@@ -515,32 +515,13 @@ fn redo(state: State<'_, AppState>) -> Snapshot {
 fn new_project(state: State<'_, AppState>, starter: Option<bool>) -> Snapshot {
     let e = state.settings().editing;
     let starter = starter.unwrap_or(e.new_project == NewProjectKind::Starter);
-    let mut model = if starter { ProjectModel::starter() } else { ProjectModel::empty() };
+    let bar = e.default_time_signature.beats_per_bar();
+    let beats = (e.default_pattern_bars.max(1) as f64) * bar;
+    // The starter is built at the default size, so its melody and groove fill the pattern.
+    let mut model = if starter { ProjectModel::starter_shaped(beats, bar) } else { ProjectModel::empty() };
     model.tempo = e.default_tempo;
     model.time_signature = e.default_time_signature;
-    let beats = e.default_pattern_bars as f64 * e.default_time_signature.beats_per_bar();
-    if beats != model.patterns[0].length_beats && !starter {
-        model.patterns[0].length_beats = beats;
-    } else if beats != model.patterns[0].length_beats {
-        // Keep the starter's progression but stretch its chords and clip to the new length.
-        let scale = beats / model.patterns[0].length_beats;
-        let chords: Vec<_> = model.patterns[0]
-            .chords
-            .chords()
-            .iter()
-            .cloned()
-            .map(|mut c| {
-                c.start_beat *= scale;
-                c.length_beats *= scale;
-                c
-            })
-            .collect();
-        model.patterns[0].chords = dissonant_core::ChordTrack::new(chords);
-        model.patterns[0].length_beats = beats;
-        for clip in &mut model.clips {
-            clip.length_beats = beats;
-        }
-    }
+    model.patterns[0].length_beats = beats;
     state.load_model(model, None, false);
     state.snapshot()
 }

@@ -218,6 +218,17 @@ export const useStore = create<State>((set, get) => {
     }
   };
 
+  /**
+   * A fresh, untitled starter also turns the chord bed on, so the first press of space plays
+   * the progression with the melody and the groove. A no-op for a project without chords.
+   */
+  const hearStarterBed = (snapshot: Snapshot) => {
+    if (snapshot.path !== null || snapshot.dirty || get().hearChords) return;
+    if (!snapshot.model.patterns.some((p) => p.chords.chords.length > 0)) return;
+    set({ hearChords: true });
+    void getBridge().then((b) => b.setHearChords(true));
+  };
+
   /** Offer to restore autosaves left by an earlier run, newest first. */
   const offerRecovery = async (candidates: RecoveryCandidate[]) => {
     const b = await getBridge();
@@ -301,8 +312,10 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         console.warn("settings unavailable", e);
       }
-      applySnapshot(await b.getState());
+      const first = await b.getState();
+      applySnapshot(first);
       await syncPlayback();
+      hearStarterBed(first);
       await b.setLiveTrack(get().selectedTrackId);
       b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks, countIn: e.countIn ?? 0 }));
       b.onDocument((snap) => applySnapshot(snap));
@@ -534,8 +547,11 @@ export const useStore = create<State>((set, get) => {
     async newProject() {
       const b = await getBridge();
       if (!(await get().confirmDiscard("creating a new project"))) return;
-      applySnapshot(await b.newProject(true));
+      // No explicit choice: the backend follows the "new project opens" setting.
+      const snap = await b.newProject();
+      applySnapshot(snap);
       await syncPlayback();
+      hearStarterBed(snap);
     },
 
     async openProject() {
@@ -686,9 +702,15 @@ export const useStore = create<State>((set, get) => {
       if (!(await get().confirmDiscard("creating a new project"))) return;
       set({ templatesOpen: false });
       try {
-        if (name === "starter" || name === "empty") applySnapshot(await b.newProject(name === "starter"));
-        else applySnapshot(await b.newFromTemplate(name));
-        await syncPlayback();
+        if (name === "starter" || name === "empty") {
+          const snap = await b.newProject(name === "starter");
+          applySnapshot(snap);
+          await syncPlayback();
+          hearStarterBed(snap);
+        } else {
+          applySnapshot(await b.newFromTemplate(name));
+          await syncPlayback();
+        }
       } catch (e) {
         get().showToast(String(e), true);
       }

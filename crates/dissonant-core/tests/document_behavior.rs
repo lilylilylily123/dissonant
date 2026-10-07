@@ -14,6 +14,7 @@ use uuid::Uuid;
 /// both patterns arranged. Rich enough that every `Command` variant has something to bite on.
 fn fixture() -> ProjectModel {
     let mut m = ProjectModel::starter();
+    m.patterns[0].notes_by_track.clear(); // the starter's seeded melody and groove
     let mut second = SongPattern::new("pattern 2");
     second.length_beats = 8.0;
     m.patterns.push(second);

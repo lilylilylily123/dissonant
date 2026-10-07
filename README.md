@@ -50,11 +50,16 @@ cargo clippy --workspace --all-targets
 
 ## Using it
 
-Two screens, switched with the **PAT | SONG** control (or Tab):
+A new project opens on the **starter**: I–IV–V–vi in C with a melody, a drum groove and the chord
+bed on, so space plays music straight away (Settings → editing can make it empty instead).
+
+Two screens, switched with the **PAT | SONG** control (or Tab). Shortcuts are written for macOS;
+on Windows and Linux read Ctrl for ⌘, Alt for ⌥ and Shift for ⇧ (the app's own labels do this
+for you):
 
 | Where | How |
 |---|---|
-| **PAT** · piano roll | click places a note (keep dragging to move it) · drag a note to move (⇧ locks to one axis), its right edge to resize · ⌥-drag a note duplicates · ⌥ on empty space places off the grid (or paints, per Settings) · **brush** paints · ⇧/⌘-drag marquee · double-click a key selects that pitch (⌘: pitch class) · Tab/⇧Tab next/previous note · right-click erases · ⌫ ⌘A ⌘C ⌘X ⌘V ⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one loop later · 0 mute (hollow, not played) · arrows nudge (⇧ = octave / bar, ⌥ = fine) · `[` `]` velocity · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor · ⇧-wheel scrolls · velocity lane: drag the stems, ⌥-drag draws a ramp · click the ruler to seek · drag the ruler's top strip for a loop region (right-click clears) · **follow** keeps the playhead in view · **fit** zooms to the pattern · **fold** shows only rows with notes (plus nearby chord tones) · **ghost** draws another track's notes behind yours, dashed, with their tiers · hover a cell for a plain-words explanation · **tiers** tints rows by fit, **map** paints the whole progression · HARMONY → select by tier picks every chord tone / tension / dissonant note · NOTES → length chips and mute for the selection |
+| **PAT** · piano roll | click places a note (keep dragging to move it) · drag a note to move (⇧ locks to one axis), its right edge to resize · ⌥-drag a note duplicates · ⌥ on empty space places off the grid (or paints, per Settings) · **brush** paints · ⇧/⌘-drag marquee · double-click a key selects that pitch (⌘: pitch class) · Tab/⇧Tab next/previous note · right-click erases · ⌫ ⌘A ⌘C ⌘X ⌘V ⌘D · ⇧⌘E split at playhead · ⌘J glue · ⌘B duplicate one loop later · 0 mute (hollow, not played) · arrows nudge (⇧ = octave / bar, ⌥ = fine) · `[` `]` velocity · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor · ⇧-wheel scrolls · velocity lane: drag the stems, ⌥-drag draws a ramp · click the ruler to seek · drag the ruler's top strip for a loop region (right-click clears) · **follow** keeps the playhead in view · **fit** zooms to the pattern · **fold** shows only rows with notes (plus nearby chord tones) · **ghost** draws another track's notes behind yours, dashed, with their tiers · hover a cell for a plain-words explanation · **tiers** tints rows by fit, **map** paints the whole progression · HARMONY → select by tier picks every chord tone / tension / dissonant note · NOTES → length chips and mute for the selection |
 | Transform | inspector → TRANSFORM: quantize, humanize (chord tones stay tighter), legato, arp ↑/↓/⇅/random, strum, chop, ×2 slower / ½ faster, reverse, invert · Edit menu: transpose by semitone / octave, split, glue, duplicate-loop, mute · **magnet** pulls placed/dragged notes to the nearest chord tone · **stamp chord** places the chord under the cursor |
 | Resolve / keep | select one dissonant note: the inspector says why, offers ↓/↑ resolve targets, or **keep** marks it deliberate (hatch stays, the "!" goes) |
 | Chord lane | starters live under HARMONY in the inspector (always in the key) · drag a chord to move, its right edge to resize · click to free-build · right-click to delete · **chords** to hear the bed |

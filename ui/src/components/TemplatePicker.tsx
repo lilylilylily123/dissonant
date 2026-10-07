@@ -20,7 +20,7 @@ export function TemplatePicker() {
         <div className="spane" style={{ padding: 10, gap: 4, minHeight: 0 }}>
           <div className="tplrow" onClick={() => pick("starter")}>
             <span className="name">starter</span>
-            <span className="meta">I–IV–V–vi in C, a melody and a drum track</span>
+            <span className="meta">I–IV–V–vi in C with a melody, drums and the chord bed: press space</span>
           </div>
           <div className="tplrow" onClick={() => pick("empty")}>
             <span className="name">empty</span>

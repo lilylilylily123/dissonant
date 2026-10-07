@@ -185,7 +185,9 @@ mod tests {
         let mut model = ProjectModel::starter();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         model.tracks[0].voice = "sine".into();
+        model.tracks[0].reverb_send = 0.0;
         model.patterns[0].length_beats = 2.0;
+        model.patterns[0].notes_by_track.clear();
         model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.0, 0.25, 69)]);
         let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
         let opts = RenderOptions { tail_seconds: 0.0, loops: 3, ..Default::default() };

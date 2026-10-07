@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { beatsPerBar, selectedPattern, useStore } from "../store";
 import { songLength } from "../types";
+import { keys } from "../platform";
 
 /** Left column in SONG mode: the pattern library. Click selects, ＋ appends to the song. */
 export function PatternsPanel() {
@@ -111,7 +112,7 @@ export function PatternsPanel() {
             ))}
           </div>
           <div className="help" style={{ padding: 0 }}>
-            ＋ adds the pattern to the end of the song · timeline: drag a clip to move, its right edge to trim or loop-extend, ⌥-drag to copy, right-click to remove, double-click to edit · double-click the marker strip to add a section
+            ＋ adds the pattern to the end of the song · timeline: drag a clip to move, its right edge to trim or loop-extend, {keys("⌥-drag")} to copy, right-click to remove, double-click to edit · double-click the marker strip to add a section
           </div>
         </div>
       )}

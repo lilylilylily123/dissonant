@@ -85,7 +85,7 @@ let clipboard: NoteEvent[] = [];
  *    that pitch (⌘: the pitch class) · Tab/⇧Tab = next/previous note
  *  - right-click / right-drag = erase · ruler click = seek · velocity lane: drag stems, ⌥-drag
  *    draws a ramp · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor
- *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one
+ *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · ⇧⌘E split at playhead · ⌘J glue · ⌘B duplicate one
  *    loop later · 0 mute · arrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] velocity · esc
  * Tiering is visual only — any note can be placed in any tier.
  */
@@ -941,11 +941,11 @@ export function PianoRoll() {
       }
     } else if (k === "0" && !mod) {
       if (selection.size) commit(toggleMute(notes, selection), "mute notes");
-    } else if (mod && k.toLowerCase() === "e") {
-      // Split at the playhead; with nothing to split, fall through to the global export.
+    } else if (mod && e.shiftKey && k.toLowerCase() === "e") {
+      // ⇧⌘E splits at the playhead. ⌘E alone is always export (App's global shortcuts), so the
+      // same keys never do two different things depending on the selection.
       const next = splitNotes(notes, selection, playhead);
-      if (next === notes || next.length === notes.length) return;
-      commit(next, "split notes");
+      if (next !== notes && next.length !== notes.length) commit(next, "split notes");
     } else if (mod && k.toLowerCase() === "j") {
       if (selection.size) commit(glueNotes(notes, selection), "glue notes");
     } else if (mod && k.toLowerCase() === "b") {

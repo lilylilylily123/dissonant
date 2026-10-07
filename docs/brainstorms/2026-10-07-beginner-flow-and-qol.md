@@ -26,6 +26,13 @@ Rust + UI · **L** = a day or more. **now** / **next** / **later**.
 
 Found by reading the code as of `0bd8f61`.
 
+**Status (2026-10-07): all four shipped.** The starter is built by `ProjectModel::starter_shaped`
+at the new-project size, with a pluck melody, a groove and the key locked to C major, and the
+chord bed turns on for a fresh starter. Split moved to ⇧⌘E. Labels go through `keys()` in
+`ui/src/platform.ts`. HARMONY shows a hint when there is no key and no chords. Fixing 0.1 also
+turned up that ⌘N always opened the starter, ignoring Settings → editing → new project; it now
+follows the setting.
+
 | # | Problem | Where | Fix | Size |
 |---|---|---|---|---|
 | 0.1 | **The starter project is silent.** The new-project picker promises "I–IV–V–vi in C, a melody and a drum track", but the starter only adds chords, an empty `melody` track and an empty `drums` track. The chord bed is off by default (`hearChords: false`), so pressing space plays nothing. | `ProjectModel::starter()` in `crates/dissonant-core/src/model.rs`; `TemplatePicker.tsx`; `store.ts` | Seed a simple drum groove (kick / snare / hat) and a short melody or bassline made of chord tones and one tension. Turn the chord bed on for starter projects (a per-project flag or the store default when the starter loads). Make the picker's description match. | S |
