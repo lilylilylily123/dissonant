@@ -109,14 +109,22 @@ function paramText(p: ParamInfo, v: number): string {
   return v.toFixed(2);
 }
 
+/** How many controls still read well as knobs in a side column. Past this the list stops being
+ *  scannable and the editor window is the only honest place for it — Dexed publishes 156. */
+const INLINE_PARAM_LIMIT = 8;
+
 /**
  * The hosted plugin's own controls. Values come from the backend on every change of plugin or
  * saved state — including undo — so the knobs always show what the plugin actually holds.
  * Dragging writes straight through; releasing commits, which is what makes one undo step.
+ *
+ * A plugin with more controls than fit here is summarised instead, with its own window one
+ * click away; cramming a hundred knobs into a 300px column is not showing them.
  */
 export function PluginParams({ trackId, uid, state }: { trackId: string; uid: string; state: string | null }) {
   const pluginParams = useStore((s) => s.pluginParams);
   const setPluginParam = useStore((s) => s.setPluginParam);
+  const openPluginWindow = useStore((s) => s.openPluginWindow);
   const installed = useStore((s) => s.plugins.some((p) => p.uid === uid));
   const [params, setParams] = useState<ParamInfo[]>([]);
   // The knob's commit callback carries no value, so the last dragged one is kept beside it.
@@ -138,7 +146,23 @@ export function PluginParams({ trackId, uid, state }: { trackId: string; uid: st
   // A plugin named by the project but absent from this computer has nothing loaded behind it,
   // so there are no controls to draw — the picker says why instead.
   if (!installed) return null;
-  if (params.length === 0) return <div className="help">this plugin publishes no parameters</div>;
+
+  const openEditor = (
+    <button className="solid" onClick={() => void openPluginWindow(trackId)}>
+      open editor
+    </button>
+  );
+  if (params.length === 0) {
+    return <div className="help">this plugin publishes no controls of its own — it is played, not dialled.</div>;
+  }
+  if (params.length > INLINE_PARAM_LIMIT) {
+    return (
+      <div className="pluginparams">
+        <div className="help">{params.length} controls — too many for this column</div>
+        <div className="row" style={{ gap: 4 }}>{openEditor}</div>
+      </div>
+    );
+  }
 
   const drag = (p: ParamInfo, norm: number) => {
     const raw = curveOf(p).from(norm);
@@ -171,6 +195,7 @@ export function PluginParams({ trackId, uid, state }: { trackId: string; uid: st
           </div>
         </div>
       ))}
+      <div className="row" style={{ gap: 4 }}>{openEditor}</div>
     </div>
   );
 }
@@ -201,6 +226,38 @@ function installPct(p: InstallProgress): number {
   return 100;
 }
 
+/**
+ * The free-plugin browser. It is written for someone who does not know what a CLAP is: each row
+ * leads with a plain sentence about what the plugin sounds like and the words you would search
+ * for, and keeps vendor, licence and size to the quiet line underneath.
+ */
+
+/**
+ * What to do with a plugin once it is installed. Finding a sound is only half the job: without
+ * this the user is left to work out that the thing they just downloaded now has to be picked
+ * again from a list in another panel. Effects are named honestly — they can be hosted, but
+ * nothing can route to them until tracks grow a device chain.
+ */
+function UseOnTrack({ entry }: { entry: CatalogEntry }) {
+    const track = useStore(selectedTrack);
+    const plugins = useStore((s) => s.plugins);
+    const setTrackPlugin = useStore((s) => s.setTrackPlugin);
+
+    if (entry.kind === "effect") {
+      return <span className="help">installed — effects cannot be put on a track yet</span>;
+    }
+    const match = plugins.find((p) => p.kind === "instrument" && p.name.toLowerCase() === entry.name.toLowerCase());
+    if (!track || !match) return <span className="help">ready to use</span>;
+    if (track.plugin?.uid === match.uid) return <span className="help">playing on {track.name}</span>;
+    return (
+      <>
+        <button className="solid" onClick={() => void setTrackPlugin(track.id, match.uid)}>
+          use on {track.name}
+        </button>
+        <span className="help">installed</span>
+      </>
+    );
+}
 /**
  * The free-plugin browser. It is written for someone who does not know what a CLAP is: each row
  * leads with a plain sentence about what the plugin sounds like and the words you would search
@@ -290,7 +347,7 @@ export function PluginBrowser() {
                     <span className="help">this one comes as an installer you run yourself</span>
                   </>
                 ) : installed ? (
-                  <span className="help">ready to use</span>
+                  <UseOnTrack entry={e} />
                 ) : (
                   <>
                     <button className="solid" disabled={busy} onClick={() => void installPlugin(e.id)}>

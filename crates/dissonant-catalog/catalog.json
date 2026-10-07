@@ -4,7 +4,7 @@
     "name": "Surge XT",
     "vendor": "Surge Synth Team",
     "summary": "A big free synth with hundreds of ready-made sounds, from soft pads to hard basses.",
-    "tags": ["synth", "pad", "bass", "lead", "keys", "free"],
+    "tags": ["synth", "pad", "bass", "lead", "keys", "presets", "free"],
     "kind": "instrument",
     "license": "GPL-3.0",
     "homepage": "https://surge-synthesizer.github.io/",
@@ -92,7 +92,7 @@
     "name": "OB-Xf",
     "vendor": "Surge Synth Team",
     "summary": "Copies a classic 1980s analogue keyboard: warm pads, brass stabs and sweeping strings.",
-    "tags": ["synth", "pad", "brass", "strings", "vintage", "free"],
+    "tags": ["synth", "pad", "strings", "warm", "vintage", "analogue", "free"],
     "kind": "instrument",
     "license": "GPL-3.0",
     "homepage": "https://github.com/surge-synthesizer/OB-Xf",
@@ -136,9 +136,9 @@
     "name": "Six Sines",
     "vendor": "Baconpaul",
     "summary": "Stacks six tones to make metallic bells, glassy keys and pads that keep moving.",
-    "tags": ["synth", "fm", "bell", "keys", "pad", "free"],
+    "tags": ["synth", "fm", "bell", "keys", "pad", "metallic", "free"],
     "kind": "instrument",
-    "license": "GPL-3.0",
+    "license": "MIT",
     "homepage": "https://github.com/baconpaul/six-sines",
     "assets": [
       {
@@ -180,7 +180,7 @@
     "name": "Odin 2",
     "vendor": "TheWaveWarden",
     "summary": "An all-rounder synth with a built-in note repeater, handy for basses and lead lines.",
-    "tags": ["synth", "bass", "lead", "pad", "arp", "free"],
+    "tags": ["synth", "bass", "lead", "pad", "arp", "wavetable", "free"],
     "kind": "instrument",
     "license": "GPL-3.0",
     "homepage": "https://www.thewavewarden.com/odin2",
@@ -220,11 +220,319 @@
     ]
   },
   {
+    "id": "octasine",
+    "name": "OctaSine",
+    "vendor": "Joakim Frostegård",
+    "summary": "A small synth for bright bells, glassy keys and metallic plucks. Light on your computer.",
+    "tags": ["synth", "fm", "bell", "bright", "metallic", "cheap-cpu", "free"],
+    "kind": "instrument",
+    "license": "AGPL-3.0",
+    "homepage": "https://www.octasine.com/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/greatest-ape/OctaSine/releases/download/v0.9.1/OctaSine-v0.9.1-macOS.zip",
+        "sha256": "449f99fdb00febc8f716ccebbc74767ff73e268f3f7b27717478d1dfa1fea468",
+        "bytes": 10292979
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/greatest-ape/OctaSine/releases/download/v0.9.1/OctaSine-v0.9.1-macOS.zip",
+        "sha256": "449f99fdb00febc8f716ccebbc74767ff73e268f3f7b27717478d1dfa1fea468",
+        "bytes": 10292979
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/greatest-ape/OctaSine/releases/download/v0.9.1/OctaSine-v0.9.1-Windows.zip",
+        "sha256": "7ac928ddfe8f54a26c4264b95d3f1c4ccd047db106694bf5c722748662cb2d5f",
+        "bytes": 4624717
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/greatest-ape/OctaSine/releases/download/v0.9.1/OctaSine-v0.9.1-Ubuntu-20_04.zip",
+        "sha256": "cfa2a955bffdb3537bf782b70c175f3ae2071aded2832b464b6b30e5161de173",
+        "bytes": 5760864
+      }
+    ]
+  },
+  {
+    "id": "jc303",
+    "name": "JC303",
+    "vendor": "Midilab",
+    "summary": "A copy of the squelchy 1980s bass box behind acid house: rubbery, sliding basslines.",
+    "tags": ["synth", "bass", "acid", "lead", "vintage", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://midilab.co/jc303",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/midilab/jc303/releases/download/v0.13.0/jc303-0.13.0-macos_universal-plugins.zip",
+        "sha256": "7cf62de758efb6977489480adb3a5dccffdc0e9e203eccf2876dffc41cca48be",
+        "bytes": 66016857
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/midilab/jc303/releases/download/v0.13.0/jc303-0.13.0-macos_universal-plugins.zip",
+        "sha256": "7cf62de758efb6977489480adb3a5dccffdc0e9e203eccf2876dffc41cca48be",
+        "bytes": 66016857
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/midilab/jc303/releases/download/v0.13.0/jc303-0.13.0-windows_x64-plugins.zip",
+        "sha256": "ab0f9fb5515fd41ee3e967efeee8503bbaa19bfb8a71d3e95ac91a8751c00f99",
+        "bytes": 25976598
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/midilab/jc303/releases/download/v0.13.0/jc303-0.13.0-linux_x64-plugins.zip",
+        "sha256": "8324378f967ad1178e21411c564acb6266af7301d873f628b17bb1550f6b31f9",
+        "bytes": 27277969
+      }
+    ]
+  },
+  {
+    "id": "firefly-synth",
+    "name": "Firefly Synth",
+    "vendor": "Sjoerd van Kreel",
+    "summary": "A deep synth you can wire up yourself, good for slowly changing pads and gritty leads.",
+    "tags": ["synth", "pad", "lead", "bass", "presets", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/sjoerdvankreel/firefly-synth",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/sjoerdvankreel/firefly-synth/releases/download/v1.9.9/firefly_synth_1.9.9_mac_clap_instrument.zip",
+        "sha256": "cad55a7c02302e019a3ff105788c86941891a455b728cfe2fef724dd60039158",
+        "bytes": 11644496
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/sjoerdvankreel/firefly-synth/releases/download/v1.9.9/firefly_synth_1.9.9_mac_clap_instrument.zip",
+        "sha256": "cad55a7c02302e019a3ff105788c86941891a455b728cfe2fef724dd60039158",
+        "bytes": 11644496
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/sjoerdvankreel/firefly-synth/releases/download/v1.9.9/firefly_synth_1.9.9_windows_clap_instrument.zip",
+        "sha256": "e145c7be291a5499d2c06711e2e0cf2ccec921db320f28ca41c38da627959517",
+        "bytes": 4268752
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/sjoerdvankreel/firefly-synth/releases/download/v1.9.9/firefly_synth_1.9.9_linux_clap_instrument.zip",
+        "sha256": "5f6896badd0d44dba3266a054576bb2da1af9182bf8125fb9fe5d2c8f798304e",
+        "bytes": 7795668
+      }
+    ]
+  },
+  {
+    "id": "aeolus",
+    "name": "Aeolus",
+    "vendor": "Arthur Benilov",
+    "summary": "A church pipe organ played from your keyboard, from soft flutes to full roaring chords.",
+    "tags": ["organ", "keys", "warm", "presets", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://archie3d.github.io/aeolus_plugin/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/Archie3d/aeolus_plugin/releases/download/v0.3.0/Aeolus-clap-mac-0.3.0.zip",
+        "sha256": "cdc302b0ad0c4e82d46d73250f74c940f00645cf4603ea1d773be59e29e79252",
+        "bytes": 14741696
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/Archie3d/aeolus_plugin/releases/download/v0.3.0/Aeolus-clap-mac-0.3.0.zip",
+        "sha256": "cdc302b0ad0c4e82d46d73250f74c940f00645cf4603ea1d773be59e29e79252",
+        "bytes": 14741696
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/Archie3d/aeolus_plugin/releases/download/v0.3.0/Aeolus-clap-win64-0.3.0.zip",
+        "sha256": "a79338d3e15ca9b2077894fdf4da67223b6b89fe2e6d96c4fa569126c500dae2",
+        "bytes": 6994000
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/Archie3d/aeolus_plugin/releases/download/v0.3.0/Aeolus-clap-linux-0.3.0.zip",
+        "sha256": "498170149337c7d2ce19783156522d3bf489f811c2a61b7323b64071882cc370",
+        "bytes": 8378137
+      }
+    ]
+  },
+  {
+    "id": "actuate",
+    "name": "Actuate",
+    "vendor": "Ardura",
+    "summary": "A synth and sampler in one: load your own sounds, or build pads and leads from scratch.",
+    "tags": ["synth", "sampler", "pad", "lead", "wavetable", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/ardura/Actuate",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Actuate/releases/download/v1.4.5/Actuate_v145_macos_m1_build.zip",
+        "sha256": "5770f2449ca3e9119ad969d6ca3204318505284c826d4462c172337b3dafebd4",
+        "bytes": 7852616
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Actuate/releases/download/v1.4.5/Actuate_v145_macos_build.zip",
+        "sha256": "eba1617094fb2a04447e0feaf39480b6144ec3c0ed5e26636b1b719c100cb361",
+        "bytes": 8584452
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Actuate/releases/download/v1.4.5/Actuate_v145_windows_build.zip",
+        "sha256": "cc841cd30e808e85ca8d91f0daefc8ada8d6be5b5f7f697e7bb7edd5739c3aac",
+        "bytes": 8334394
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Actuate/releases/download/v1.4.5/Actuate_v145_linux_build.zip",
+        "sha256": "00fbd335884bad1b83189fb3b04c65c25ebd0736bff881d2914249f10863901a",
+        "bytes": 9391468
+      }
+    ]
+  },
+  {
+    "id": "floe",
+    "name": "Floe",
+    "vendor": "Floe Audio",
+    "summary": "Plays free sample libraries you download from its website: pianos, strings and textures.",
+    "tags": ["sampler", "keys", "strings", "pad", "presets", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0-or-later",
+    "homepage": "https://floe.audio",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/floe-audio/Floe/releases/download/v2.0.3/Floe-Manual-Install-v2.0.3-macOS-Apple-Silicon.zip",
+        "sha256": "c18e3521222fff585b5203b2929c48d97c0c9829c6e846836af70a292418c841",
+        "bytes": 34179009
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/floe-audio/Floe/releases/download/v2.0.3/Floe-Manual-Install-v2.0.3-macOS-Intel.zip",
+        "sha256": "243eb07d2f9e7c50f2ede0ead610a109b8910c8b1d43d52b30aaecc78c9f3898",
+        "bytes": 34731114
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/floe-audio/Floe/releases/download/v2.0.3/Floe-Manual-Install-v2.0.3-Windows.zip",
+        "sha256": "9f25aa56c04117cee971b4563c5e9b1d810d82b3932b0c639ca82ea80b1fe57f",
+        "bytes": 60883882
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "tarGz",
+        "url": "https://github.com/floe-audio/Floe/releases/download/v2.0.3/Floe-CLAP-v2.0.3-Linux.tar.gz",
+        "sha256": "9126c13cb268bd9e939f7a18f663f5c853c5a8a7ca0f77635e4a8574887176fd",
+        "bytes": 30021745
+      }
+    ]
+  },
+  {
+    "id": "chow-kick",
+    "name": "ChowKick",
+    "vendor": "Chowdhury DSP",
+    "summary": "Builds kick drums from scratch, from tight clicks to long booming tails.",
+    "tags": ["drums", "bass", "synth", "free"],
+    "kind": "instrument",
+    "license": "BSD-3-Clause",
+    "homepage": "https://github.com/Chowdhury-DSP/ChowKick",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/Chowdhury-DSP/ChowKick/releases/download/v1.2.0/ChowKick-Mac-1.2.0.dmg",
+        "sha256": "",
+        "bytes": 18907522
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/Chowdhury-DSP/ChowKick/releases/download/v1.2.0/ChowKick-Mac-1.2.0.dmg",
+        "sha256": "",
+        "bytes": 18907522
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/Chowdhury-DSP/ChowKick/releases/download/v1.2.0/ChowKick-Win-64bit-1.2.0.exe",
+        "sha256": "",
+        "bytes": 5791948
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/Chowdhury-DSP/ChowKick/releases/download/v1.2.0/ChowKick-Linux-x64-1.2.0.deb",
+        "sha256": "",
+        "bytes": 4371620
+      }
+    ]
+  },
+  {
     "id": "dragonfly-reverb",
     "name": "Dragonfly Reverb",
     "vendor": "Michael Willis",
     "summary": "Four free reverbs that put a sound in a space, from a tight room to a huge hall.",
-    "tags": ["fx", "reverb", "space", "hall", "room", "free"],
+    "tags": ["fx", "reverb", "presets", "free"],
     "kind": "effect",
     "license": "GPL-3.0",
     "homepage": "https://michaelwillis.github.io/dragonfly-reverb/",
@@ -252,6 +560,482 @@
         "url": "https://github.com/michaelwillis/dragonfly-reverb/releases/download/3.2.10/dragonfly-reverb-3.2.10-win64.zip",
         "sha256": "ca5f35f9dcd9a33f06490d3c92f04061a1a798cb81257d5ca5851bdda0824c66",
         "bytes": 22447365
+      }
+    ]
+  },
+  {
+    "id": "room-reverb",
+    "name": "Room Reverb",
+    "vendor": "ElephantDSP",
+    "summary": "Adds room, hall or plate echo around a dry sound, with presets you can simply pick.",
+    "tags": ["fx", "reverb", "presets", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0",
+    "homepage": "https://www.elephantdsp.com/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/cvde/RoomReverb/releases/download/v1.4.1/RoomReverb-1.4.1-Mac-Plugin-Files.zip",
+        "sha256": "ebf52d96d39b4e52a69ce3c87dbb443a54c434623dcaa0f51788322776da754e",
+        "bytes": 14553253
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/cvde/RoomReverb/releases/download/v1.4.1/RoomReverb-1.4.1-Mac-Plugin-Files.zip",
+        "sha256": "ebf52d96d39b4e52a69ce3c87dbb443a54c434623dcaa0f51788322776da754e",
+        "bytes": 14553253
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/cvde/RoomReverb/releases/download/v1.4.1/RoomReverb-1.4.1-Windows-Plugin-Files.zip",
+        "sha256": "a912f32036a648c45f65a927f959e571d10bb454fa01222f2b269b381d589d3d",
+        "bytes": 8243434
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/cvde/RoomReverb/releases/download/v1.4.1/RoomReverb-1.4.1-Linux-Plugin-Files.zip",
+        "sha256": "7824c06f9b7e98c8dcd0b94ec8972b10fc19d79a81bb64793ea326f0786c7e9a",
+        "bytes": 6828455
+      }
+    ]
+  },
+  {
+    "id": "vitalium-verb",
+    "name": "Vitalium Verb",
+    "vendor": "Billy Messenger",
+    "summary": "A wide, soft reverb that turns short sounds into long washes behind your track.",
+    "tags": ["fx", "reverb", "pad", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/BillyDM/vitalium-verb",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/BillyDM/vitalium-verb/releases/download/v1.3.0/vitaliumverb-1.3.0-macos-universal.zip",
+        "sha256": "412ea5830515bad133944ed1bd8d9b1a9a53cbae83fbac35cce24f5d539c2ea8",
+        "bytes": 14316368
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/BillyDM/vitalium-verb/releases/download/v1.3.0/vitaliumverb-1.3.0-macos-universal.zip",
+        "sha256": "412ea5830515bad133944ed1bd8d9b1a9a53cbae83fbac35cce24f5d539c2ea8",
+        "bytes": 14316368
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/BillyDM/vitalium-verb/releases/download/v1.3.0/vitaliumverb-1.3.0-windows.zip",
+        "sha256": "58a744316dcbea42d0abd7a135f5c266592bb2a39646e930e5d5b2145b001391",
+        "bytes": 7071712
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/BillyDM/vitalium-verb/releases/download/v1.3.0/vitaliumverb-1.3.0-ubuntu-22.04.zip",
+        "sha256": "4bb235588bea15af8756f11f35e05285b499a32390c57e21d5cbde932bc31792",
+        "bytes": 7784042
+      }
+    ]
+  },
+  {
+    "id": "cchorus",
+    "name": "CChorus",
+    "vendor": "Christopher Arndt",
+    "summary": "Thickens a thin sound by layering slightly detuned copies of it. Wide and shimmery.",
+    "tags": ["fx", "chorus", "warm", "cheap-cpu", "free"],
+    "kind": "effect",
+    "license": "MIT",
+    "homepage": "https://github.com/SpotlightKid/cchorus",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/SpotlightKid/cchorus/releases/download/v2.2.0/cchorus-macos-universal-2.2.0.zip",
+        "sha256": "",
+        "bytes": 278395
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/SpotlightKid/cchorus/releases/download/v2.2.0/cchorus-macos-universal-2.2.0.zip",
+        "sha256": "",
+        "bytes": 278395
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/SpotlightKid/cchorus/releases/download/v2.2.0/cchorus-win64-2.2.0.zip",
+        "sha256": "499ca6e7a4750964d4f77bc51b097fba5feea4bd3b7e22ef00ed27fcb51ec5a9",
+        "bytes": 678526
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/SpotlightKid/cchorus/releases/download/v2.2.0/cchorus-linux-x86_64-2.2.0.zip",
+        "sha256": "156ec43ec2fa5446c2b75a3a7b063358ede45188f2e24d23e226739a2fcc1894",
+        "bytes": 572517
+      }
+    ]
+  },
+  {
+    "id": "stereo-cross-delay",
+    "name": "Stereo Cross Delay",
+    "vendor": "Christopher Arndt",
+    "summary": "Bounces echoes between the left and right speakers for wide, rhythmic repeats.",
+    "tags": ["fx", "delay", "cheap-cpu", "free"],
+    "kind": "effect",
+    "license": "MIT",
+    "homepage": "https://github.com/SpotlightKid/stereocrossdelay",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/SpotlightKid/stereocrossdelay/releases/download/v0.2.0/stereocrossdelay-macos-universal-0.2.0.zip",
+        "sha256": "",
+        "bytes": 268808
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/SpotlightKid/stereocrossdelay/releases/download/v0.2.0/stereocrossdelay-macos-universal-0.2.0.zip",
+        "sha256": "",
+        "bytes": 268808
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/SpotlightKid/stereocrossdelay/releases/download/v0.2.0/stereocrossdelay-win64-0.2.0.zip",
+        "sha256": "cbe7d8c6f1fea1364aed2990aaf20538c92ac710b4eb370586afde1cf197d154",
+        "bytes": 669343
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/SpotlightKid/stereocrossdelay/releases/download/v0.2.0/stereocrossdelay-linux-x86_64-0.2.0.zip",
+        "sha256": "d5734c4e7bd9d2d3e39229b6f8cfc6800b079eae303646834ec637bb0c806696",
+        "bytes": 561701
+      }
+    ]
+  },
+  {
+    "id": "adt",
+    "name": "Automatic Double Tracking",
+    "vendor": "Christopher Arndt",
+    "summary": "Makes one vocal or guitar take sound like two played together, for a fuller part.",
+    "tags": ["fx", "chorus", "delay", "cheap-cpu", "free"],
+    "kind": "effect",
+    "license": "MIT",
+    "homepage": "https://github.com/SpotlightKid/adt",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/SpotlightKid/adt/releases/download/v0.2.2/adt-macos-universal-0.2.2.zip",
+        "sha256": "",
+        "bytes": 234086
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/SpotlightKid/adt/releases/download/v0.2.2/adt-macos-universal-0.2.2.zip",
+        "sha256": "",
+        "bytes": 234086
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/SpotlightKid/adt/releases/download/v0.2.2/adt-win64-0.2.2.zip",
+        "sha256": "14fb607606d0b9aa33363f4f04ce11a0841a035f5157f15cfbd5f6425572687d",
+        "bytes": 575913
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/SpotlightKid/adt/releases/download/v0.2.2/adt-linux-x86_64-0.2.2.zip",
+        "sha256": "568daa094fc379d37bcfec9a828d92c4087815caec435523a30d7f4c97af7600",
+        "bytes": 427539
+      }
+    ]
+  },
+  {
+    "id": "lamb",
+    "name": "lamb",
+    "vendor": "Bart Brouns",
+    "summary": "Evens out the loud and quiet parts of a track so it sits steady without sounding squashed.",
+    "tags": ["fx", "compressor", "free"],
+    "kind": "effect",
+    "license": "AGPL-3.0",
+    "homepage": "https://github.com/magnetophon/lamb-rs",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/magnetophon/lamb-rs/releases/download/v2.1.0/lamb-v2.1.0-macos-universal.zip",
+        "sha256": "aa9e1b5187a4547408aade1da0dcf875c048d8c52357769ffec829e93a56f966",
+        "bytes": 23920420
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/magnetophon/lamb-rs/releases/download/v2.1.0/lamb-v2.1.0-macos-universal.zip",
+        "sha256": "aa9e1b5187a4547408aade1da0dcf875c048d8c52357769ffec829e93a56f966",
+        "bytes": 23920420
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/magnetophon/lamb-rs/releases/download/v2.1.0/lamb-v2.1.0-windows.zip",
+        "sha256": "093463e86bc88623d90e9ca33ac9386677e81513b6959627b0412e26dfafbcc2",
+        "bytes": 11499144
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/magnetophon/lamb-rs/releases/download/v2.1.0/lamb-v2.1.0-ubuntu-20.04.zip",
+        "sha256": "4539a873c6d5a2f956f2c2ae3620ab8fe91f3ce811000d1dc06b2d7958a3718b",
+        "bytes": 12807099
+      }
+    ]
+  },
+  {
+    "id": "fire",
+    "name": "Fire",
+    "vendor": "Blue Wings Music",
+    "summary": "Dirties up a sound, from a gentle crunch to full broken lo-fi noise.",
+    "tags": ["fx", "distortion", "lo-fi", "presets", "free"],
+    "kind": "effect",
+    "license": "AGPL-3.0",
+    "homepage": "https://www.bluewingsmusic.com/fire.html",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/jerryuhoo/Fire/releases/download/v2.0.0/Fire-2.0.0-macOS.zip",
+        "sha256": "f00e4ed4e25fed1954b591bb3c18fb6326cd68a4eb72495ad20d222e9fe78d39",
+        "bytes": 68827542
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/jerryuhoo/Fire/releases/download/v2.0.0/Fire-2.0.0-macOS.zip",
+        "sha256": "f00e4ed4e25fed1954b591bb3c18fb6326cd68a4eb72495ad20d222e9fe78d39",
+        "bytes": 68827542
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/jerryuhoo/Fire/releases/download/v2.0.0/Fire-2.0.0-Windows.zip",
+        "sha256": "f5d47e5171f199aedbefe815356903214d451e2fa2f643c6bee09caf00de1510",
+        "bytes": 23207916
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/jerryuhoo/Fire/releases/download/v2.0.0/Fire-2.0.0-Linux.zip",
+        "sha256": "d390fd0e3a432a94191c556b7a49d1b61affd0a3b5cf02b41b5bcbaf179c8a24",
+        "bytes": 24423742
+      }
+    ]
+  },
+  {
+    "id": "wolf-shaper",
+    "name": "Wolf Shaper",
+    "vendor": "Wolf Plugins",
+    "summary": "Bends a sound through a curve you draw yourself: soft warmth or harsh digital edge.",
+    "tags": ["fx", "distortion", "saturation", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0",
+    "homepage": "https://wolf-plugins.github.io/wolf-shaper/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/wolf-plugins/wolf-shaper/releases/download/v1.0.2/wolf-shaper-v1.0.2-macos-universal.zip",
+        "sha256": "",
+        "bytes": 5980398
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/wolf-plugins/wolf-shaper/releases/download/v1.0.2/wolf-shaper-v1.0.2-macos-universal.zip",
+        "sha256": "",
+        "bytes": 5980398
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/wolf-plugins/wolf-shaper/releases/download/v1.0.2/wolf-shaper-v1.0.2+20230515144200-windows-x64.zip",
+        "sha256": "42a703a5f71b19855d9213d57f2261d2182c73c73d39730775188df3e4c47da9",
+        "bytes": 5481008
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/wolf-plugins/wolf-shaper/releases/download/v1.0.2/wolf-shaper-v1.0.2-linux-x64.zip",
+        "sha256": "8b844e9b535d2b8a8a07fc6cec207beae8161f7d6da36e4a856a766aa441b848",
+        "bytes": 5089663
+      }
+    ]
+  },
+  {
+    "id": "chow-tape-model",
+    "name": "CHOW Tape Model",
+    "vendor": "Chowdhury DSP",
+    "summary": "Runs a track through old tape machine behaviour for warmth, wobble and softer edges.",
+    "tags": ["fx", "saturation", "tape", "warm", "vintage", "lo-fi", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/jatinchowdhury18/AnalogTapeModel",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/jatinchowdhury18/AnalogTapeModel/releases/download/v2.11.4/ChowTapeModel-Mac-2.11.4.dmg",
+        "sha256": "",
+        "bytes": 28745196
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/jatinchowdhury18/AnalogTapeModel/releases/download/v2.11.4/ChowTapeModel-Mac-2.11.4.dmg",
+        "sha256": "",
+        "bytes": 28745196
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/jatinchowdhury18/AnalogTapeModel/releases/download/v2.11.4/ChowTapeModel-Win-64bit-2.11.4.exe",
+        "sha256": "",
+        "bytes": 10646528
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/jatinchowdhury18/AnalogTapeModel/releases/download/v2.11.4/ChowTapeModel-Linux-x64-2.11.4.deb",
+        "sha256": "",
+        "bytes": 5112948
+      }
+    ]
+  },
+  {
+    "id": "wstd-eq",
+    "name": "WSTD EQ",
+    "vendor": "Wasted Audio",
+    "summary": "Three simple knobs to turn the low, middle and high parts of a sound up or down.",
+    "tags": ["fx", "eq", "cheap-cpu", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0",
+    "homepage": "https://wasted.audio/software/wstd_eq",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/Wasted-Audio/wstd-eq/releases/download/v1.1.1/wstd-eq-v1.1.1-macos-universal.pkg",
+        "sha256": "",
+        "bytes": 5787847
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/Wasted-Audio/wstd-eq/releases/download/v1.1.1/wstd-eq-v1.1.1-macos-universal.pkg",
+        "sha256": "",
+        "bytes": 5787847
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/Wasted-Audio/wstd-eq/releases/download/v1.1.1/wstd-eq-v1.1.1-win64.zip",
+        "sha256": "6de83eff0e7f97f35b96d4213112ebed40e13fb0b32f6481346ae8ae71cb01cb",
+        "bytes": 5304497
+      }
+    ]
+  },
+  {
+    "id": "subhoofer",
+    "name": "Subhoofer",
+    "vendor": "Ardura",
+    "summary": "Puts weight back under a thin bass so it can still be felt on small speakers.",
+    "tags": ["fx", "bass", "saturation", "warm", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0-or-later",
+    "homepage": "https://github.com/ardura/Subhoofer",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Subhoofer/releases/download/v2.2.3/Subhoofer_v223_macos_m1_build.zip",
+        "sha256": "60c7598df1d4514fa7c4f36186dc5eaede7576cdfb6727595a213fa3305ff55c",
+        "bytes": 4188028
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Subhoofer/releases/download/v2.2.3/Subhoofer_v223_macos_build.zip",
+        "sha256": "4e109f25c270c0c032510e350cfd26c5a28f8ca735500b648e6a63b35189d6bb",
+        "bytes": 4344866
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Subhoofer/releases/download/v2.2.3/Subhoofer_v223_windows_build.zip",
+        "sha256": "0f8543eabdc9747a201ad3c47863fef6a58e10bb22f393c4279769fb3bf96181",
+        "bytes": 3779322
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/ardura/Subhoofer/releases/download/v2.2.3/Subhoofer_v223_linux_build.zip",
+        "sha256": "4ebd57d5f53c7ed86e39e1b27c14b228b29de308035886a5d266f3f312eaff05",
+        "bytes": 6916948
       }
     ]
   }

@@ -127,6 +127,8 @@ export interface Bridge {
   /** Hand a link to the user's own browser. Needed by catalog entries that ship an installer
    *  rather than a plugin folder: those have to be run by hand from the vendor's page. */
   openUrl(url: string): Promise<void>;
+  /** Open (or raise) the separate window holding one track's plugin controls. */
+  openPluginWindow(trackId: string): Promise<void>;
 }
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -232,6 +234,7 @@ async function tauriBridge(): Promise<Bridge> {
     installPlugin: (entryId) => invoke("install_plugin", { entryId }),
     onPluginInstall: (cb) => subscribe<InstallProgress>("plugin-install", cb),
     openUrl: (url) => invoke("open_url", { url }),
+    openPluginWindow: (trackId) => invoke("open_plugin_window", { trackId }),
   };
 }
 
@@ -620,11 +623,15 @@ const STORAGE_KEY = "dissonant.mock.project";
 // ─── The mock's plugin world ───────────────────────────────────────────────────────────────
 
 /**
- * Parameters the mock reports for every hosted plugin. A real CLAP plugin publishes its own
- * set; this one is picked to exercise the shapes the parameter list has to draw — wide log-ish
- * ranges, a 0..1 control, a bipolar one and a stepped one.
+ * Parameters the mock's plugins publish.
+ *
+ * Two shapes on purpose, because real plugins come in both and they need completely different
+ * UI. A small, well-described one that names its modules sits beside a large one that publishes
+ * a hundred-odd controls with no modules at all and leans on a naming convention instead —
+ * which is exactly what Dexed does with its 156. Designing against only the tidy one is how the
+ * parameter list ended up unusable in a side column.
  */
-const MOCK_PARAMS: Omit<ParamInfo, "value">[] = [
+const MOCK_PARAMS_TIDY: Omit<ParamInfo, "value">[] = [
   { id: 0, name: "cutoff", module: "filter", min: 20, max: 20_000, default: 8_000, isStepped: false },
   { id: 1, name: "resonance", module: "filter", min: 0, max: 1, default: 0.2, isStepped: false },
   { id: 2, name: "attack", module: "envelope", min: 0, max: 4, default: 0.01, isStepped: false },
@@ -633,13 +640,39 @@ const MOCK_PARAMS: Omit<ParamInfo, "value">[] = [
   { id: 5, name: "voices", module: "voice", min: 1, max: 16, default: 8, isStepped: true },
 ];
 
+/** An FM synth's shape: six operators of the same controls, a shared pitch envelope and an LFO,
+ *  a handful of globals, and not one module string — copied from what Dexed actually reports. */
+const MOCK_PARAMS_BIG: Omit<ParamInfo, "value">[] = (() => {
+  const unit = (id: number, name: string, def = 0.5) =>
+    ({ id, name, module: "", min: 0, max: 1, default: def, isStepped: false }) as Omit<ParamInfo, "value">;
+  const out = ["Cutoff", "Resonance", "Output", "MonoMode", "MASTER TUNE ADJ", "ALGORITHM", "FEEDBACK", "OSC KEY SYNC", "TRANSPOSE", "P MODE SENS."].map(
+    (n, i) => unit(i, n),
+  );
+  for (const n of ["SPEED", "DELAY", "PM DEPTH", "AM DEPTH", "KEY SYNC", "WAVE"]) out.push(unit(out.length, `LFO ${n}`));
+  for (let i = 1; i <= 4; i++) out.push(unit(out.length, `PITCH EG RATE ${i}`));
+  for (let i = 1; i <= 4; i++) out.push(unit(out.length, `PITCH EG LEVEL ${i}`));
+  for (let op = 1; op <= 6; op++) {
+    for (let i = 1; i <= 4; i++) out.push(unit(out.length, `OP${op} EG RATE ${i}`));
+    for (let i = 1; i <= 4; i++) out.push(unit(out.length, `OP${op} EG LEVEL ${i}`));
+    for (const n of ["OUTPUT LEVEL", "MODE", "F COARSE", "F FINE", "OSC DETUNE", "BREAK POINT", "L SCALE DEPTH"]) {
+      out.push(unit(out.length, `OP${op} ${n}`));
+    }
+  }
+  return out;
+})();
+
+/** Which set a plugin publishes. Anything FM-shaped in the fixtures gets the big one. */
+function mockParamsFor(uid: string): Omit<ParamInfo, "value">[] {
+  return /dexed|fm/i.test(uid) ? MOCK_PARAMS_BIG : MOCK_PARAMS_TIDY;
+}
+
 /** `HostedPlugin::save_state` stands in for the plugin's opaque blob: here, its parameters. */
 function encodeState(values: Map<number, number>): string {
   return btoa(JSON.stringify(Object.fromEntries(values)));
 }
 
-function decodeState(state: string | null): Map<number, number> {
-  const values = new Map(MOCK_PARAMS.map((p) => [p.id, p.default]));
+function decodeState(uid: string, state: string | null): Map<number, number> {
+  const values = new Map(mockParamsFor(uid).map((p) => [p.id, p.default]));
   if (!state) return values;
   try {
     for (const [id, v] of Object.entries(JSON.parse(atob(state)) as Record<string, number>)) {
@@ -806,8 +839,31 @@ function installedDescriptor(entry: CatalogEntry): PluginDescriptor {
   };
 }
 
+/**
+ * The one document every window on this origin shares.
+ *
+ * In the desktop app both the main window and a plugin editor talk to the same Rust state, so a
+ * mock that kept its model per window would diverge from the thing it stands in for — the editor
+ * popup would open onto a different project and find no plugin at all. Keeping the model in
+ * `localStorage` reproduces the shared backend, and the `storage` event carries another window's
+ * edits (including undo) back here, which is what the real `document` event does.
+ */
+const LIVE_MODEL_KEY = "dissonant.mock.live";
+
 function mockBridge(): Bridge {
-  let model = starterModel();
+  // Adopt the shared document only in a browser, where a second window can exist. The test
+  // runner drives the mock directly and builds a fresh one per case; restoring there would leak
+  // one test's project into the next.
+  const restored = (() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = localStorage.getItem(LIVE_MODEL_KEY);
+      return raw ? (JSON.parse(raw) as ProjectModel) : null;
+    } catch {
+      return null;
+    }
+  })();
+  let model = restored ?? starterModel();
   const undo: ProjectModel[] = [];
   const redo: ProjectModel[] = [];
   let pending: ProjectModel | null = null;
@@ -846,6 +902,35 @@ function mockBridge(): Bridge {
     undoLabel: pending ? pendingLabel : (undoLabels[undoLabels.length - 1] ?? null),
     redoLabel: redoLabels[redoLabels.length - 1] ?? null,
   });
+
+  /** Publish the document: to this window's listeners, and to the other windows through storage. */
+  const notifyDoc = () => {
+    try {
+      localStorage.setItem(LIVE_MODEL_KEY, JSON.stringify(model));
+    } catch {
+      // Private mode, or the quota is full. The mock still works; it just stops being shared.
+    }
+    for (const cb of docListeners) cb(snapshot());
+  };
+  // Another window changed the shared document — a plugin editor moving a parameter, or an undo
+  // in the main window. Adopt it and tell our own listeners, which is what the real `document`
+  // event does for every webview. There is no `window` under the test runner, where the mock is
+  // driven directly and a second window cannot exist.
+  //
+  // Only the model travels. The desktop app has one `Document` behind both windows, so its undo
+  // history is genuinely shared; here each window keeps its own stack, and an edit made in the
+  // editor is undoable from the editor rather than from the main window.
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", (e) => {
+      if (e.key !== LIVE_MODEL_KEY || !e.newValue) return;
+      try {
+        model = JSON.parse(e.newValue) as ProjectModel;
+      } catch {
+        return;
+      }
+      for (const cb of docListeners) cb(snapshot());
+    });
+  }
   const defaultLabel = (c: Command) => c.type.replace(/([A-Z])/g, " $1").toLowerCase().trim();
   const recentKey = "dissonant.mock.recent";
   const loadRecent = (): string[] => {
@@ -940,6 +1025,7 @@ function mockBridge(): Bridge {
     path = to;
     saved = JSON.stringify(model);
     beat = 0;
+    notifyDoc();
   };
 
   const commitGesture = () => {
@@ -967,6 +1053,7 @@ function mockBridge(): Bridge {
     redo.length = 0;
     redoLabels.length = 0;
     model = next;
+    notifyDoc();
     return snapshot();
   };
 
@@ -991,7 +1078,7 @@ function mockBridge(): Bridge {
     if (!t.plugin) return null;
     const held = paramValues.get(trackId);
     if (held && held.uid === t.plugin.uid && held.state === t.plugin.state) return held;
-    const fresh = { uid: t.plugin.uid, state: t.plugin.state, values: decodeState(t.plugin.state) };
+    const fresh = { uid: t.plugin.uid, state: t.plugin.state, values: decodeState(t.plugin.uid, t.plugin.state) };
     paramValues.set(trackId, fresh);
     return fresh;
   };
@@ -1146,7 +1233,7 @@ function mockBridge(): Bridge {
       redo.length = 0;
       redoLabels.length = 0;
       reduce(model, { type: "setNotes", patternId: p.id, trackId: track, notes });
-      for (const cb of docListeners) cb(snapshot());
+      notifyDoc();
     },
     setLoop: async (s, e) => {
       loop = [s, e];
@@ -1214,15 +1301,15 @@ function mockBridge(): Bridge {
       const plugin = uid === null ? null : pluginFor(uid);
       await applyCommand({ type: "setTrackPlugin", id: trackId, plugin }, false, "change plugin");
       paramValues.delete(trackId);
-      for (const cb of docListeners) cb(snapshot());
+      notifyDoc();
     },
     pluginParams: async (trackId) => {
       const held = liveParams(trackId);
-      return held ? MOCK_PARAMS.map((p) => ({ ...p, value: held.values.get(p.id) ?? p.default })) : [];
+      return held ? mockParamsFor(held.uid).map((p) => ({ ...p, value: held.values.get(p.id) ?? p.default })) : [];
     },
     setPluginParam: async (trackId, paramId, value, commit = false) => {
       const held = liveParams(trackId) ?? fail(NO_PLUGIN);
-      const info = MOCK_PARAMS.find((p) => p.id === paramId) ?? fail(NO_SUCH_PARAM);
+      const info = mockParamsFor(held.uid).find((p) => p.id === paramId) ?? fail(NO_SUCH_PARAM);
       if (!allFinite(value)) fail(INVALID_VALUE);
       const v = clamp(value, info.min, info.max);
       held.values.set(paramId, info.isStepped ? Math.round(v) : v);
@@ -1232,7 +1319,7 @@ function mockBridge(): Bridge {
         const state = encodeState(held.values);
         await applyCommand({ type: "setPluginState", id: trackId, state }, false, "edit plugin");
         held.state = state;
-        for (const cb of docListeners) cb(snapshot());
+        notifyDoc();
       }
     },
     pluginCatalog: async () => MOCK_CATALOG.map(clone),
@@ -1270,6 +1357,10 @@ function mockBridge(): Bridge {
     },
     openUrl: async (url) => {
       window.open(url, "_blank", "noreferrer");
+    },
+    openPluginWindow: async (trackId) => {
+      // No OS windows in a browser; a popup on the same origin runs the very same editor.
+      window.open(`${window.location.pathname}?plugin=${trackId}`, `plugin-${trackId}`, "width=900,height=620");
     },
   };
 }

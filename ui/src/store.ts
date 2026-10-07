@@ -186,6 +186,8 @@ interface State {
   installPlugin(entryId: string): Promise<void>;
   /** Hand an https link to the user's own browser; anything else is ignored. */
   openUrl(url: string): Promise<void>;
+  /** Open (or raise) the separate window holding one track's plugin controls. */
+  openPluginWindow(trackId: string): Promise<void>;
   /** Show the plugin browser, switching to the mode that has a bottom panel if needed. */
   openPluginBrowser(): void;
 }
@@ -911,6 +913,14 @@ export const useStore = create<State>((set, get) => {
       const b = await getBridge();
       try {
         await b.openUrl(url);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async openPluginWindow(trackId) {
+      const b = await getBridge();
+      try {
+        await b.openPluginWindow(trackId);
       } catch (e) {
         get().showToast(String(e), true);
       }

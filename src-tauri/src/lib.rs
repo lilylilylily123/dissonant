@@ -1371,12 +1371,48 @@ fn plugin_params(state: State<'_, AppState>, track_id: Uuid) -> Vec<ParamInfo> {
     state.plugin_host.params(track_id)
 }
 
+/// Open (or raise) a separate window holding one track's plugin controls.
+///
+/// A plugin like Dexed publishes 156 parameters; a 300px inspector column cannot show that, and
+/// cramming it in is what makes hosted plugins miserable to use. The editor gets its own OS
+/// window so it can be sized, moved to another monitor, or tiled by a window manager. One window
+/// per track, reused: asking twice raises the one already open rather than stacking duplicates.
+#[tauri::command]
+fn open_plugin_window(app: AppHandle, state: State<'_, AppState>, track_id: Uuid) -> Result<(), String> {
+    let (track_name, plugin_name) = {
+        let doc = state.doc.lock().unwrap();
+        let track = doc.model().track(&track_id).ok_or("no such track")?;
+        let plugin = track.plugin.as_ref().ok_or("that track has no plugin")?;
+        (track.name.clone(), plugin.name.clone())
+    };
+    let label = format!("plugin-{}", track_id.simple());
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::App(format!("index.html?plugin={track_id}").into()),
+    )
+    .title(format!("{plugin_name} — {track_name}"))
+    .inner_size(900.0, 620.0)
+    .min_inner_size(560.0, 360.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// A parameter move. While a knob is being dragged (`commit` false) this only reaches the audio
 /// thread, so the sound follows the finger without serialising plugin state every frame. On
 /// release the state is read once and recorded, producing exactly one undo step whose baseline
 /// is the value the drag started from.
 #[tauri::command]
 fn set_plugin_param(
+    app: AppHandle,
     state: State<'_, AppState>,
     track_id: Uuid,
     param_id: u32,
@@ -1398,7 +1434,11 @@ fn set_plugin_param(
         .unwrap()
         .apply(Command::SetPluginState { id: track_id, state: b64_encode(&bytes) }, false)
         .map_err(|e| e.to_string())?;
-    Ok(Some(state.snapshot()))
+    let snapshot = state.snapshot();
+    // This edit usually comes from the plugin's own window. Only the caller gets the return
+    // value, so without the event the main window's undo history would silently fall behind.
+    let _ = app.emit("document", snapshot.clone());
+    Ok(Some(snapshot))
 }
 
 #[tauri::command]
@@ -1684,6 +1724,7 @@ pub fn run() {
             plugin_catalog,
             install_plugin,
             open_url,
+            open_plugin_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");
