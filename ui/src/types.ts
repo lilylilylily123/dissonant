@@ -403,6 +403,29 @@ export interface MidiStatus {
 
 export const VOICES = ["saw", "square", "triangle", "sine", "pad", "pluck"] as const;
 
+/** A sound named by character: a voice plus tone (low-pass Hz) and reverb send. */
+export interface SoundPreset {
+  name: string;
+  voice: (typeof VOICES)[number];
+  tone: number;
+  reverbSend: number;
+}
+
+/** Instrument presets by character. The vibe templates in `dissonant-core` use the same values. */
+export const SOUND_PRESETS: SoundPreset[] = [
+  { name: "warm pad", voice: "pad", tone: 4000, reverbSend: 0.45 },
+  { name: "soft keys", voice: "triangle", tone: 6000, reverbSend: 0.25 },
+  { name: "glass pluck", voice: "pluck", tone: 12000, reverbSend: 0.3 },
+  { name: "buzzy bass", voice: "saw", tone: 1200, reverbSend: 0 },
+  { name: "round bass", voice: "sine", tone: 2000, reverbSend: 0 },
+  { name: "lead with bite", voice: "square", tone: 9000, reverbSend: 0.15 },
+];
+
+/** The preset a track currently sounds like, if any. */
+export function soundPresetOf(track: { voice: string; tone: number; reverbSend: number }): SoundPreset | undefined {
+  return SOUND_PRESETS.find((p) => p.voice === track.voice && Math.abs(p.tone - track.tone) < 1 && Math.abs(p.reverbSend - track.reverbSend) < 1e-6);
+}
+
 /** The handoff's 12-color track palette (last one is reserved for returns/master). */
 export const TRACK_PALETTE = [
   "#ff3b30",

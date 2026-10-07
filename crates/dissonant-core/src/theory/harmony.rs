@@ -19,23 +19,41 @@ pub struct ChordSuggestion {
     pub roman_numeral: String,
 }
 
-/// A known-good progression starter, as scale degrees (0-based).
+/// A known-good progression starter, as scale degrees (0-based). `name` is the roman-numeral
+/// spelling, `mood` says how it feels in plain words, and `scale` is the scale the mood is true
+/// in (the degrees work in either scale, the feeling doesn't).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressionStarter {
     pub name: &'static str,
+    pub mood: &'static str,
+    pub scale: ScaleType,
     pub degrees: Vec<i32>,
 }
 
+/// Every starter, major ones first. The first is the default progression for new patterns.
 pub fn starters() -> Vec<ProgressionStarter> {
+    use ScaleType::{Major, Minor};
+    let s = |name, mood, scale, degrees: &[i32]| ProgressionStarter { name, mood, scale, degrees: degrees.to_vec() };
     vec![
-        ProgressionStarter { name: "I–IV–V–vi", degrees: vec![0, 3, 4, 5] },
-        ProgressionStarter { name: "I–V–vi–IV", degrees: vec![0, 4, 5, 3] },
-        ProgressionStarter { name: "vi–IV–I–V", degrees: vec![5, 3, 0, 4] },
-        ProgressionStarter { name: "ii–V–I", degrees: vec![1, 4, 0, 0] },
-        ProgressionStarter { name: "I–vi–IV–V", degrees: vec![0, 5, 3, 4] },
-        ProgressionStarter { name: "i–VI–III–VII", degrees: vec![0, 5, 2, 6] },
+        s("I–IV–V–vi", "bright, lifting", Major, &[0, 3, 4, 5]),
+        s("I–V–vi–IV", "big and hopeful", Major, &[0, 4, 5, 3]),
+        s("vi–IV–I–V", "sad but hopeful", Major, &[5, 3, 0, 4]),
+        s("I–vi–IV–V", "old-school, sweet", Major, &[0, 5, 3, 4]),
+        s("ii–V–I", "jazzy, resolved", Major, &[1, 4, 0, 0]),
+        s("I–IV", "open two-chord vamp", Major, &[0, 3]),
+        s("i–VI–III–VII", "dark, driving", Minor, &[0, 5, 2, 6]),
+        s("i–VII–VI–VII", "brooding loop", Minor, &[0, 6, 5, 6]),
+        s("i–v–VI–iv", "sad, cinematic", Minor, &[0, 4, 5, 3]),
+        s("i–iv", "moody two-chord vamp", Minor, &[0, 3]),
+        s("i–VI", "hazy, floating", Minor, &[0, 5]),
+        s("i", "one-chord drone", Minor, &[0]),
     ]
+}
+
+/// The starters whose mood holds in `scale`, in list order.
+pub fn starters_for(scale: ScaleType) -> Vec<ProgressionStarter> {
+    starters().into_iter().filter(|s| s.scale == scale).collect()
 }
 
 pub fn scale_steps(scale: ScaleType) -> &'static [i32; 7] {

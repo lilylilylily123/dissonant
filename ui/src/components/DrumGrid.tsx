@@ -78,6 +78,7 @@ export function DrumGrid() {
           </div>
         </div>
       ))}
+      {notes.length === 0 && <div className="help emptyline">no hits yet: click a step to add one. kick on 1 and 3, snare on 2 and 4 is a fine place to start.</div>}
       <div className="help">left-click / drag: add hits · right-click / drag: remove · step {stepBeats === 0.5 ? "1/8" : stepBeats === 0.25 ? "1/16" : "1/32"} follows snap</div>
     </div>
   );

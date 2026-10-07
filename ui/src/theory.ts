@@ -80,19 +80,33 @@ export function chordName(pitchClasses: number[]): string {
   return pcs.map(noteName).join("·");
 }
 
+/** Mirrors `harmony::ProgressionStarter`: numerals, a plain-words mood, and the scale the mood holds in. */
 export interface Starter {
   name: string;
+  mood: string;
+  scale: ScaleType;
   degrees: number[];
 }
 
 export const STARTERS: Starter[] = [
-  { name: "I–IV–V–vi", degrees: [0, 3, 4, 5] },
-  { name: "I–V–vi–IV", degrees: [0, 4, 5, 3] },
-  { name: "vi–IV–I–V", degrees: [5, 3, 0, 4] },
-  { name: "ii–V–I", degrees: [1, 4, 0, 0] },
-  { name: "I–vi–IV–V", degrees: [0, 5, 3, 4] },
-  { name: "i–VI–III–VII", degrees: [0, 5, 2, 6] },
+  { name: "I–IV–V–vi", mood: "bright, lifting", scale: "major", degrees: [0, 3, 4, 5] },
+  { name: "I–V–vi–IV", mood: "big and hopeful", scale: "major", degrees: [0, 4, 5, 3] },
+  { name: "vi–IV–I–V", mood: "sad but hopeful", scale: "major", degrees: [5, 3, 0, 4] },
+  { name: "I–vi–IV–V", mood: "old-school, sweet", scale: "major", degrees: [0, 5, 3, 4] },
+  { name: "ii–V–I", mood: "jazzy, resolved", scale: "major", degrees: [1, 4, 0, 0] },
+  { name: "I–IV", mood: "open two-chord vamp", scale: "major", degrees: [0, 3] },
+  { name: "i–VI–III–VII", mood: "dark, driving", scale: "minor", degrees: [0, 5, 2, 6] },
+  { name: "i–VII–VI–VII", mood: "brooding loop", scale: "minor", degrees: [0, 6, 5, 6] },
+  { name: "i–v–VI–iv", mood: "sad, cinematic", scale: "minor", degrees: [0, 4, 5, 3] },
+  { name: "i–iv", mood: "moody two-chord vamp", scale: "minor", degrees: [0, 3] },
+  { name: "i–VI", mood: "hazy, floating", scale: "minor", degrees: [0, 5] },
+  { name: "i", mood: "one-chord drone", scale: "minor", degrees: [0] },
 ];
+
+/** `harmony::starters_for`: the starters whose mood holds in `scale`. */
+export function startersFor(scale: ScaleType): Starter[] {
+  return STARTERS.filter((s) => s.scale === scale);
+}
 
 /**
  * Mirrors `harmony::progression`. The result always fits inside `totalBeats`: on a pattern too

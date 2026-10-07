@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, TemplateInfo, Track } from "./types";
+import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, SoundPreset, TemplateInfo, Track } from "./types";
 import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
@@ -84,6 +84,8 @@ interface State {
   /** `label` names the edit in the Edit menu ("move notes"); defaults to the command's name. */
   dispatch(command: Command, transient?: boolean, label?: string): Promise<void>;
   commitGesture(): Promise<void>;
+  /** Voice, tone and reverb from a named preset, as one undo step. */
+  applySoundPreset(trackId: string, preset: SoundPreset): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   setMode(mode: PlayMode): void;
@@ -360,6 +362,15 @@ export const useStore = create<State>((set, get) => {
     async commitGesture() {
       const b = await getBridge();
       applySnapshot(await b.commitGesture());
+    },
+
+    async applySoundPreset(trackId, preset) {
+      // Three transient edits folded into one undo step by commitGesture, like a knob drag.
+      const label = `sound: ${preset.name}`;
+      await get().dispatch({ type: "setTrackVoice", id: trackId, voice: preset.voice }, true, label);
+      await get().dispatch({ type: "setTrackParam", id: trackId, param: "tone", value: preset.tone }, true, label);
+      await get().dispatch({ type: "setTrackParam", id: trackId, param: "reverbSend", value: preset.reverbSend }, true, label);
+      await get().commitGesture();
     },
 
     async undo() {

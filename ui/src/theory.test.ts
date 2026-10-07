@@ -76,7 +76,7 @@ describe("key detection", () => {
 // round trip; if one side is edited without the other, one of the two suites fails — which is
 // exactly the drift that makes the colors on screen disagree with the harmony the engine plays.
 
-import { normalize, scalePitchClasses, STARTERS } from "./theory";
+import { normalize, scalePitchClasses, STARTERS, startersFor } from "./theory";
 import type { ScaleType, Tier as TierT } from "./types";
 
 type ParityCase = [label: string, chord: number[], key: [number, ScaleType] | null, pitch: number, expected: TierT];
@@ -138,14 +138,22 @@ describe("parity with dissonant-core", () => {
   it("agrees on normalize, STARTERS and progression", () => {
     expect([-25, -13, -12, -1, 0, 11, 12, 13, 64, 127].map(normalize)).toEqual([11, 11, 0, 11, 0, 11, 0, 1, 4, 7]);
 
-    expect(STARTERS.map((s) => [s.name, s.degrees])).toEqual([
-      ["I–IV–V–vi", [0, 3, 4, 5]],
-      ["I–V–vi–IV", [0, 4, 5, 3]],
-      ["vi–IV–I–V", [5, 3, 0, 4]],
-      ["ii–V–I", [1, 4, 0, 0]],
-      ["I–vi–IV–V", [0, 5, 3, 4]],
-      ["i–VI–III–VII", [0, 5, 2, 6]],
+    expect(STARTERS.map((s) => [s.name, s.mood, s.scale, s.degrees])).toEqual([
+      ["I–IV–V–vi", "bright, lifting", "major", [0, 3, 4, 5]],
+      ["I–V–vi–IV", "big and hopeful", "major", [0, 4, 5, 3]],
+      ["vi–IV–I–V", "sad but hopeful", "major", [5, 3, 0, 4]],
+      ["I–vi–IV–V", "old-school, sweet", "major", [0, 5, 3, 4]],
+      ["ii–V–I", "jazzy, resolved", "major", [1, 4, 0, 0]],
+      ["I–IV", "open two-chord vamp", "major", [0, 3]],
+      ["i–VI–III–VII", "dark, driving", "minor", [0, 5, 2, 6]],
+      ["i–VII–VI–VII", "brooding loop", "minor", [0, 6, 5, 6]],
+      ["i–v–VI–iv", "sad, cinematic", "minor", [0, 4, 5, 3]],
+      ["i–iv", "moody two-chord vamp", "minor", [0, 3]],
+      ["i–VI", "hazy, floating", "minor", [0, 5]],
+      ["i", "one-chord drone", "minor", [0]],
     ]);
+    expect(startersFor("minor")[0].name).toBe("i–VI–III–VII");
+    expect(startersFor("major")).toHaveLength(6);
 
     const described = (degrees: number[], root: number, scale: ScaleType, total: number) =>
       progression(degrees, root, scale, total, 4).map((c) => `${c.startBeat}:${c.lengthBeats}:[${c.pitchClasses.join(", ")}]:${c.name ?? ""}`);

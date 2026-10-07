@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { beatsPerBar, dbText, effectiveKey, GRID_OPTIONS, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { chordAt, explainNote, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
+import { chordAt, explainNote, midiName, NOTE_NAMES, noteName, progression, startersFor, tierMap } from "../theory";
 import { arpeggiateNotes, chopNotes, humanizeNotes, invertNotes, legatoNotes, quantizeNotes, resolveTargets, reverseNotes, scaleNotes, setLength, strumNotes, toggleMute } from "../noteEditing";
-import { DRUM_KIT, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
+import { DRUM_KIT, SOUND_PRESETS, soundPresetOf, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
 import { hz, Knob, lin, log, panText, pct } from "./Knob";
 
 const VOL = lin(0, 1.5);
@@ -247,7 +247,7 @@ export function Inspector() {
         </div>
         {root === null && chords.length === 0 && (
           <div className="mono" style={{ fontSize: 9.5, lineHeight: 1.45, color: "var(--text-4)" }}>
-            no key or chords yet, so every note looks the same. pick a starter below, or just play a few notes and lock the key the KEY cell hears.
+            no key or chords yet, so every note looks the same. pick a progression below, or just play a few notes and lock the key the KEY cell hears.
           </div>
         )}
         <div className="scalestrip" title="how each pitch class fits the chord under the playhead">
@@ -281,13 +281,27 @@ export function Inspector() {
             })}
           </div>
         )}
-        <span className="flabel">progression starters · in {root !== null ? noteName(root) : "C"} {model.key.scale}</span>
+        <span className="flabel">progressions · in {root !== null ? noteName(root) : "C"} {model.key.scale}</span>
         <div className="chipsrow">
-          {STARTERS.map((st) => (
-            <button key={st.name} className="chip" style={{ flex: "0 0 calc(50% - 2px)", textTransform: "none" }} onClick={() => commitChords(progression(st.degrees, root ?? 0, model.key.scale, pattern.lengthBeats))}>
-              {st.name}
-            </button>
-          ))}
+          {startersFor(model.key.scale).map((st) => {
+            const full = progression(st.degrees, root ?? 0, model.key.scale, pattern.lengthBeats);
+            // One pass of the degrees, named in this key: what the chip will actually write.
+            const once = progression(st.degrees, root ?? 0, model.key.scale, st.degrees.length * 4).map((c) => c.name).join(" · ");
+            const current =
+              full.length === chords.length &&
+              full.every((c, i) => c.startBeat === chords[i].startBeat && c.pitchClasses.join() === chords[i].pitchClasses.join());
+            return (
+              <button
+                key={st.name}
+                className={`chip starter${current ? " on" : ""}`}
+                title={`${st.name} · ${once}`}
+                onClick={() => commitChords(full)}
+              >
+                <span className="mood">{st.mood}</span>
+                <span className="chords">{once}</span>
+              </button>
+            );
+          })}
         </div>
         <div className="row" style={{ gap: 4 }}>
           <button
@@ -316,6 +330,16 @@ export function Inspector() {
           <span className="spacer" />
           <span className="meta">{track.isDrum ? DRUM_KIT.map((d) => d.name).join(" · ") : "waveform synth"}</span>
         </div>
+        {!track.isDrum && (
+          <div className="chipsrow" style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)" }} title="sounds by character: each sets the waveform, tone and reverb">
+            {SOUND_PRESETS.map((p) => (
+              <button key={p.name} className={`chip${soundPresetOf(track)?.name === p.name ? " on" : ""}`} style={{ textTransform: "none" }} onClick={() => void s.applySoundPreset(track.id, p)}>
+                {p.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {!track.isDrum && <span className="flabel">waveform</span>}
         {!track.isDrum && (
           <div className="chipsrow" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)" }}>
             {VOICES.map((v) => (

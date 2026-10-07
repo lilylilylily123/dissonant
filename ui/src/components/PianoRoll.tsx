@@ -1020,6 +1020,13 @@ export function PianoRoll() {
           onContextMenu={(e) => e.preventDefault()}
         />
       </div>
+      {notes.length === 0 && (
+        <div className="emptyhint" aria-hidden="true">
+          click anywhere to place a note
+          <br />
+          or set KEYS to TIER and play the home row: A S D F… are the chord tones
+        </div>
+      )}
       <div className="lanehdr">
         <span className="on">velocity</span>
         <span className="sum">{velSummary}</span>

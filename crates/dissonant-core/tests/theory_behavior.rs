@@ -481,18 +481,28 @@ mod parity {
         let normalized: Vec<i32> = [-25, -13, -12, -1, 0, 11, 12, 13, 64, 127].iter().map(|&p| normalize(p)).collect();
         assert_eq!(normalized, [11, 11, 0, 11, 0, 11, 0, 1, 4, 7]);
 
-        let starters: Vec<(&str, Vec<i32>)> = harmony::starters().into_iter().map(|s| (s.name, s.degrees)).collect();
+        let starters: Vec<(&str, &str, ScaleType, Vec<i32>)> =
+            harmony::starters().into_iter().map(|s| (s.name, s.mood, s.scale, s.degrees)).collect();
+        use ScaleType::{Major, Minor};
         assert_eq!(
             starters,
             [
-                ("I–IV–V–vi", vec![0, 3, 4, 5]),
-                ("I–V–vi–IV", vec![0, 4, 5, 3]),
-                ("vi–IV–I–V", vec![5, 3, 0, 4]),
-                ("ii–V–I", vec![1, 4, 0, 0]),
-                ("I–vi–IV–V", vec![0, 5, 3, 4]),
-                ("i–VI–III–VII", vec![0, 5, 2, 6]),
+                ("I–IV–V–vi", "bright, lifting", Major, vec![0, 3, 4, 5]),
+                ("I–V–vi–IV", "big and hopeful", Major, vec![0, 4, 5, 3]),
+                ("vi–IV–I–V", "sad but hopeful", Major, vec![5, 3, 0, 4]),
+                ("I–vi–IV–V", "old-school, sweet", Major, vec![0, 5, 3, 4]),
+                ("ii–V–I", "jazzy, resolved", Major, vec![1, 4, 0, 0]),
+                ("I–IV", "open two-chord vamp", Major, vec![0, 3]),
+                ("i–VI–III–VII", "dark, driving", Minor, vec![0, 5, 2, 6]),
+                ("i–VII–VI–VII", "brooding loop", Minor, vec![0, 6, 5, 6]),
+                ("i–v–VI–iv", "sad, cinematic", Minor, vec![0, 4, 5, 3]),
+                ("i–iv", "moody two-chord vamp", Minor, vec![0, 3]),
+                ("i–VI", "hazy, floating", Minor, vec![0, 5]),
+                ("i", "one-chord drone", Minor, vec![0]),
             ]
         );
+        assert_eq!(harmony::starters_for(Minor)[0].name, "i–VI–III–VII");
+        assert_eq!(harmony::starters_for(Major).len(), 6);
 
         let described = |degrees: &[i32], root: i32, scale: ScaleType, total: f64| -> Vec<String> {
             harmony::progression(degrees, root, scale, total, 4.0)

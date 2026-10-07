@@ -11,6 +11,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
 import type { Command, MasterSettings, NoteEvent, ProjectModel } from "./types";
+import { SOUND_PRESETS, soundPresetOf } from "./types";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
 
@@ -528,5 +529,25 @@ describe("save and open", () => {
     expect(s.canUndo).toBe(false);
     expect(s.canRedo).toBe(false);
     expect(s.model.tracks[0].name).toBe("lead");
+  });
+});
+
+// ─── sound presets ─────────────────────────────────────────────────────────────────────────
+
+describe("sound presets (store.applySoundPreset)", () => {
+  it("voice, tone and reverb as transient edits undo as one labelled step", async () => {
+    const { melody } = await ids();
+    const before = (await model()).tracks[0];
+    const preset = SOUND_PRESETS.find((p) => p.name === "warm pad")!;
+    const label = `sound: ${preset.name}`;
+    await b.apply({ type: "setTrackVoice", id: melody, voice: preset.voice }, true, label);
+    await b.apply({ type: "setTrackParam", id: melody, param: "tone", value: preset.tone }, true, label);
+    await b.apply({ type: "setTrackParam", id: melody, param: "reverbSend", value: preset.reverbSend }, true, label);
+    const s = await b.commitGesture();
+    expect(soundPresetOf(s.model.tracks[0])?.name).toBe("warm pad");
+    expect(s.undoLabel).toBe(label);
+    const back = await b.undo();
+    expect(back.model.tracks[0]).toEqual(before);
+    expect(back.canUndo).toBe(false);
   });
 });
