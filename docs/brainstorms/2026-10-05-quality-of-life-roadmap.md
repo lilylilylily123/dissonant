@@ -8,6 +8,9 @@ origin: docs/brainstorms/2026-10-02-full-daw-brainstorm.md
 
 # Quality-of-life roadmap: settings, audio, tempo, note editing
 
+> Follow-up: `2026-10-07-beginner-flow-and-qol.md` covers the first-ten-minutes path for
+> beginners and promotes several open items below.
+
 The big roadmap (`2026-10-02-full-daw-brainstorm.md`) is about capabilities. This one is about
 friction: the hundred small things that decide whether Dissonant feels like a tool someone
 reaches for every day or a demo they admire once. Everything here is scoped against the code
