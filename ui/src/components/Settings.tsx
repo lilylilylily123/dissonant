@@ -263,7 +263,10 @@ function EditingTab() {
       </Row>
       <div className="sdiv" />
       <div className="scap">new projects</div>
-      <Row label="start from">
+      <Row label="show on launch" hint="the new-project screen: vibes, starter, recent files">
+        <Toggle on={e.showWelcome} onChange={(v) => upd({ showWelcome: v })} />
+      </Row>
+      <Row label="start from" hint={keys("what ⌘N makes")}>
         <Seg value={e.newProject} options={[["starter", "starter (I–IV–V–vi, melody + drums)"], ["empty", "empty"]]} onChange={(v) => upd({ newProject: v })} />
       </Row>
       <Row label="tempo">

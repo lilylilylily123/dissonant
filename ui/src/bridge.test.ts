@@ -551,3 +551,36 @@ describe("sound presets (store.applySoundPreset)", () => {
     expect(back.canUndo).toBe(false);
   });
 });
+
+// ─── vibes ─────────────────────────────────────────────────────────────────────────────────
+
+describe("vibes (ProjectModel::from_vibe)", () => {
+  it("match vibe_values_shared_with_the_ui in crates/dissonant-core/tests/persistence.rs", async () => {
+    const infos = await b.listVibes();
+    const described = [];
+    for (const info of infos) {
+      const s = await b.newFromVibe(info.id);
+      const m = s.model;
+      const p = m.patterns[0];
+      expect(m.key).toEqual(info.key);
+      expect([s.dirty, s.canUndo, s.path]).toEqual([false, false, null]);
+      const count = (track: number, pitch?: number) => (p.notesByTrack[m.tracks[track].id] ?? []).filter((n) => pitch === undefined || n.pitch === pitch).length;
+      described.push(
+        `${info.id}|${info.tempo}|${m.swing}|${m.tracks.map((t) => t.name).join(",")}|${p.chords.chords.map((c) => c.name).join(" ")}|${m.tracks[0].voice}|kick ${count(2, 36)}|bass ${count(1)}|${count(2)}`,
+      );
+    }
+    expect(described).toEqual([
+      "lofi|80|60|keys,bass,drums|Gm C F Dm|triangle|kick 12|bass 12|52",
+      "postpunk|148|50|lead,bass,drums|Em C G D|square|kick 12|bass 32|52",
+      "ambient|70|50|pad,bass,drums|D G|pad|kick 4|bass 4|8",
+      "songwriter|96|50|melody,bass,drums|G D Em C|pluck|kick 8|bass 8|48",
+      "club|124|50|lead,bass,drums|Am G F G|square|kick 16|bass 16|40",
+    ]);
+  });
+
+  it("rejects an unknown vibe and keeps the project", async () => {
+    const before = await model();
+    await expect(b.newFromVibe("polka")).rejects.toBeTruthy();
+    expect(await model()).toEqual(before);
+  });
+});

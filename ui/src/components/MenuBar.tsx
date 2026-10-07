@@ -36,7 +36,7 @@ export function MenuBar() {
   const menus: Record<string, Item[]> = {
     file: [
       { label: "New project", sc: `${mod}N`, action: () => s.newProject() },
-      { label: "New from template…", action: () => s.openTemplates(true) },
+      { label: "New from a vibe or template…", action: () => s.openNewProject(true) },
       { label: "Save as template…", action: () => s.saveAsTemplate() },
       { sep: true },
       { label: "Open…", sc: `${mod}O`, action: () => s.openProject() },

@@ -140,6 +140,8 @@ pub struct EditingSettings {
     pub alt_key: AltKey,
     /// Snap note starts to chord changes when within a grid step of one.
     pub snap_to_chords: bool,
+    /// Open the new-project screen (vibes, recent files) when the app starts.
+    pub show_welcome: bool,
 }
 
 impl Default for EditingSettings {
@@ -156,6 +158,7 @@ impl Default for EditingSettings {
             confirm_destructive: true,
             alt_key: AltKey::NoSnap,
             snap_to_chords: false,
+            show_welcome: true,
         }
     }
 }

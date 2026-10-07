@@ -407,45 +407,6 @@ const STARTER_MELODY: [[(f64, f64, i32, i32); 3]; 4] = [
     [(0.0, 1.5, 72, 100), (1.5, 0.5, 71, 80), (2.0, 2.0, 69, 96)], // Am: C  B  A
 ];
 
-/// A plain groove for the starter's drum track, one bar at a time: kick on the downbeat (and
-/// mid-bar in even meters), snare on the other beats, hats on every 8th. Hits sit on the drum
-/// grid's 8th steps and anything past the pattern's end is dropped.
-fn starter_groove(length: f64, bar: f64) -> Vec<NoteEvent> {
-    const KICK: i32 = 36;
-    const SNARE: i32 = 38;
-    const HAT: i32 = 42;
-    let mut hits = Vec::new();
-    let mut bar_start = 0.0;
-    while bar_start < length - 1e-9 {
-        let mut push = |offset: f64, pitch: i32, velocity: i32| {
-            let start = bar_start + offset;
-            if offset < bar - 1e-9 && start < length - 1e-9 {
-                hits.push(NoteEvent::new(start, 0.25_f64.min(length - start), pitch).with_velocity(velocity));
-            }
-        };
-        let whole_beats = bar.ceil() as i32;
-        // A second kick mid-bar only in whole, even meters of 4+ beats (4/4, 6/4): in 2/4 it
-        // would take the snare's place.
-        let mid_kick = (bar.fract() == 0.0 && whole_beats >= 4 && whole_beats % 2 == 0).then_some(whole_beats / 2);
-        for beat in 0..whole_beats {
-            let b = beat as f64;
-            if beat == 0 || Some(beat) == mid_kick {
-                push(b, KICK, 120);
-            } else {
-                push(b, SNARE, 100);
-            }
-        }
-        let mut step = 0.0;
-        while step < bar - 1e-9 {
-            push(step, HAT, if step.fract() == 0.0 { 80 } else { 60 });
-            step += 0.5;
-        }
-        bar_start += bar;
-    }
-    hits.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat).then(a.pitch.cmp(&b.pitch)));
-    hits
-}
-
 fn default_tracks() -> Vec<Track> {
     vec![Track::new("melody")]
 }
@@ -576,7 +537,7 @@ impl ProjectModel {
         let drums = Track::drums("drums");
         let drums_id = drums.id;
         model.tracks.push(drums);
-        model.patterns[0].notes_by_track.insert(drums_id, starter_groove(length, bar));
+        model.patterns[0].notes_by_track.insert(drums_id, crate::vibes::Groove::Backbeat.hits(length, bar));
 
         let p = &model.patterns[0];
         model.clips = vec![Clip::new(p.id, 0.0, p.length_beats)];

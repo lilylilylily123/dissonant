@@ -10,7 +10,7 @@ import { Editor } from "./components/Editor";
 import { Dialog } from "./components/Dialog";
 import { SettingsWindow } from "./components/Settings";
 import { ExportDialog, ExportProgressBar } from "./components/ExportDialog";
-import { TemplatePicker } from "./components/TemplatePicker";
+import { NewProjectScreen } from "./components/NewProjectScreen";
 import { useStore } from "./store";
 import { useLiveKeyboard } from "./liveKeyboard";
 import { splitNotes } from "./noteEditing";
@@ -43,7 +43,7 @@ export default function App() {
         s.openSettings(!s.settingsOpen);
         return;
       }
-      if (s.settingsOpen || s.templatesOpen) return;
+      if (s.settingsOpen || s.newProjectOpen) return;
       if (s.exportOpen) {
         if (e.key === "Escape") s.openExport(false);
         return;
@@ -127,7 +127,7 @@ export default function App() {
       {toast && <div className={`toast${toast.error ? " error" : ""}`}>{toast.text}</div>}
       <SettingsWindow />
       <ExportDialog />
-      <TemplatePicker />
+      <NewProjectScreen />
       <ExportProgressBar />
       <Dialog />
     </div>

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, SoundPreset, TemplateInfo, Track } from "./types";
+import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, SoundPreset, TemplateInfo, Track, VibeInfo } from "./types";
 import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
@@ -60,7 +60,11 @@ interface State {
   exportOpen: boolean;
   exporting: ExportProgress | null;
   templates: TemplateInfo[];
-  templatesOpen: boolean;
+  /** The new-project screen (vibes, starter, templates, recent files). */
+  newProjectOpen: boolean;
+  /** It was opened at launch, over the fresh starter the app starts with. */
+  newProjectAtLaunch: boolean;
+  vibes: VibeInfo[];
   looping: boolean;
   loopRegion: [number, number] | null;
   armed: boolean;
@@ -142,7 +146,8 @@ interface State {
   setDialogText(text: string): void;
   /** A dialog with one text field; resolves with the text, or null on cancel. */
   askInput(title: string, message: string, placeholder?: string, okLabel?: string, initial?: string): Promise<string | null>;
-  openTemplates(open?: boolean): void;
+  openNewProject(open?: boolean): void;
+  newFromVibe(id: string): Promise<void>;
   refreshTemplates(): Promise<void>;
   saveAsTemplate(): Promise<void>;
   deleteTemplate(name: string): Promise<void>;
@@ -221,10 +226,10 @@ export const useStore = create<State>((set, get) => {
   };
 
   /**
-   * A fresh, untitled starter also turns the chord bed on, so the first press of space plays
-   * the progression with the melody and the groove. A no-op for a project without chords.
+   * A fresh, untitled starter or vibe also turns the chord bed on, so the first press of space
+   * plays the progression with everything else. A no-op for a project without chords.
    */
-  const hearStarterBed = (snapshot: Snapshot) => {
+  const hearBedForFresh = (snapshot: Snapshot) => {
     if (snapshot.path !== null || snapshot.dirty || get().hearChords) return;
     if (!snapshot.model.patterns.some((p) => p.chords.chords.length > 0)) return;
     set({ hearChords: true });
@@ -290,7 +295,9 @@ export const useStore = create<State>((set, get) => {
     exportOpen: false,
     exporting: null,
     templates: [],
-    templatesOpen: false,
+    newProjectOpen: false,
+    newProjectAtLaunch: false,
+    vibes: [],
     looping: true,
     loopRegion: null,
     armed: false,
@@ -317,7 +324,7 @@ export const useStore = create<State>((set, get) => {
       const first = await b.getState();
       applySnapshot(first);
       await syncPlayback();
-      hearStarterBed(first);
+      hearBedForFresh(first);
       await b.setLiveTrack(get().selectedTrackId);
       b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks, countIn: e.countIn ?? 0 }));
       b.onDocument((snap) => applySnapshot(snap));
@@ -343,10 +350,22 @@ export const useStore = create<State>((set, get) => {
       void get().refreshMidi();
       void get().refreshRecent();
       try {
+        set({ vibes: await b.listVibes() });
+      } catch {
+        /* no vibes backend */
+      }
+      let recovering = false;
+      try {
         const candidates = await b.recoveryCandidates();
-        if (candidates.length) void offerRecovery(candidates);
+        recovering = candidates.length > 0;
+        if (recovering) void offerRecovery(candidates);
       } catch {
         /* no recovery backend */
+      }
+      // The new-project screen greets a fresh launch; a recovery offer takes its place.
+      if (!recovering && get().settings.editing.showWelcome) {
+        get().openNewProject(true);
+        set({ newProjectAtLaunch: true });
       }
     },
 
@@ -562,7 +581,7 @@ export const useStore = create<State>((set, get) => {
       const snap = await b.newProject();
       applySnapshot(snap);
       await syncPlayback();
-      hearStarterBed(snap);
+      hearBedForFresh(snap);
     },
 
     async openProject() {
@@ -677,9 +696,25 @@ export const useStore = create<State>((set, get) => {
       });
       return v === "ok" ? get().dialogText.trim() || null : null;
     },
-    openTemplates(open = true) {
-      set({ templatesOpen: open });
-      if (open) void get().refreshTemplates();
+    openNewProject(open = true) {
+      set({ newProjectOpen: open, newProjectAtLaunch: false });
+      if (open) {
+        void get().refreshTemplates();
+        void get().refreshRecent();
+      }
+    },
+    async newFromVibe(id) {
+      const b = await getBridge();
+      if (!(await get().confirmDiscard("creating a new project"))) return;
+      set({ newProjectOpen: false, newProjectAtLaunch: false });
+      try {
+        const snap = await b.newFromVibe(id);
+        applySnapshot(snap);
+        await syncPlayback();
+        hearBedForFresh(snap);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
     },
     async refreshTemplates() {
       const b = await getBridge();
@@ -710,14 +745,20 @@ export const useStore = create<State>((set, get) => {
     },
     async newFromTemplate(name) {
       const b = await getBridge();
+      // At launch the open project already is a fresh starter: picking it just gets to work.
+      const snap0 = get().snapshot;
+      if (name === "starter" && get().newProjectAtLaunch && snap0 && snap0.path === null && !snap0.dirty && !snap0.canUndo) {
+        set({ newProjectOpen: false, newProjectAtLaunch: false });
+        return;
+      }
       if (!(await get().confirmDiscard("creating a new project"))) return;
-      set({ templatesOpen: false });
+      set({ newProjectOpen: false, newProjectAtLaunch: false });
       try {
         if (name === "starter" || name === "empty") {
           const snap = await b.newProject(name === "starter");
           applySnapshot(snap);
           await syncPlayback();
-          hearStarterBed(snap);
+          hearBedForFresh(snap);
         } else {
           applySnapshot(await b.newFromTemplate(name));
           await syncPlayback();

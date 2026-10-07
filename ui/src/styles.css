@@ -2006,3 +2006,110 @@ select {
   color: inherit;
   opacity: 0.75;
 }
+
+/* ─── New-project screen ────────────────────────────────────────────────────────────────── */
+.modal.settings.newproject {
+  width: 860px;
+}
+.newproject .npbody {
+  display: flex;
+  gap: 0;
+  max-height: min(64vh, 560px);
+  min-height: 0;
+}
+.newproject .npcol {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.newproject .npcol.side {
+  flex: 0 0 240px;
+  border-left: 1px solid var(--line-1);
+}
+.newproject .tplrow.vibe .name {
+  min-width: 120px;
+}
+.newproject .tplrow .facts {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-5);
+  white-space: nowrap;
+}
+.newproject .npempty {
+  font-size: 10.5px;
+  color: var(--text-5);
+  padding: 4px 8px;
+}
+.newproject .npfoot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line-1);
+  flex-wrap: wrap;
+}
+.newproject .legend {
+  display: flex;
+  gap: 14px;
+  flex: 1;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.newproject .legend .lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* The same non-colour cues the roll uses: solid fill, a dot, a hatch with "!". */
+.newproject .legend .sw {
+  width: 22px;
+  height: 11px;
+  border-radius: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 700;
+  padding-right: 2px;
+  color: #0b0b0d;
+}
+.newproject .legend .sw.solid {
+  background: var(--tier-solid);
+}
+.newproject .legend .sw.tension {
+  background: var(--tier-tension);
+}
+.newproject .legend .sw.tension::after {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #0b0b0d;
+}
+.newproject .legend .sw.dissonance {
+  background: repeating-linear-gradient(135deg, var(--tier-dissonance) 0 3px, color-mix(in srgb, var(--tier-dissonance) 45%, transparent) 3px 6px);
+}
+.newproject .npcheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-4);
+  cursor: pointer;
+}
+@media (max-width: 720px) {
+  .newproject .npbody {
+    flex-direction: column;
+  }
+  .newproject .npcol.side {
+    flex: none;
+    border-left: 0;
+    border-top: 1px solid var(--line-1);
+  }
+}

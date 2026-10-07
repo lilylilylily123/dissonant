@@ -44,6 +44,11 @@ follows the setting.
 
 ## 1. The first ten minutes
 
+**Status (2026-10-07):** the new-project screen, the vibe templates and the empty-state hints
+shipped (`NewProjectScreen.tsx`, `crates/dissonant-core/src/vibes.rs`). The screen opens at
+launch unless Settings → editing → show on launch is off, and gives way to an autosave recovery
+offer. Still open: the first-loop checklist strip and the KEYS overlay.
+
 | Pri | Item | Notes | Size |
 |---|---|---|---|
 | now | **First-run / new-project screen** | Replaces the bare `TemplatePicker` list. Three doors: **start from a vibe** (1.2), **open recent**, **empty**. The three tiers are shown as a small live legend (solid / spicy / flagged, with their shapes, not only colors). Also shown on launch when there is no autosave to recover. Already listed as open in roadmap §6. | M |
@@ -55,6 +60,10 @@ follows the setting.
 ---
 
 ## 2. Plain words over theory words
+
+**Status (2026-10-07):** mood-named, scale-aware starters (with the new vamps, the brooding
+loop and the drone) and sound presets shipped. Still open: audition on hover, role-based
+"+ track", more scales and status-bar hints.
 
 | Pri | Item | Notes | Size |
 |---|---|---|---|
@@ -68,6 +77,9 @@ follows the setting.
 ---
 
 ## 3. From loop to song
+
+Groundwork: `vibes::Groove` already generates the four-on-the-floor, boom-bap, half-time,
+motorik and sparse grooves the vibes use, so the drum-preset item is mostly UI now.
 
 Beginners stall at the eight-bar loop. These items make the jump to a full track reachable.
 

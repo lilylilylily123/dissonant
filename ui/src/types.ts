@@ -307,6 +307,15 @@ export interface TemplateInfo {
   path: string;
 }
 
+/** `dissonant_core::VibeInfo`: a built-in project to start from (lo-fi, post-punk, …). */
+export interface VibeInfo {
+  id: string;
+  name: string;
+  blurb: string;
+  tempo: number;
+  key: KeyState;
+}
+
 export interface OutputDevice {
   name: string;
   isDefault: boolean;
@@ -341,6 +350,7 @@ export interface Settings {
     confirmDestructive: boolean;
     altKey: AltKey;
     snapToChords: boolean;
+    showWelcome: boolean;
   };
   export: { sampleRate: number; bitDepth: 16 | 24 | 32; dither: boolean; normalize: boolean; normalizeDb: number; tailSeconds: number };
   appearance: { uiScale: number; rowHeight: number; reducedMotion: boolean; tierColors: TierColors; accent: string };
@@ -371,6 +381,7 @@ export const DEFAULT_SETTINGS: Settings = {
     confirmDestructive: true,
     altKey: "noSnap",
     snapToChords: false,
+    showWelcome: true,
   },
   export: { sampleRate: 44100, bitDepth: 16, dither: true, normalize: false, normalizeDb: -1, tailSeconds: 1.5 },
   appearance: { uiScale: 1, rowHeight: 18, reducedMotion: false, tierColors: DEFAULT_TIER_COLORS, accent: "#b48cff" },

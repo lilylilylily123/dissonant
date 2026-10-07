@@ -1133,6 +1133,20 @@ fn new_from_template(state: State<'_, AppState>, name: String) -> Result<Snapsho
     Ok(state.snapshot())
 }
 
+/// The built-in vibe templates, for the new-project screen.
+#[tauri::command]
+fn list_vibes() -> Vec<dissonant_core::VibeInfo> {
+    dissonant_core::vibes()
+}
+
+/// A new, untitled project from a vibe (`ProjectModel::from_vibe`).
+#[tauri::command]
+fn new_from_vibe(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
+    let model = ProjectModel::from_vibe(&id).ok_or_else(|| format!("no vibe called {id}"))?;
+    state.load_model(model, None, false);
+    Ok(state.snapshot())
+}
+
 // ─── Settings ────────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1414,6 +1428,8 @@ pub fn run() {
             save_template,
             delete_template,
             new_from_template,
+            list_vibes,
+            new_from_vibe,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");
