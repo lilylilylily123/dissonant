@@ -545,6 +545,29 @@ fn looping_retriggers_at_the_loop_point() {
         );
     }
 }
+/// The headline case, heard rather than inspected: a track looping at 2 beats inside an
+/// 8-beat pattern sounds four times per pass, on the beat each turn starts.
+#[test]
+fn a_track_looping_shorter_than_its_pattern_sounds_on_every_turn() {
+    let mut m = model("sine", 8.0);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+    let track_id = m.tracks[0].id;
+    m.patterns[0].track_loop_beats.insert(track_id, 2.0);
+
+    let (mut e, _) = engine_with(&m);
+    e.handle(EngineCommand::Play);
+    // 8 beats @120 bpm = 4.0 s; stop short of the pattern's own loop point.
+    let (l, _) = run(&mut e, secs(3.9), 512);
+    let o = onsets(&l, 1e-3);
+    assert_eq!(o.len(), 4, "expected one hit per 2-beat turn, found {o:?}");
+    for (turn, idx) in o.iter().enumerate() {
+        let expected = turn * 44_100; // one second per 2-beat turn
+        assert!(
+            (*idx as i64 - expected as i64).abs() < 64,
+            "turn {turn} sounded at {idx}, expected ~{expected}"
+        );
+    }
+}
 
 #[test]
 fn a_note_crossing_the_loop_end_does_not_leak_into_the_next_cycle() {

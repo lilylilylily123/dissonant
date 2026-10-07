@@ -1,0 +1,43 @@
+[package]
+name = "dissonant-plugins"
+description = "Dissonant's plugin layer: find installed audio plugins and host them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = "0.4"
+
+# CLAP is MIT, which is what keeps this crate (and the app) MIT; see the lib docs for what
+# adding another format would cost.
+clack-host = "0.2"
+clack-extensions = { version = "0.2", features = ["clack-host", "params", "state", "audio-ports", "note-ports"] }
+
+walkdir = "2"
+dirs = "7"
+
+[dev-dependencies]
+clack-plugin = "0.2"
+# The fixture plugin is a real CLAP plugin built from this crate, so the test build needs both
+# sides of every extension, and the host needs to be able to load a statically linked entry.
+clack-host = { version = "0.2", features = ["clack-plugin"] }
+clack-extensions = { version = "0.2", features = ["params", "state", "audio-ports", "note-ports", "clack-plugin"] }
+tempfile = "3"
+
+# The same fixture source is compiled twice: once into the test binary (loaded statically, with no
+# dylib involved) and once as a real `.clap` shared object, so the scanner has something on disk to
+# find. `cargo test` builds examples, so the dylib is always present by the time the tests run.
+[[example]]
+name = "dissonant_sine_fixture"
+path = "tests/fixture/entry.rs"
+crate-type = ["cdylib"]
+
+
+# A second, extension-free plugin: the host has to cope with one of those too.
+[[example]]
+name = "dissonant_bare_fixture"
+path = "tests/fixture/bare_entry.rs"
+crate-type = ["cdylib"]

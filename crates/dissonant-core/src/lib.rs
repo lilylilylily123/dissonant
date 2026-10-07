@@ -23,7 +23,7 @@ pub use document::{Command, Document, EditError, TrackParam};
 pub use midi_file::{ImportedMidi, ImportedTrack, MidiError, MidiScope};
 pub use model::{
     ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, ScaleType, Section, SongPattern, TimeSignature, Track,
-    SCHEMA_VERSION,
+    TrackPlugin, SCHEMA_VERSION,
 };
 pub use sequence::{Sequence, SequenceTrack};
 pub use tempo::{swing_warp, Tempo, TempoMap, TempoPoint};

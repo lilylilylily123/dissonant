@@ -62,9 +62,11 @@ pub fn export(model: &ProjectModel, scope: MidiScope) -> Result<Vec<u8>, MidiErr
     let (per_track, chords): (TrackNotes, ChordMarkers) = match scope {
         MidiScope::Pattern(id) => {
             let p = model.pattern(&id).ok_or(MidiError::NoSuchPattern)?;
+            // Export what the pattern plays, repeats and all, not just the first turn.
+            let chords = p.looped_chords();
             (
-                model.tracks.iter().map(|t| (t, p.notes(&t.id).to_vec())).collect(),
-                p.chords.chords().iter().filter_map(|c| c.name.clone().map(|n| (c.start_beat, n))).collect(),
+                model.tracks.iter().map(|t| (t, p.looped_notes(&t.id))).collect(),
+                chords.chords().iter().filter_map(|c| c.name.clone().map(|n| (c.start_beat, n))).collect(),
             )
         }
         MidiScope::Song => (

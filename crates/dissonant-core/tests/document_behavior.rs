@@ -27,6 +27,12 @@ fn fixture() -> ProjectModel {
             NoteEvent::new(4.0, 2.0, 64).with_velocity(70),
         ],
     );
+    // The melody track is plugin-driven, so the plugin commands have something to bite on.
+    m.tracks[0].plugin = Some(TrackPlugin {
+        uid: "clap:/Library/Audio/Plug-Ins/CLAP/Surge XT.clap:org.surge-synth-team.surge-xt".into(),
+        name: "Surge XT".into(),
+        state: Some("c3VyZ2U=".into()),
+    });
     m.clips = vec![clip_at(p0, 0.0, 16.0), clip_at(p1, 16.0, 8.0)];
     m
 }
@@ -60,11 +66,15 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::SetTrackVoice { .. } => "SetTrackVoice",
         Command::SetTrackParam { .. } => "SetTrackParam",
         Command::SetTrackColor { .. } => "SetTrackColor",
+        Command::SetTrackPlugin { .. } => "SetTrackPlugin",
+        Command::SetPluginState { .. } => "SetPluginState",
         Command::AddPattern => "AddPattern",
         Command::DuplicatePattern { .. } => "DuplicatePattern",
         Command::DeletePattern { .. } => "DeletePattern",
         Command::RenamePattern { .. } => "RenamePattern",
         Command::SetPatternLength { .. } => "SetPatternLength",
+        Command::SetTrackLoop { .. } => "SetTrackLoop",
+        Command::SetChordLoop { .. } => "SetChordLoop",
         Command::SetNotes { .. } => "SetNotes",
         Command::SetChords { .. } => "SetChords",
         Command::AddClip { .. } => "AddClip",
@@ -102,11 +112,18 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
         Command::SetTrackParam { id: t0, param: TrackParam::Tone, value: 4_000.0 },
         Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: -0.75 },
         Command::SetTrackColor { id: t0, color: Some("#010203".into()) },
+        Command::SetTrackPlugin {
+            id: t0,
+            plugin: Some(TrackPlugin { uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(), name: "Vital".into(), state: None }),
+        },
+        Command::SetPluginState { id: t0, state: "ZGlmZmVyZW50".into() },
         Command::AddPattern,
         Command::DuplicatePattern { id: p0 },
         Command::DeletePattern { id: p1 },
         Command::RenamePattern { id: p0, name: "verse".into() },
         Command::SetPatternLength { id: p0, beats: 32.0 },
+        Command::SetTrackLoop { pattern_id: p0, track_id: t0, beats: Some(8.0) },
+        Command::SetChordLoop { pattern_id: p0, beats: Some(16.0) },
         Command::SetNotes { pattern_id: p1, track_id: t0, notes: vec![NoteEvent::new(1.0, 1.0, 62)] },
         Command::SetChords {
             pattern_id: p1,
@@ -1102,4 +1119,158 @@ fn returning_to_the_saved_state_reports_no_unsaved_changes() {
     }
     d.commit_gesture();
     assert!(!d.is_dirty(), "a round-trip slider drag reported unsaved changes");
+}
+
+// ---------------------------------------------------------------- 7. track plugins
+
+/// The uid the fixture's melody track is loaded with.
+fn fixture_uid() -> String {
+    fixture().tracks[0].plugin.as_ref().unwrap().uid.clone()
+}
+
+fn vital() -> TrackPlugin {
+    TrackPlugin { uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(), name: "Vital".into(), state: None }
+}
+
+#[test]
+fn a_track_plugin_survives_a_save_and_load_with_its_state_blob() {
+    let mut d = doc();
+    let t0 = d.model().tracks[0].id;
+    d.apply(Command::SetPluginState { id: t0, state: "QUJDRA==".into() }, false).unwrap();
+
+    let saved = d.model().clone();
+    let loaded = ProjectModel::from_json(&saved.to_json().unwrap()).expect("a file we just wrote must load");
+    let plugin = loaded.tracks[0].plugin.as_ref().expect("the track lost its plugin on reload");
+    assert_eq!(plugin.uid, fixture_uid());
+    assert_eq!(plugin.name, "Surge XT", "the cached name must survive, so a missing plugin is still nameable");
+    assert_eq!(plugin.state.as_deref(), Some("QUJDRA=="), "the plugin's own state did not survive the file");
+    assert_eq!(loaded, saved);
+}
+
+#[test]
+fn a_file_written_before_plugins_existed_opens_with_no_plugin() {
+    // A v6 track: every field this build knows except `plugin`. It must open playing its own
+    // built-in voice rather than refusing to decode.
+    let track = "11111111-1111-1111-1111-111111111111";
+    let json = format!(
+        r#"{{
+          "schemaVersion": 6, "tempo": 120,
+          "tracks": [ {{ "id": "{track}", "name": "lead", "voice": "pluck", "muted": false, "soloed": false,
+            "isDrum": false, "volume": 1, "reverbSend": 0, "tone": 18000, "pan": 0 }} ],
+          "patterns": [ {{ "name": "verse", "lengthBeats": 16 }} ]
+        }}"#
+    );
+    let m = ProjectModel::from_json(&json).expect("a pre-plugin file must still open");
+    assert_eq!(m.schema_version, SCHEMA_VERSION);
+    assert_eq!(m.tracks[0].plugin, None, "a file with no plugin key must decode as no plugin");
+    assert_eq!(m.tracks[0].voice, "pluck", "the built-in voice must be left alone");
+}
+
+#[test]
+fn switching_to_a_different_plugin_drops_the_previous_plugins_state() {
+    // A state blob is only meaningful to the plugin that wrote it: handing Surge's bytes to
+    // Vital is at best ignored and at worst a crash inside someone else's code.
+    let mut d = doc();
+    let t0 = d.model().tracks[0].id;
+    let before = d.model().tracks[0].plugin.clone().unwrap();
+    assert!(before.state.is_some(), "fixture must start with a state blob for this to mean anything");
+
+    d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(vital()) }, false).unwrap();
+    let now = d.model().tracks[0].plugin.as_ref().unwrap();
+    assert_eq!(now.uid, vital().uid);
+    assert_eq!(now.state, None, "the previous plugin's state was carried over to a different plugin");
+
+    // Undo restores the old plugin *and* the state it had.
+    assert!(d.undo());
+    assert_eq!(d.model().tracks[0].plugin.as_ref(), Some(&before), "undo did not restore the plugin and its state");
+    assert!(d.redo());
+    assert_eq!(d.model().tracks[0].plugin.as_ref().unwrap().state, None);
+}
+
+#[test]
+fn reloading_the_same_plugin_keeps_its_state() {
+    // Re-sending the plugin a track already has (a rescan, a reconnect) must not wipe the
+    // user's patch.
+    let mut d = doc();
+    let t0 = d.model().tracks[0].id;
+    let same = TrackPlugin { uid: fixture_uid(), name: "Surge XT".into(), state: Some("c3VyZ2U=".into()) };
+
+    d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(same.clone()) }, false).unwrap();
+    assert_eq!(d.model().tracks[0].plugin.as_ref(), Some(&same));
+}
+
+#[test]
+fn clearing_a_tracks_plugin_restores_the_built_in_voice() {
+    let mut d = doc();
+    let t0 = d.model().tracks[0].id;
+    let voice = d.model().tracks[0].voice.clone();
+
+    d.apply(Command::SetTrackPlugin { id: t0, plugin: None }, false).unwrap();
+    assert_eq!(d.model().tracks[0].plugin, None);
+    assert_eq!(d.model().tracks[0].voice, voice, "clearing a plugin must not disturb the voice it falls back to");
+
+    // And with no plugin to own it, there is nothing for a state blob to attach to.
+    assert_eq!(
+        d.apply(Command::SetPluginState { id: t0, state: "QUJDRA==".into() }, false),
+        Err(EditError::NoPluginOnTrack)
+    );
+}
+
+#[test]
+fn a_plugin_without_a_uid_or_with_a_malformed_state_is_refused() {
+    let mut d = doc();
+    let t0 = d.model().tracks[0].id;
+    let ghost = Uuid::new_v4();
+    let before = d.model().clone();
+    use EditError::*;
+
+    // A uid is the only thing that can find the plugin again on the next load.
+    for blank in ["", "   ", "\t\n"] {
+        assert_eq!(
+            d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(TrackPlugin { uid: blank.into(), ..vital() }) }, false),
+            Err(InvalidValue),
+            "a plugin with the uid {blank:?} was accepted"
+        );
+    }
+
+    // Shapes that cannot be base64, so they could never be handed back to a plugin.
+    for bad in ["not base64!", "ab*d", "QQ=", "====", "=QUJ", "QUJDRA==="] {
+        assert_eq!(
+            d.apply(Command::SetPluginState { id: t0, state: bad.into() }, false),
+            Err(InvalidValue),
+            "state {bad:?} was accepted"
+        );
+        assert_eq!(
+            d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(TrackPlugin { state: Some(bad.into()), ..vital() }) }, false),
+            Err(InvalidValue),
+            "a plugin carrying state {bad:?} was accepted"
+        );
+    }
+
+    assert_eq!(d.apply(Command::SetTrackPlugin { id: ghost, plugin: Some(vital()) }, false), Err(NoSuchTrack));
+    assert_eq!(d.apply(Command::SetTrackPlugin { id: ghost, plugin: None }, false), Err(NoSuchTrack));
+    assert_eq!(d.apply(Command::SetPluginState { id: ghost, state: "QUJDRA==".into() }, false), Err(NoSuchTrack));
+
+    assert_eq!(d.model(), &before, "a refused plugin edit changed the project");
+    assert!(!d.can_undo(), "a refused plugin edit recorded an undo step");
+
+    // Well-formed blobs of every padding length still go through.
+    for good in ["", "QUJD", "ZGlmZmVyZW50", "QQ==", "QUI=", "a+/9"] {
+        d.apply(Command::SetPluginState { id: t0, state: good.into() }, false)
+            .unwrap_or_else(|e| panic!("valid base64 {good:?} was refused: {e}"));
+    }
+}
+
+#[test]
+fn the_sequence_carries_each_tracks_plugin_through_from_the_model() {
+    // This is how the engine learns a track is plugin-driven; losing it here silently plays the
+    // built-in synth instead of the user's plugin.
+    let m = fixture();
+    let expected = m.tracks[0].plugin.clone();
+    assert!(expected.is_some());
+
+    for sequence in [Sequence::from_pattern(&m, &m.patterns[0].id).unwrap(), Sequence::from_song(&m)] {
+        assert_eq!(sequence.tracks[0].plugin, expected, "the sequence dropped the track's plugin");
+        assert_eq!(sequence.tracks[1].plugin, None, "a track with no plugin gained one");
+    }
 }

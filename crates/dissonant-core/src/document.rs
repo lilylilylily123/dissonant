@@ -6,7 +6,9 @@
 //! per gesture.
 
 use crate::midi_file::ImportedTrack;
-use crate::model::{ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track};
+use crate::model::{
+    ChordEvent, Clip, KeyState, MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track, TrackPlugin, MIN_NOTE_BEATS,
+};
 use crate::tempo::TempoPoint;
 use crate::theory::harmony;
 use serde::{Deserialize, Serialize};
@@ -38,11 +40,19 @@ pub enum Command {
     SetTrackParam { id: Uuid, param: TrackParam, value: f64 },
     /// `#rrggbb`, or `None` to fall back to the palette.
     SetTrackColor { id: Uuid, color: Option<String> },
+    /// Load a plugin on a track, or `None` to go back to the built-in voice.
+    SetTrackPlugin { id: Uuid, plugin: Option<TrackPlugin> },
+    /// The plugin's own state blob (base64) after the user edited it in the plugin's window.
+    SetPluginState { id: Uuid, state: String },
     AddPattern,
     DuplicatePattern { id: Uuid },
     DeletePattern { id: Uuid },
     RenamePattern { id: Uuid, name: String },
     SetPatternLength { id: Uuid, beats: f64 },
+    /// Loop length in beats of one track inside a pattern; `None` makes it fill the pattern.
+    SetTrackLoop { pattern_id: Uuid, track_id: Uuid, beats: Option<f64> },
+    /// Loop length in beats of a pattern's chord track; `None` makes it fill the pattern.
+    SetChordLoop { pattern_id: Uuid, beats: Option<f64> },
     /// Replace the notes of one track in one pattern (the roll commits whole arrays).
     SetNotes { pattern_id: Uuid, track_id: Uuid, notes: Vec<NoteEvent> },
     /// Replace a pattern's chord track.
@@ -80,6 +90,8 @@ pub enum EditError {
     LastPattern,
     #[error("invalid value")]
     InvalidValue,
+    #[error("track has no plugin")]
+    NoPluginOnTrack,
     #[error("no such clip")]
     NoSuchClip,
     #[error("no such section")]
@@ -292,11 +304,15 @@ impl Command {
                 TrackParam::Pan => "change pan",
             },
             SetTrackColor { .. } => "color track",
+            SetTrackPlugin { .. } => "change plugin",
+            SetPluginState { .. } => "edit plugin",
             AddPattern => "add pattern",
             DuplicatePattern { .. } => "duplicate pattern",
             DeletePattern { .. } => "delete pattern",
             RenamePattern { .. } => "rename pattern",
             SetPatternLength { .. } => "change pattern length",
+            SetTrackLoop { .. } => "change track loop",
+            SetChordLoop { .. } => "change chord loop",
             SetNotes { .. } => "edit notes",
             SetChords { .. } => "edit chords",
             AddClip { .. } => "add clip",
@@ -315,6 +331,31 @@ impl Command {
         }
         .to_string()
     }
+}
+
+/// A loop length on its way into a pattern: either absent ("fill the pattern") or a finite
+/// value of at least one beat. Clamping against the pattern happens when it is read, so a
+/// loop set before the pattern is shortened comes back when the pattern grows again.
+fn checked_loop(beats: Option<f64>) -> Result<Option<f64>, EditError> {
+    match beats {
+        Some(b) if !b.is_finite() || b < crate::model::MIN_LOOP_BEATS => Err(EditError::InvalidValue),
+        other => Ok(other),
+    }
+}
+
+/// Shape-only base64 check: the standard alphabet, padded to a multiple of four with at most
+/// two trailing `=`. Core never decodes a plugin's state — it has no business knowing what the
+/// bytes mean — but a blob that cannot possibly be base64 is a bug at the edit, not at load,
+/// and refusing it here keeps unreadable garbage out of saved projects.
+fn is_base64(s: &str) -> bool {
+    if !s.len().is_multiple_of(4) {
+        return false;
+    }
+    let body = s.trim_end_matches('=');
+    if s.len() - body.len() > 2 {
+        return false;
+    }
+    body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
 }
 
 fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
@@ -346,6 +387,7 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             }
             for p in &mut m.patterns {
                 p.notes_by_track.remove(&id);
+                p.track_loop_beats.remove(&id);
             }
         }
         RenameTrack { id, name } => {
@@ -385,6 +427,37 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 }
             }
             m.track_mut(&id).ok_or(EditError::NoSuchTrack)?.color = color.map(|c| c.to_lowercase());
+        }
+        SetTrackPlugin { id, plugin } => {
+            if let Some(p) = &plugin {
+                // A blank uid names nothing: the track would claim to be plugin-driven and
+                // silently fall back to its voice on every load.
+                if p.uid.trim().is_empty() {
+                    return Err(EditError::InvalidValue);
+                }
+                if p.state.as_deref().is_some_and(|s| !is_base64(s)) {
+                    return Err(EditError::InvalidValue);
+                }
+            }
+            let t = m.track_mut(&id).ok_or(EditError::NoSuchTrack)?;
+            let previous = t.plugin.as_ref().map(|p| p.uid.clone());
+            t.plugin = plugin.map(|mut p| {
+                // A state blob only means anything to the plugin that wrote it; carrying it
+                // across a swap feeds one plugin another's bytes.
+                if previous.as_deref() != Some(p.uid.as_str()) {
+                    p.state = None;
+                }
+                p
+            });
+        }
+        SetPluginState { id, state } => {
+            if !is_base64(&state) {
+                return Err(EditError::InvalidValue);
+            }
+            let t = m.track_mut(&id).ok_or(EditError::NoSuchTrack)?;
+            // State with no plugin to own it would be resurrected onto whatever plugin is
+            // loaded next, which is exactly the mismatch the uid check above prevents.
+            t.plugin.as_mut().ok_or(EditError::NoPluginOnTrack)?.state = Some(state);
         }
         AddPattern => {
             let mut p = SongPattern::new(format!("pattern {}", m.patterns.len() + 1));
@@ -443,6 +516,40 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 return Err(EditError::InvalidValue);
             }
             m.pattern_mut(&id).ok_or(EditError::NoSuchPattern)?.length_beats = beats;
+        }
+        SetTrackLoop { pattern_id, track_id, beats } => {
+            if m.track(&track_id).is_none() {
+                return Err(EditError::NoSuchTrack);
+            }
+            let beats = checked_loop(beats)?;
+            let p = m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?;
+            match beats {
+                Some(b) => p.track_loop_beats.insert(track_id, b),
+                None => p.track_loop_beats.remove(&track_id),
+            };
+            // The loop is now the track's whole extent, so anything past it is cut rather than
+            // kept as material that is drawn somewhere but never heard. One undo step restores it.
+            let turn = p.track_loop(&track_id);
+            if let Some(notes) = p.notes_by_track.get_mut(&track_id) {
+                notes.retain(|n| n.start_beat < turn);
+                for n in notes.iter_mut() {
+                    n.length_beats = (turn - n.start_beat).min(n.length_beats).max(MIN_NOTE_BEATS);
+                }
+            }
+        }
+        SetChordLoop { pattern_id, beats } => {
+            let beats = checked_loop(beats)?;
+            let p = m.pattern_mut(&pattern_id).ok_or(EditError::NoSuchPattern)?;
+            p.chord_loop_beats = beats;
+            let turn = p.chord_loop();
+            let chords: Vec<ChordEvent> = p
+                .chords
+                .chords()
+                .iter()
+                .filter(|c| c.start_beat < turn)
+                .map(|c| ChordEvent { length_beats: (turn - c.start_beat).min(c.length_beats), ..c.clone() })
+                .collect();
+            p.chords = crate::chord_track::ChordTrack::new(chords);
         }
         SetNotes { pattern_id, track_id, notes } => {
             if m.track(&track_id).is_none() {
@@ -908,6 +1015,44 @@ mod tests {
         assert_eq!(d.model().swing, 75.0);
         assert_eq!(d.model().swing_grid, 0.25);
         assert_eq!(d.apply(Command::SetSwing { swing: 60.0, grid: 0.3 }, false), Err(EditError::InvalidValue));
+    }
+    /// Shortening a loop is also an edit to the material: the loop is the track's whole
+    /// extent, so what no longer fits is cut (and one undo brings it back) instead of lingering
+    /// as notes the roll shows but the engine never plays.
+    #[test]
+    fn shortening_a_loop_trims_the_material_past_it_and_undo_restores_it() {
+        let mut d = Document::new(ProjectModel::starter());
+        let (tid, pid) = (d.model().tracks[0].id, d.model().patterns[0].id);
+        let notes = vec![NoteEvent::new(0.0, 1.0, 60), NoteEvent::new(6.0, 4.0, 62), NoteEvent::new(12.0, 1.0, 64)];
+        d.apply(Command::SetNotes { pattern_id: pid, track_id: tid, notes }, false).unwrap();
+
+        d.apply(Command::SetTrackLoop { pattern_id: pid, track_id: tid, beats: Some(8.0) }, false).unwrap();
+        let kept = d.model().patterns[0].notes(&tid);
+        assert_eq!(kept.len(), 2, "the note past the 8-beat loop should be gone");
+        assert_eq!(kept[1].length_beats, 2.0, "the note overrunning the loop should end at it");
+
+        d.apply(Command::SetChordLoop { pattern_id: pid, beats: Some(8.0) }, false).unwrap();
+        let chords = d.model().patterns[0].chords.chords();
+        assert_eq!(chords.len(), 2, "the starter's third and fourth chords sit past an 8-beat loop");
+
+        d.undo();
+        assert_eq!(d.model().patterns[0].chords.chords().len(), 4);
+        d.undo();
+        assert_eq!(d.model().patterns[0].notes(&tid).len(), 3);
+    }
+
+    /// Lengthening or clearing a loop never touches the material.
+    #[test]
+    fn widening_a_loop_leaves_the_material_alone() {
+        let mut d = Document::new(ProjectModel::starter());
+        let (tid, pid) = (d.model().tracks[0].id, d.model().patterns[0].id);
+        let notes = vec![NoteEvent::new(0.0, 1.0, 60), NoteEvent::new(12.0, 1.0, 64)];
+        d.apply(Command::SetNotes { pattern_id: pid, track_id: tid, notes }, false).unwrap();
+        d.apply(Command::SetTrackLoop { pattern_id: pid, track_id: tid, beats: Some(16.0) }, false).unwrap();
+        assert_eq!(d.model().patterns[0].notes(&tid).len(), 2);
+        d.apply(Command::SetTrackLoop { pattern_id: pid, track_id: tid, beats: None }, false).unwrap();
+        assert_eq!(d.model().patterns[0].notes(&tid).len(), 2);
+        assert!(d.model().patterns[0].track_loop_beats.is_empty());
     }
 
     #[test]

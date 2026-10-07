@@ -11,6 +11,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
 import type { Command, MasterSettings, NoteEvent, ProjectModel } from "./types";
+import { chordLoop, layOutLoop, trackLoop } from "./types";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
 
@@ -69,7 +70,7 @@ beforeEach(async () => {
 describe("newProject", () => {
   it("matches ProjectModel::starter()", async () => {
     const s = await b.newProject(true);
-    expect(s.model.schemaVersion).toBe(5);
+    expect(s.model.schemaVersion).toBe(7);
     expect(s.model.tempo).toBe(120);
     expect(s.model.key).toEqual({ rootPitchClass: null, scale: "major", isLocked: false });
     expect(s.model.tracks.map((t) => [t.name, t.isDrum])).toEqual([
@@ -284,6 +285,75 @@ describe("patterns", () => {
     expect(m.patterns.map((p) => p.id)).toEqual([second]);
     expect(m.clips.map((c) => c.patternId)).toEqual([second]);
     await rejectsAndKeepsModel({ type: "deletePattern", id: second }, "a project needs at least one pattern");
+  });
+  it("trims a track and the chord track to a shortened loop, matching apply_to", async () => {
+    const { melody, pattern } = await ids();
+    await b.apply({
+      type: "setNotes",
+      patternId: pattern,
+      trackId: melody,
+      notes: [note(0, 60), note(6, 62, { lengthBeats: 4 }), note(12, 64)],
+    });
+    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, beats: 8 });
+    const notes = (await model()).patterns[0].notesByTrack[melody];
+    expect(notes.map((n) => [n.startBeat, n.lengthBeats])).toEqual([
+      [0, 1],
+      [6, 2],
+    ]);
+    await b.apply({ type: "setChordLoop", patternId: pattern, beats: 8 });
+    expect((await model()).patterns[0].chords.chords.map((c) => c.startBeat)).toEqual([0, 4]);
+  });
+  it("stores and clears per-track and chord loop lengths", async () => {
+    const { melody, pattern } = await ids();
+    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, beats: 8 });
+    await b.apply({ type: "setChordLoop", patternId: pattern, beats: 4 });
+    let p = (await model()).patterns[0];
+    expect(p.trackLoopBeats[melody]).toBe(8);
+    expect(p.chordLoopBeats).toBe(4);
+    expect(trackLoop(p, melody)).toBe(8);
+    expect(chordLoop(p)).toBe(4);
+
+    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, beats: null });
+    await b.apply({ type: "setChordLoop", patternId: pattern, beats: null });
+    p = (await model()).patterns[0];
+    expect(p.trackLoopBeats[melody]).toBeUndefined();
+    expect(trackLoop(p, melody)).toBe(p.lengthBeats);
+    expect(chordLoop(p)).toBe(p.lengthBeats);
+  });
+
+  it("rejects a loop shorter than one beat and an unknown track or pattern", async () => {
+    const { melody, pattern } = await ids();
+    await rejectsAndKeepsModel({ type: "setTrackLoop", patternId: pattern, trackId: melody, beats: 0.5 }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setTrackLoop", patternId: pattern, trackId: FAKE_ID, beats: 4 }, "no such track");
+    await rejectsAndKeepsModel({ type: "setTrackLoop", patternId: FAKE_ID, trackId: melody, beats: 4 }, "no such pattern");
+    await rejectsAndKeepsModel({ type: "setChordLoop", patternId: pattern, beats: Number.NaN }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setChordLoop", patternId: FAKE_ID, beats: 4 }, "no such pattern");
+  });
+
+  it("drops a deleted track's loop along with its notes", async () => {
+    const { melody, pattern } = await ids();
+    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, beats: 8 });
+    await b.apply({ type: "addTrack", isDrum: false });
+    await b.apply({ type: "deleteTrack", id: melody });
+    expect((await model()).patterns[0].trackLoopBeats[melody]).toBeUndefined();
+  });
+
+  /// Mirrors `SongPattern::looped_notes`: two turns of a 2-bar loop under a 4-bar pattern.
+  it("lays a short loop out across the pattern, trimming each turn at its own end", async () => {
+    const events = [
+      { id: "a", startBeat: 0, lengthBeats: 1 },
+      { id: "b", startBeat: 6, lengthBeats: 4 },
+    ];
+    const out = layOutLoop(events, 8, 16);
+    expect(out.map((e) => [e.startBeat, e.lengthBeats])).toEqual([
+      [0, 1],
+      [6, 2],
+      [8, 1],
+      [14, 2],
+    ]);
+    expect(new Set(out.map((e) => e.id)).size).toBe(4);
+    expect(out[0].id).toBe("a");
+    expect(layOutLoop(events, 16, 16)).toBe(events);
   });
 });
 
@@ -514,5 +584,136 @@ describe("save and open", () => {
     expect(s.canUndo).toBe(false);
     expect(s.canRedo).toBe(false);
     expect(s.model.tracks[0].name).toBe("lead");
+  });
+});
+
+// ─── plugins ───────────────────────────────────────────────────────────────────────────────
+
+describe("track plugins", () => {
+  const anyPlugin = async () => (await b.scanPlugins())[0];
+
+  it("refuses a plugin on a track that does not exist", async () => {
+    await rejectsAndKeepsModel({ type: "setTrackPlugin", id: FAKE_ID, plugin: { uid: "clap:/x.clap:x", name: "x", state: null } }, "no such track");
+  });
+
+  it("refuses a blank uid", async () => {
+    const { melody } = await ids();
+    await rejectsAndKeepsModel({ type: "setTrackPlugin", id: melody, plugin: { uid: "   ", name: "x", state: null } }, "invalid value");
+  });
+
+  it("keeps the saved state while the plugin stays the same and drops it when it changes", async () => {
+    const { melody } = await ids();
+    const [a, b2] = await b.scanPlugins();
+    await b.apply({ type: "setTrackPlugin", id: melody, plugin: { uid: a.uid, name: a.name, state: null } });
+    await b.apply({ type: "setPluginState", id: melody, state: "c2F2ZWQ=" });
+
+    await b.apply({ type: "setTrackPlugin", id: melody, plugin: { uid: a.uid, name: a.name, state: null } });
+    expect((await model()).tracks[0].plugin?.state).toBe("c2F2ZWQ=");
+
+    await b.apply({ type: "setTrackPlugin", id: melody, plugin: { uid: b2.uid, name: b2.name, state: null } });
+    expect((await model()).tracks[0].plugin).toEqual({ uid: b2.uid, name: b2.name, state: null });
+  });
+
+  it("refuses plugin state on a track that has no plugin", async () => {
+    const { melody } = await ids();
+    await rejectsAndKeepsModel({ type: "setPluginState", id: melody, state: "eA==" }, "track has no plugin");
+  });
+
+  it("goes back to the built-in voice when the plugin is cleared", async () => {
+    const { melody } = await ids();
+    const p = await anyPlugin();
+    await b.setTrackPlugin(melody, p.uid);
+    expect((await model()).tracks[0].plugin?.name).toBe(p.name);
+    await b.setTrackPlugin(melody, null);
+    expect((await model()).tracks[0].plugin).toBeNull();
+    expect((await model()).tracks[0].voice).toBe("saw");
+  });
+
+  it("reports no parameters for a track with no plugin", async () => {
+    const { melody } = await ids();
+    expect(await b.pluginParams(melody)).toEqual([]);
+  });
+
+  it("clamps a parameter to the range the plugin published", async () => {
+    const { melody } = await ids();
+    await b.setTrackPlugin(melody, (await anyPlugin()).uid);
+    const cutoff = (await b.pluginParams(melody))[0];
+    await b.setPluginParam(melody, cutoff.id, 1e9);
+    expect((await b.pluginParams(melody))[0].value).toBe(cutoff.max);
+  });
+
+  it("rounds a stepped parameter", async () => {
+    const { melody } = await ids();
+    await b.setTrackPlugin(melody, (await anyPlugin()).uid);
+    const stepped = (await b.pluginParams(melody)).find((p) => p.isStepped)!;
+    await b.setPluginParam(melody, stepped.id, 7.4);
+    expect((await b.pluginParams(melody)).find((p) => p.id === stepped.id)!.value).toBe(7);
+  });
+
+  it("drags without touching the document and commits one undo step", async () => {
+    const { melody } = await ids();
+    await b.setTrackPlugin(melody, (await anyPlugin()).uid);
+    const res = (await b.pluginParams(melody)).find((p) => p.name === "resonance")!;
+    const before = await b.getState();
+
+    await b.setPluginParam(melody, res.id, 0.9, false);
+    const dragging = await b.getState();
+    // The plugin heard it; the document did not, so there is nothing to undo yet.
+    expect((await b.pluginParams(melody)).find((p) => p.id === res.id)!.value).toBe(0.9);
+    expect(dragging.model).toEqual(before.model);
+    expect(dragging.undoLabel).toBe("change plugin");
+
+    await b.setPluginParam(melody, res.id, 0.9, true);
+    const committed = await b.getState();
+    expect(committed.undoLabel).toBe("edit plugin");
+    expect(committed.model.tracks[0].plugin?.state).toEqual(expect.any(String));
+
+    const undone = await b.undo();
+    expect(undone.model).toEqual(before.model);
+    // Undo has to reach the plugin too, not just the document.
+    expect((await b.pluginParams(melody)).find((p) => p.id === res.id)!.value).toBe(res.default);
+  });
+
+  it("restores the saved values when a project is reopened", async () => {
+    const { melody } = await ids();
+    await b.setTrackPlugin(melody, (await anyPlugin()).uid);
+    const res = (await b.pluginParams(melody)).find((p) => p.name === "resonance")!;
+    await b.setPluginParam(melody, res.id, 0.77, true);
+    await b.saveProject("/tmp/plugged.dissonant");
+
+    await b.newProject(true);
+    await b.openProject("/tmp/plugged.dissonant");
+    const reopened = (await model()).tracks[0].id;
+    expect((await b.pluginParams(reopened)).find((p) => p.id === res.id)!.value).toBe(0.77);
+  });
+});
+
+describe("plugin catalog", () => {
+  it("leads every entry with plain words and tags, not format jargon", async () => {
+    const catalog = await b.pluginCatalog();
+    expect(catalog.length).toBeGreaterThan(0);
+    for (const e of catalog) {
+      expect(e.summary.trim().length).toBeGreaterThan(0);
+      expect(e.tags.length).toBeGreaterThan(0);
+      expect(e.license.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("installs an entry and the plugin then shows up in a scan", async () => {
+    const seen: { phase: string; done: number; total: number }[] = [];
+    b.onPluginInstall((p) => seen.push({ phase: p.phase, done: p.done, total: p.total }));
+    expect((await b.scanPlugins()).map((p) => p.name)).not.toContain("Dexed");
+
+    await b.installPlugin("dexed");
+
+    expect(seen[0].phase).toBe("downloading");
+    expect(seen.at(-1)?.phase).toBe("installed");
+    // A progress bar drawn from these must never run past its end.
+    for (const s of seen) expect(s.done).toBeLessThanOrEqual(s.total);
+    expect((await b.scanPlugins()).map((p) => p.name)).toContain("Dexed");
+  });
+
+  it("refuses an entry that is not in the catalog", async () => {
+    await expect(b.installPlugin("not-a-plugin")).rejects.toBe("no such catalog entry");
   });
 });

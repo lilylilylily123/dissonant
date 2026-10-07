@@ -3,6 +3,7 @@
 //! field-name drift fails here instead of silently rejecting edits at runtime.
 
 use dissonant_core::document::{Command, TrackParam};
+use dissonant_core::TrackPlugin;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -51,6 +52,41 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
         Command::SetTrackColor { id, color: Some("#ff8800".into()) }
     );
     assert_eq!(parse(json!({"type": "setTrackColor", "id": id, "color": null})), Command::SetTrackColor { id, color: None });
+
+    // The plugin picker sends the whole record; `state` is omitted when the plugin is new.
+    assert_eq!(
+        parse(json!({
+            "type": "setTrackPlugin", "id": id,
+            "plugin": {"uid": "clap:/CLAP/Vital.clap:audio.vital.synth", "name": "Vital", "state": null}
+        })),
+        Command::SetTrackPlugin {
+            id,
+            plugin: Some(TrackPlugin {
+                uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(),
+                name: "Vital".into(),
+                state: None,
+            })
+        }
+    );
+    assert_eq!(
+        parse(json!({
+            "type": "setTrackPlugin", "id": id,
+            "plugin": {"uid": "clap:/CLAP/Vital.clap:audio.vital.synth", "name": "Vital"}
+        })),
+        Command::SetTrackPlugin {
+            id,
+            plugin: Some(TrackPlugin {
+                uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(),
+                name: "Vital".into(),
+                state: None,
+            })
+        }
+    );
+    assert_eq!(parse(json!({"type": "setTrackPlugin", "id": id, "plugin": null})), Command::SetTrackPlugin { id, plugin: None });
+    assert_eq!(
+        parse(json!({"type": "setPluginState", "id": id, "state": "QUJDRA=="})),
+        Command::SetPluginState { id, state: "QUJDRA==".into() }
+    );
 
     assert_eq!(parse(json!({"type": "addPattern"})), Command::AddPattern);
     assert_eq!(parse(json!({"type": "duplicatePattern", "id": id})), Command::DuplicatePattern { id });

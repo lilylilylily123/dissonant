@@ -2,10 +2,14 @@
 //! and streams the playhead back as events. All model edits go through `apply`, which keeps
 //! undo/redo in one place and re-feeds the engine a fresh [`Sequence`] after every change.
 
+pub mod plugins;
 pub mod settings;
 
-use dissonant_core::{midi_file, Command, Document, MasterSettings, MidiScope, NoteEvent, ProjectModel, Sequence};
+use dissonant_catalog::{install, CatalogEntry, InstallEvent, Platform};
+use dissonant_core::{midi_file, Command, Document, MasterSettings, MidiScope, NoteEvent, ProjectModel, Sequence, TrackPlugin};
 use dissonant_engine::{default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, EngineCommand, RenderOptions};
+use dissonant_plugins::{ParamInfo, PluginDescriptor, PluginFormat};
+use plugins::PluginHostThread;
 use settings::{NewProjectKind, Settings};
 use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
@@ -81,6 +85,11 @@ pub struct AppState {
     /// Set by `quit` so the close handler lets the window go.
     force_close: AtomicBool,
     settings: Mutex<Settings>,
+    /// Every loaded plugin, pinned to its own thread; see `plugins` for why.
+    plugin_host: PluginHostThread,
+    /// What each track currently has loaded, so reconciling after undo or a project open can
+    /// skip the tracks that are already right — loading a plugin costs hundreds of milliseconds.
+    loaded_plugin_uids: Mutex<HashMap<Uuid, String>>,
 }
 
 /// What every editing command returns to the UI.
@@ -103,6 +112,18 @@ pub struct RecoveryCandidate {
     pub autosave_path: String,
     pub project_path: Option<String>,
     pub saved_at_ms: u64,
+}
+
+/// What the UI's progress bar reads while a catalog plugin installs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallProgress {
+    pub entry_id: String,
+    /// "downloading" | "verifying" | "unpacking" | "installed" | "failed"
+    pub phase: String,
+    pub done: u64,
+    pub total: u64,
+    pub message: Option<String>,
 }
 
 /// The on-disk autosave format: the model plus where it belongs.
@@ -179,6 +200,10 @@ impl AppState {
             autosave_path: Mutex::new(None),
             force_close: AtomicBool::new(false),
             settings: Mutex::new(Settings::default()),
+            // The scan cache path needs the app-data dir, which `setup` discovers later; the
+            // thread starts cacheless and `set_data_dir` is not worth the churn for one file.
+            plugin_host: PluginHostThread::spawn(dirs::cache_dir().map(|d| d.join("dissonant").join("plugin-scan.json"))),
+            loaded_plugin_uids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -413,6 +438,7 @@ impl AppState {
         self.send(EngineCommand::Stop);
         self.send(EngineCommand::Seek { beat: 0.0 });
         self.sync_engine();
+        self.sync_plugins();
     }
 
     fn send(&self, cmd: EngineCommand) {
@@ -433,6 +459,56 @@ impl AppState {
         let master = self.doc.lock().unwrap().model().master.clone();
         self.send(EngineCommand::SetSequence(Arc::new(seq)));
         self.send(EngineCommand::SetMaster(master));
+    }
+
+    /// Make the plugin host match what the document says each track should be hosting.
+    ///
+    /// Called after anything that can rewrite tracks wholesale — opening a project, undo, redo,
+    /// restoring an autosave. Loading is slow, so a track already hosting the right plugin is
+    /// only re-fed its state blob (which is what makes undo of a parameter move actually reach
+    /// the plugin rather than just the document).
+    fn sync_plugins(&self) {
+        let wanted: Vec<(Uuid, Option<TrackPlugin>)> = {
+            let doc = self.doc.lock().unwrap();
+            doc.model().tracks.iter().map(|t| (t.id, t.plugin.clone())).collect()
+        };
+        let sample_rate = self
+            .audio_status()
+            .sample_rate
+            .or(self.settings().audio.sample_rate)
+            .unwrap_or(48_000) as f64;
+        for (track_id, plugin) in wanted {
+            let Some(plugin) = plugin else {
+                self.plugin_host.close(track_id);
+                self.send(EngineCommand::ClearInstrument { track_id });
+                continue;
+            };
+            let already = self.loaded_plugin_uids.lock().unwrap().get(&track_id).cloned();
+            if already.as_deref() != Some(plugin.uid.as_str()) {
+                match self.plugin_host.open(track_id, &plugin.uid, sample_rate) {
+                    Ok((unit, _)) => {
+                        self.send(EngineCommand::SetInstrument {
+                            track_id,
+                            instrument: Box::new(dissonant_engine::Instrument::Plugin(Box::new(unit))),
+                        });
+                        self.loaded_plugin_uids.lock().unwrap().insert(track_id, plugin.uid.clone());
+                    }
+                    Err(e) => {
+                        // A project made on another machine, or a plugin since uninstalled. The
+                        // track keeps its built-in voice and the UI shows the cached name as
+                        // missing; losing the reference would be worse than failing loudly.
+                        log::warn!("could not load plugin {}: {e}", plugin.uid);
+                        self.loaded_plugin_uids.lock().unwrap().remove(&track_id);
+                        continue;
+                    }
+                }
+            }
+            if let Some(state) = plugin.state.as_deref().and_then(b64_decode) {
+                if let Err(e) = self.plugin_host.load_state(track_id, state) {
+                    log::warn!("could not restore plugin state for {}: {e}", plugin.uid);
+                }
+            }
+        }
     }
 
     fn start_audio(&self) {
@@ -499,6 +575,7 @@ fn commit_gesture(state: State<'_, AppState>) -> Snapshot {
 fn undo(state: State<'_, AppState>) -> Snapshot {
     state.doc.lock().unwrap().undo();
     state.sync_engine();
+    state.sync_plugins();
     state.snapshot()
 }
 
@@ -506,6 +583,7 @@ fn undo(state: State<'_, AppState>) -> Snapshot {
 fn redo(state: State<'_, AppState>) -> Snapshot {
     state.doc.lock().unwrap().redo();
     state.sync_engine();
+    state.sync_plugins();
     state.snapshot()
 }
 
@@ -764,9 +842,11 @@ fn live_note_off(app: &AppHandle, pitch: u8) {
         else {
             return;
         };
-        (p.id, p.length_beats, p.notes(&track_id).to_vec())
+        // A track that loops shorter than its pattern is only stored for that one turn, so
+        // recording folds into the loop the player is hearing, not the pattern.
+        (p.id, p.track_loop(&track_id), p.notes(&track_id).to_vec())
     };
-    // In song mode the engine position is a song position; fold it into the pattern.
+    // In song mode the engine position is a song position; fold it into the loop.
     let start_in = start % length_beats;
     let mut len = end - start;
     if len < 0.0 {
@@ -1211,6 +1291,170 @@ fn test_tone(state: State<'_, AppState>) {
     state.send(EngineCommand::TestTone);
 }
 
+// ─── Plugins ─────────────────────────────────────────────────────────────────────────────────
+
+/// Base64 without a dependency: the plugin state blob is the only thing that needs it, and it
+/// crosses one JSON boundary. Standard alphabet, padded, matching what `dissonant-core` validates.
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    for c in text.bytes().filter(|c| *c != b'=') {
+        let v = B64.iter().position(|b| *b == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[tauri::command]
+fn scan_plugins(state: State<'_, AppState>, rescan: Option<bool>) -> Vec<PluginDescriptor> {
+    state.plugin_host.scan(rescan.unwrap_or(false))
+}
+
+/// Put a plugin on a track, or `None` to fall back to the track's built-in voice. The plugin is
+/// loaded on the plugin thread, its audio half is handed to the engine, and only then is the
+/// document updated — a load that fails leaves the track exactly as it was.
+#[tauri::command]
+fn set_track_plugin(state: State<'_, AppState>, track_id: Uuid, uid: Option<String>) -> Result<Snapshot, String> {
+    let Some(uid) = uid else {
+        state.plugin_host.close(track_id);
+        state.send(EngineCommand::ClearInstrument { track_id });
+        state.loaded_plugin_uids.lock().unwrap().remove(&track_id);
+        state.doc.lock().unwrap().apply(Command::SetTrackPlugin { id: track_id, plugin: None }, false).map_err(|e| e.to_string())?;
+        return Ok(state.snapshot());
+    };
+    // The engine activates plugins for the rate it is actually running at; with no device yet,
+    // the configured rate is what it will come up on, and 48k is cpal's own fallback.
+    let sample_rate = state
+        .audio_status()
+        .sample_rate
+        .or(state.settings().audio.sample_rate)
+        .unwrap_or(48_000) as f64;
+    let (unit, name) = state.plugin_host.open(track_id, &uid, sample_rate)?;
+    state.send(EngineCommand::SetInstrument {
+        track_id,
+        instrument: Box::new(dissonant_engine::Instrument::Plugin(Box::new(unit))),
+    });
+    state.loaded_plugin_uids.lock().unwrap().insert(track_id, uid.clone());
+    let plugin = TrackPlugin { uid, name, state: None };
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply(Command::SetTrackPlugin { id: track_id, plugin: Some(plugin) }, false)
+        .map_err(|e| e.to_string())?;
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn plugin_params(state: State<'_, AppState>, track_id: Uuid) -> Vec<ParamInfo> {
+    state.plugin_host.params(track_id)
+}
+
+/// A parameter move. While a knob is being dragged (`commit` false) this only reaches the audio
+/// thread, so the sound follows the finger without serialising plugin state every frame. On
+/// release the state is read once and recorded, producing exactly one undo step whose baseline
+/// is the value the drag started from.
+#[tauri::command]
+fn set_plugin_param(
+    state: State<'_, AppState>,
+    track_id: Uuid,
+    param_id: u32,
+    value: f64,
+    commit: Option<bool>,
+) -> Result<Option<Snapshot>, String> {
+    state.send(EngineCommand::SetPluginParam { track_id, param_id, value });
+    if !commit.unwrap_or(false) {
+        return Ok(None);
+    }
+    let Some(bytes) = state.plugin_host.save_state(track_id) else {
+        // A plugin with no state extension still sounds right; there is simply nothing to
+        // record, so the move is not undoable. Saying so beats inventing a blob.
+        return Ok(None);
+    };
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply(Command::SetPluginState { id: track_id, state: b64_encode(&bytes) }, false)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(state.snapshot()))
+}
+
+#[tauri::command]
+fn plugin_catalog() -> Vec<CatalogEntry> {
+    dissonant_catalog::builtin().to_vec()
+}
+
+/// Download, verify and install a catalog entry, streaming `plugin-install` events as it goes.
+#[tauri::command]
+async fn install_plugin(app: AppHandle, entry_id: String) -> Result<(), String> {
+    let entry = dissonant_catalog::builtin()
+        .iter()
+        .find(|e| e.id == entry_id)
+        .cloned()
+        .ok_or_else(|| format!("no catalog entry {entry_id}"))?;
+    let asset = entry
+        .asset_for(Platform::current(), PluginFormat::Clap)
+        .cloned()
+        .ok_or_else(|| format!("{} has no CLAP build for this computer", entry.name))?;
+    let dest = dissonant_catalog::user_plugin_dir(PluginFormat::Clap).ok_or("no plugin folder on this computer")?;
+
+    // Blocking I/O: a 180 MB download would otherwise stall the Tauri runtime thread.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let emit = |phase: &str, done: u64, total: u64, message: Option<String>| {
+            let _ = app.emit(
+                "plugin-install",
+                InstallProgress { entry_id: entry.id.clone(), phase: phase.into(), done, total, message },
+            );
+        };
+        let mut on_event = |e: InstallEvent| match e {
+            InstallEvent::Started { bytes } => emit("downloading", 0, bytes, None),
+            InstallEvent::Progress { done, total } => emit("downloading", done, total, None),
+            InstallEvent::Verifying => emit("verifying", 0, 0, None),
+            InstallEvent::Unpacking => emit("unpacking", 0, 0, None),
+            InstallEvent::Installed { ref paths } => {
+                emit("installed", 0, 0, paths.first().map(|p| p.display().to_string()))
+            }
+            InstallEvent::Failed { ref message } => emit("failed", 0, 0, Some(message.clone())),
+        };
+        install(&entry, &asset, &dest, &mut on_event).map(|_| ()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result
+}
+
+/// Open a vendor page in the user's browser, for plugins that only ship a `.dmg` or `.pkg`.
+/// Only http(s) — handing an arbitrary string to the OS opener is a shell-adjacent surface.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) links can be opened".into());
+    }
+    open::that(url).map_err(|e| e.to_string())
+}
+
 // ─── Wiring ──────────────────────────────────────────────────────────────────────────────────
 
 fn spawn_playhead_emitter(app: AppHandle) {
@@ -1433,6 +1677,13 @@ pub fn run() {
             save_template,
             delete_template,
             new_from_template,
+            scan_plugins,
+            set_track_plugin,
+            plugin_params,
+            set_plugin_param,
+            plugin_catalog,
+            install_plugin,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

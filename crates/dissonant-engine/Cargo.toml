@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 dissonant-core = { path = "../dissonant-core" }
+dissonant-plugins = { path = "../dissonant-plugins" }
 uuid = { workspace = true }
 rtrb = "0.4"
 hound = "3.5"

@@ -15,8 +15,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 dissonant-core = { path = "../crates/dissonant-core" }
 dissonant-engine = { path = "../crates/dissonant-engine" }
+dissonant-plugins = { path = "../crates/dissonant-plugins" }
+dissonant-catalog = { path = "../crates/dissonant-catalog" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+open = "5"
+dirs = "7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

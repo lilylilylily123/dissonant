@@ -63,18 +63,71 @@ export interface Track {
   pan: number;
   /** `#rrggbb`, or null to use the palette by position. */
   color: string | null;
+  /** The CLAP plugin that replaces the built-in voice, or null for the built-in voice. */
+  plugin: TrackPlugin | null;
 }
 
 export interface ChordTrack {
   chords: ChordEvent[];
 }
 
+/**
+ * A pattern. `lengthBeats` is the merged length: each track and the chord track may loop
+ * shorter and repeat to fill it, so a 2-bar drum loop plays twice under a 4-bar progression.
+ */
 export interface SongPattern {
   id: string;
   name: string;
   lengthBeats: number;
   chords: ChordTrack;
   notesByTrack: Record<string, NoteEvent[]>;
+  /** Loop length in beats per track; a track that is absent fills the pattern. */
+  trackLoopBeats: Record<string, number>;
+  /** Loop length in beats of the chord track; `null` fills the pattern. */
+  chordLoopBeats: number | null;
+}
+
+/** Mirrors `dissonant_core::model::MIN_LOOP_BEATS`. */
+export const MIN_LOOP_BEATS = 1;
+
+/** A stored loop length made usable: clamped into the pattern, with anything missing or
+ *  nonsensical meaning "fills the pattern". Mirrors `SongPattern::usable_loop`. */
+function usableLoop(p: SongPattern, beats: number | null | undefined): number {
+  const len = Math.max(1, p.lengthBeats);
+  return beats != null && Number.isFinite(beats) && beats > 0 ? Math.min(Math.max(beats, Math.min(MIN_LOOP_BEATS, len)), len) : len;
+}
+
+/** How long one turn of `trackId` is inside `p`. */
+export function trackLoop(p: SongPattern, trackId: string): number {
+  return usableLoop(p, p.trackLoopBeats?.[trackId]);
+}
+
+/** How long one turn of the chord track is inside `p`. */
+export function chordLoop(p: SongPattern): number {
+  return usableLoop(p, p.chordLoopBeats);
+}
+
+/**
+ * Lay `events` out across `totalBeats` in turns of `turnBeats`, trimming each turn at its own
+ * end. Mirrors `SongPattern::looped_notes` / `looped_chords` for display; repeats carry a
+ * suffixed id so React keys stay unique and hit-testing can tell them from the source.
+ */
+export function layOutLoop<T extends { id: string; startBeat: number; lengthBeats: number }>(
+  events: T[],
+  turnBeats: number,
+  totalBeats: number,
+): T[] {
+  if (turnBeats >= totalBeats || events.length === 0) return events;
+  const out: T[] = [];
+  for (let rep = 0, base = 0; base < totalBeats; rep++, base += turnBeats) {
+    const end = Math.min(base + turnBeats, totalBeats);
+    for (const e of events) {
+      const startBeat = base + e.startBeat;
+      if (startBeat >= end) continue;
+      out.push({ ...e, id: rep === 0 ? e.id : `${e.id}~${rep}`, startBeat, lengthBeats: Math.max(1 / 64, Math.min(startBeat + e.lengthBeats, end) - startBeat) });
+    }
+  }
+  return out;
 }
 
 /** A pattern placed on the song; loops from `offsetBeats` for `lengthBeats`. */
@@ -221,6 +274,97 @@ export function fileNameOf(path: string | null | undefined, fallback = "untitled
   return path.split(/[\\/]/).pop() || fallback;
 }
 
+// ─── Plugins (mirrors crates/dissonant-plugins and crates/dissonant-catalog) ────────────────
+
+/** The only format the app hosts. Kept as a union so a descriptor still round-trips as JSON. */
+export type PluginFormat = "clap";
+export type PluginKind = "instrument" | "effect";
+
+/** One plugin found on this computer. `uid` is `clap:<bundle path>:<plugin id>`. */
+export interface PluginDescriptor {
+  uid: string;
+  format: PluginFormat;
+  path: string;
+  pluginId: string;
+  name: string;
+  vendor: string;
+  version: string;
+  kind: PluginKind;
+  features: string[];
+}
+
+/** One automatable parameter of a hosted plugin. `value` is the plugin's current value, read
+ *  afresh on every `pluginParams` call, so a reopened project shows its restored state;
+ *  `default` is what a double-click resets to. */
+export interface ParamInfo {
+  id: number;
+  name: string;
+  module: string;
+  min: number;
+  max: number;
+  default: number;
+  value: number;
+  isStepped: boolean;
+}
+
+/** What a track remembers about its plugin. `name` is cached so a plugin that is no longer
+ *  installed can still be named; `state` is base64 of the plugin's own opaque state blob. */
+export interface TrackPlugin {
+  uid: string;
+  name: string;
+  state: string | null;
+}
+
+export type Platform = "macArm" | "macIntel" | "windows" | "linux";
+export type AssetKind = "zip" | "tarGz" | "installer";
+
+/** One downloadable file of a catalog entry, pinned by hash so a tampered download is caught. */
+export interface CatalogAsset {
+  platform: Platform;
+  format: PluginFormat;
+  kind: AssetKind;
+  url: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** One curated free plugin. `summary` is one plain line; `tags` are what it sounds like. */
+export interface CatalogEntry {
+  id: string;
+  name: string;
+  vendor: string;
+  summary: string;
+  tags: string[];
+  kind: PluginKind;
+  license: string;
+  homepage: string;
+  assets: CatalogAsset[];
+}
+
+export type InstallPhase = "downloading" | "verifying" | "unpacking" | "installed" | "failed";
+
+/** The `plugin-install` event: one entry's progress through the install. `done`/`total` are
+ *  bytes while downloading and steps otherwise, so a bar can be drawn from them throughout. */
+export interface InstallProgress {
+  entryId: string;
+  phase: InstallPhase;
+  done: number;
+  total: number;
+  message: string;
+}
+
+/**
+ * The platforms this computer can load a plugin built for. A webview cannot tell an Apple
+ * Silicon Mac from an Intel one — both report "Intel Mac OS X" — so a Mac accepts either Mac
+ * build and the installer, which knows the real target arch, picks between them.
+ */
+export function hostPlatforms(): Platform[] {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  if (/Win/i.test(ua)) return ["windows"];
+  if (/Mac/i.test(ua)) return ["macArm", "macIntel"];
+  return ["linux"];
+}
+
 export type TrackParam = "volume" | "reverbSend" | "tone" | "pan";
 export type PlayMode = "pattern" | "song";
 export type Tier = "chordTone" | "tension" | "dissonance";
@@ -237,11 +381,15 @@ export type Command =
   | { type: "setTrackVoice"; id: string; voice: string }
   | { type: "setTrackParam"; id: string; param: TrackParam; value: number }
   | { type: "setTrackColor"; id: string; color: string | null }
+  | { type: "setTrackPlugin"; id: string; plugin: TrackPlugin | null }
+  | { type: "setPluginState"; id: string; state: string }
   | { type: "addPattern" }
   | { type: "duplicatePattern"; id: string }
   | { type: "deletePattern"; id: string }
   | { type: "renamePattern"; id: string; name: string }
   | { type: "setPatternLength"; id: string; beats: number }
+  | { type: "setTrackLoop"; patternId: string; trackId: string; beats: number | null }
+  | { type: "setChordLoop"; patternId: string; beats: number | null }
   | { type: "setNotes"; patternId: string; trackId: string; notes: NoteEvent[] }
   | { type: "setChords"; patternId: string; chords: ChordEvent[] }
   | { type: "addClip"; patternId: string; startBeat: number; lengthBeats: number | null }

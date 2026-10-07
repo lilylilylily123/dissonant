@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
-import { selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { DRUM_KIT, trackColor, type NoteEvent, uuid } from "../types";
+import { beatsPerBar, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { DRUM_KIT, trackColor, trackLoop, type NoteEvent, uuid } from "../types";
 import { BASE_BEAT_W } from "./ChordLane";
 
 /** Step sequencer for a drum track, aligned to the chord lane. Left-click/drag adds hits,
@@ -14,6 +14,7 @@ export function DrumGrid() {
   const zoom = useStore((s) => s.zoom);
   const dispatch = useStore((s) => s.dispatch);
   const audition = useStore((s) => s.audition);
+  const bpb = useStore(beatsPerBar);
   const dragMode = useRef<"add" | "remove" | null>(null);
   const [working, setWorking] = useState<NoteEvent[] | null>(null);
 
@@ -22,9 +23,11 @@ export function DrumGrid() {
   const committed = pattern.notesByTrack[track.id] ?? [];
   const notes = working ?? committed;
   const stepBeats = Math.min(0.5, Math.max(0.125, noteLength));
-  const steps = Math.max(1, Math.round(pattern.lengthBeats / stepBeats));
+  // The grid is one turn of the track's loop; a shorter loop repeats under the pattern.
+  const turn = trackLoop(pattern, track.id);
+  const steps = Math.max(1, Math.round(turn / stepBeats));
   const cellW = stepBeats * BASE_BEAT_W * zoom - 2;
-  const currentStep = Math.floor(playhead / stepBeats);
+  const currentStep = Math.floor((playhead % turn) / stepBeats);
 
   const find = (list: NoteEvent[], pitch: number, step: number) =>
     list.find((n) => n.pitch === pitch && Math.abs(n.startBeat - step * stepBeats) < 1e-6);
@@ -78,7 +81,10 @@ export function DrumGrid() {
           </div>
         </div>
       ))}
-      <div className="help">left-click / drag: add hits · right-click / drag: remove · step {stepBeats === 0.5 ? "1/8" : stepBeats === 0.25 ? "1/16" : "1/32"} follows snap</div>
+      <div className="help">
+        left-click / drag: add hits · right-click / drag: remove · step {stepBeats === 0.5 ? "1/8" : stepBeats === 0.25 ? "1/16" : "1/32"} follows snap
+        {turn < pattern.lengthBeats && ` · ${+(turn / bpb).toFixed(2)}-bar loop, repeated across the pattern`}
+      </div>
     </div>
   );
 }

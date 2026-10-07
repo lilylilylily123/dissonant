@@ -1,6 +1,7 @@
 import { dbText, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { DRUM_KIT, trackColor, VOICES, type MasterSettings, type Track, type TrackParam } from "../types";
+import { DRUM_KIT, trackColor, type MasterSettings, type Track, type TrackParam } from "../types";
 import { eqDb, hz, Knob, lin, log, panText, pct } from "./Knob";
+import { InstrumentPicker, PluginBrowser, PluginParams } from "./PluginBrowser";
 import { VMeter } from "./Meter";
 
 const VOL = lin(0, 1.5);
@@ -10,7 +11,8 @@ const LOWCUT = log(10, 2000);
 const HICUT = log(500, 20000);
 const EQ = lin(0, 2);
 
-/** The 300px bottom panel in SONG mode: DEVICES (track instrument + bus + master) or MIXER. */
+/** The 300px bottom panel in SONG mode: DEVICES (track instrument + bus + master), MIXER, or
+ *  the free-plugin browser. */
 export function BottomPanel() {
   const panel = useStore((s) => s.bottomPanel);
   const setBottomPanel = useStore((s) => s.setBottomPanel);
@@ -25,6 +27,7 @@ export function BottomPanel() {
       <div className="ptabs">
         <div className={`ptab${panel === "devices" ? " on" : ""}`} onClick={() => setBottomPanel("devices")}>devices</div>
         <div className={`ptab${panel === "mixer" ? " on" : ""}`} onClick={() => setBottomPanel("mixer")}>mixer</div>
+        <div className={`ptab${panel === "plugins" ? " on" : ""}`} onClick={() => setBottomPanel("plugins")}>plugins</div>
         <div style={{ width: 1, height: 14, background: "var(--line-1)", margin: "0 8px" }} />
         {track && (
           <>
@@ -33,12 +36,12 @@ export function BottomPanel() {
               {String(index + 1).padStart(2, "0")} {track.name}
             </span>
             <span className="mono" style={{ fontSize: 9.5, color: "var(--text-5)", marginLeft: 10 }}>
-              {track.isDrum ? "drum kit" : `synth · ${track.voice}`} · {noteCount} notes in {pattern?.name ?? "—"}
+              {track.plugin ? `plugin · ${track.plugin.name}` : track.isDrum ? "drum kit" : `synth · ${track.voice}`} · {noteCount} notes in {pattern?.name ?? "—"}
             </span>
           </>
         )}
       </div>
-      {panel === "devices" ? <Devices /> : <Mixer />}
+      {panel === "devices" ? <Devices /> : panel === "mixer" ? <Mixer /> : <PluginBrowser />}
     </div>
   );
 }
@@ -49,7 +52,12 @@ function Devices() {
   const masterPeak = useStore((s) => s.masterPeak);
   const dispatch = useStore((s) => s.dispatch);
   const commitGesture = useStore((s) => s.commitGesture);
+  const plugins = useStore((s) => s.plugins);
   if (!track) return null;
+  const plugin = track.plugin;
+  // A plugin the project names but this computer does not have gets no device card: the picker
+  // inside the instrument card says why instead.
+  const hosted = plugins.some((p) => p.uid === plugin?.uid);
 
   const commit = () => void commitGesture();
   const param = (p: TrackParam, value: number) => void dispatch({ type: "setTrackParam", id: track.id, param: p, value }, true);
@@ -60,11 +68,11 @@ function Devices() {
       <div className="device" style={{ width: 250 }}>
         <div className="title">
           <span className="led" />
-          <span>{track.isDrum ? "drum kit" : "waveform synth"}</span>
-          <span className="meta">{track.isDrum ? `${DRUM_KIT.length} voices` : "6 voices"}</span>
+          <span>{plugin ? plugin.name : track.isDrum ? "drum kit" : "waveform synth"}</span>
+          <span className="meta">{plugin ? "clap plugin" : track.isDrum ? `${DRUM_KIT.length} voices` : "6 voices"}</span>
         </div>
         <div className="pad">
-          {track.isDrum ? (
+          {track.isDrum && !plugin ? (
             <div className="list">
               {DRUM_KIT.map((d) => (
                 <div key={d.pitch} className="lrow" style={{ cursor: "default" }}>
@@ -74,22 +82,32 @@ function Devices() {
                 </div>
               ))}
               <div className="help" style={{ padding: "6px 0 0" }}>per-pad tuning and samples are on the roadmap</div>
+              <div style={{ paddingTop: 6 }}>
+                <InstrumentPicker columns={2} />
+              </div>
             </div>
           ) : (
             <>
-              <span className="flabel">waveform · envelope</span>
-              <div className="chipsrow" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)" }}>
-                {VOICES.map((v) => (
-                  <button key={v} className={`chip${track.voice === v ? " on" : ""}`} onClick={() => dispatch({ type: "setTrackVoice", id: track.id, voice: v })}>
-                    {v}
-                  </button>
-                ))}
-              </div>
-              <div className="help" style={{ padding: "4px 0 0" }}>polyblep oscillator · 12 voices · velocity → level</div>
+              <span className="flabel">voice</span>
+              <InstrumentPicker columns={3} />
+              {!plugin && <div className="help" style={{ padding: "4px 0 0" }}>polyblep oscillator · 12 voices · velocity → level</div>}
             </>
           )}
         </div>
       </div>
+
+      {plugin && hosted && (
+        <div className="device" style={{ width: 320 }}>
+          <div className="title">
+            <span className="led" />
+            <span>{plugin.name}</span>
+            <span className="meta">clap plugin</span>
+          </div>
+          <div className="pad">
+            <PluginParams trackId={track.id} uid={plugin.uid} state={plugin.state} />
+          </div>
+        </div>
+      )}
 
       <div className="device" style={{ width: 240 }}>
         <div className="title">

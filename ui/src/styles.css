@@ -1374,6 +1374,136 @@ select {
   height: auto;
 }
 
+/* ─── Plugins ───────────────────────────────────────────────────────────────────────────── */
+/* A labelled rule between the built-in voices and the installed plugins. */
+.pickdivide {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-5);
+}
+.pickdivide::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line-1);
+}
+.pluginmissing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+}
+.pluginparams {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.pluginparams .pgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Plugins publish however many parameters they like, so these wrap instead of spreading. */
+.pluginparams .knobrow {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 2px;
+}
+.browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.browser .bfilter {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line-1);
+}
+/* Tags are words of different lengths; stretching them to a shared width reads as a toolbar
+   of buttons rather than a list of things the plugin sounds like. */
+.browser .chipsrow .chip {
+  flex: none;
+}
+.browser .brows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.browser .brow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+}
+/* Nothing to download for this computer: still listed, still readable, plainly out of reach. */
+.browser .brow.off {
+  opacity: 0.45;
+  background: var(--bg-inactive);
+}
+.browser .bmain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.browser .btitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.browser .btitle .n {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--text-1);
+}
+.browser .bsummary {
+  font-size: 11px;
+  color: var(--text-2);
+}
+.browser .bact {
+  flex: none;
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  text-align: right;
+}
+.browser .bbar {
+  width: 100%;
+  height: 3px;
+  background: var(--bg-void);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.browser .bbar > div {
+  height: 100%;
+  background: var(--accent);
+}
+
 /* ─── Piano roll screen ─────────────────────────────────────────────────────────────────── */
 .editor {
   flex: 1;
@@ -1563,6 +1693,25 @@ select {
 }
 .chordblock .handle:hover {
   background: rgba(255, 255, 255, 0.15);
+}
+/* A repeat of the chord loop: readable, obviously not the thing you edit. */
+.chordblock.echo {
+  opacity: 0.4;
+  cursor: default;
+  border-style: dashed;
+}
+.chordblock.echo.current {
+  opacity: 0.7;
+}
+/* Where a lane's loop ends and starts over. */
+.chordlane .loopend {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.55;
+  z-index: 1;
 }
 .chordlane .hint {
   position: absolute;

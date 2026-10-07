@@ -1,5 +1,6 @@
-//! The serializable project. Schema v3 (the first Rust schema): adds per-note velocity and
-//! persisted master settings on top of the Swift v2 layout.
+//! The serializable project. Schema v7 adds an optional plugin per track, on top of v6's
+//! per-track and per-chord-track loop lengths inside a pattern and v5's velocity and
+//! persisted master settings.
 //!
 //! Decoding is tolerant: every field has a `serde(default)` so a file missing a later-added
 //! field still opens. JSON keys are camelCase to match the previous app's files.
@@ -8,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// A diatonic scale family. Expanded later (modes, harmonic minor, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -90,6 +91,9 @@ fn default_velocity() -> i32 {
     100
 }
 
+/// The shortest note the engine will schedule; trimming never produces less than this.
+pub const MIN_NOTE_BEATS: f64 = 1.0 / 64.0;
+
 /// One note in the piano roll. `pitch` is a MIDI note number (0–127), `velocity` 1–127.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,8 +143,8 @@ impl NoteEvent {
         if !self.start_beat.is_finite() || self.start_beat < 0.0 {
             self.start_beat = 0.0;
         }
-        if !self.length_beats.is_finite() || self.length_beats < 1.0 / 64.0 {
-            self.length_beats = 1.0 / 64.0;
+        if !self.length_beats.is_finite() || self.length_beats < MIN_NOTE_BEATS {
+            self.length_beats = MIN_NOTE_BEATS;
         }
         self
     }
@@ -154,6 +158,25 @@ fn one() -> f64 {
 }
 fn default_tone() -> f64 {
     18_000.0
+}
+
+/// A third-party plugin loaded on a track, in place of the built-in voice.
+///
+/// Core stores this but never interprets it: `uid` is opaque here, minted and resolved by the
+/// plugin layer (it encodes format, bundle path and plugin id). Keeping core free of that
+/// meaning is what lets the model stay a pure data crate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackPlugin {
+    /// The plugin layer's identifier for one plugin inside one bundle.
+    pub uid: String,
+    /// Cached display name, so a project opened on a machine where the plugin is gone can
+    /// still say *which* plugin is missing instead of showing a bare uid.
+    pub name: String,
+    /// Base64 of the plugin's own opaque state blob. `None` means "whatever the plugin loads
+    /// with" — a freshly chosen plugin, or one that does not implement state.
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// One instrument track: name, voice, mute/solo and its own bus settings. Notes live in
@@ -189,6 +212,10 @@ pub struct Track {
     /// Display color (`#rrggbb`). `None` means "pick from the palette by position".
     #[serde(default)]
     pub color: Option<String>,
+    /// A plugin that replaces the built-in voice for this track. `None` plays the synth or
+    /// drum kit named by `voice`.
+    #[serde(default)]
+    pub plugin: Option<TrackPlugin>,
 }
 
 impl Track {
@@ -205,6 +232,7 @@ impl Track {
             tone: default_tone(),
             pan: 0.0,
             color: None,
+            plugin: None,
         }
     }
 
@@ -219,8 +247,15 @@ fn default_pattern_length() -> f64 {
     16.0
 }
 
+/// Shortest loop a pattern will subdivide into. Anything finer is a note, not a loop, and a
+/// hand-edited file carrying 0.001 would otherwise tile thousands of copies.
+pub const MIN_LOOP_BEATS: f64 = 1.0;
+
 /// A loop — a named section like "verse" or "chorus". Holds its own chord progression (so
 /// guidance is per-section) and the notes for each track, keyed by track id.
+///
+/// `length_beats` is the merged length: tracks and the chord track may each loop shorter than
+/// it and repeat to fill it, so a 2-bar drum loop plays twice under a 4-bar progression.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SongPattern {
@@ -233,6 +268,13 @@ pub struct SongPattern {
     pub chords: crate::chord_track::ChordTrack,
     #[serde(default, deserialize_with = "de_notes_by_track")]
     pub notes_by_track: HashMap<Uuid, Vec<NoteEvent>>,
+    /// Loop length in beats of one track inside this pattern. A track that is absent (or
+    /// carries a value past the pattern) fills the pattern.
+    #[serde(default)]
+    pub track_loop_beats: HashMap<Uuid, f64>,
+    /// Loop length in beats of the chord track. `None` fills the pattern.
+    #[serde(default)]
+    pub chord_loop_beats: Option<f64>,
 }
 
 /// `notesByTrack` is a JSON object keyed by track id — except in files written by the
@@ -270,11 +312,107 @@ impl SongPattern {
             length_beats: default_pattern_length(),
             chords: Default::default(),
             notes_by_track: HashMap::new(),
+            track_loop_beats: HashMap::new(),
+            chord_loop_beats: None,
         }
     }
 
     pub fn notes(&self, track_id: &Uuid) -> &[NoteEvent] {
         self.notes_by_track.get(track_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// A stored loop length made usable: clamped into `[MIN_LOOP_BEATS, length_beats]`, with
+    /// anything missing or nonsensical meaning "fills the pattern".
+    fn usable_loop(&self, beats: Option<f64>) -> f64 {
+        let len = self.length_beats.max(1.0);
+        match beats {
+            Some(b) if b.is_finite() && b > 0.0 => b.clamp(MIN_LOOP_BEATS.min(len), len),
+            _ => len,
+        }
+    }
+
+    /// How long one turn of `track_id` is inside this pattern.
+    pub fn track_loop(&self, track_id: &Uuid) -> f64 {
+        self.usable_loop(self.track_loop_beats.get(track_id).copied())
+    }
+
+    /// How long one turn of the chord track is inside this pattern.
+    pub fn chord_loop(&self) -> f64 {
+        self.usable_loop(self.chord_loop_beats)
+    }
+
+    /// The track's notes laid out across the whole pattern: the stored notes, then one copy
+    /// per further turn of the track's loop, each turn trimmed at its own end. Identical to
+    /// [`SongPattern::notes`] when the track fills the pattern.
+    pub fn looped_notes(&self, track_id: &Uuid) -> Vec<NoteEvent> {
+        let src = self.notes(track_id);
+        let total = self.length_beats.max(1.0);
+        let turn = self.track_loop(track_id);
+        if turn >= total || src.is_empty() {
+            return src.to_vec();
+        }
+        let mut out = Vec::with_capacity(src.len() * (total / turn).ceil() as usize);
+        for (rep, base) in turns(turn, total) {
+            let end = (base + turn).min(total);
+            for note in src {
+                let start = base + note.start_beat;
+                if start >= end {
+                    continue;
+                }
+                out.push(NoteEvent {
+                    id: repeat_id(&note.id, rep),
+                    start_beat: start,
+                    length_beats: ((start + note.length_beats).min(end) - start).max(MIN_NOTE_BEATS),
+                    ..note.clone()
+                });
+            }
+        }
+        out.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        out
+    }
+
+    /// The chord track laid out across the whole pattern, the same way as
+    /// [`SongPattern::looped_notes`].
+    pub fn looped_chords(&self) -> crate::chord_track::ChordTrack {
+        let total = self.length_beats.max(1.0);
+        let turn = self.chord_loop();
+        if turn >= total || self.chords.is_empty() {
+            return self.chords.clone();
+        }
+        let mut out = Vec::new();
+        for (rep, base) in turns(turn, total) {
+            let end = (base + turn).min(total);
+            for chord in self.chords.chords() {
+                let start = base + chord.start_beat;
+                let cut = (start + chord.length_beats).min(end);
+                if cut <= start {
+                    continue;
+                }
+                out.push(ChordEvent {
+                    id: repeat_id(&chord.id, rep),
+                    start_beat: start,
+                    length_beats: cut - start,
+                    pitch_classes: chord.pitch_classes.clone(),
+                    name: chord.name.clone(),
+                });
+            }
+        }
+        crate::chord_track::ChordTrack::new(out)
+    }
+}
+
+/// `(repetition, start beat)` for every turn of a `turn`-long loop inside `total` beats.
+fn turns(turn: f64, total: f64) -> impl Iterator<Item = (u64, f64)> {
+    (0u64..).map(move |rep| (rep, rep as f64 * turn)).take_while(move |&(_, base)| base < total)
+}
+
+/// Repetition 0 keeps the source id so an unlooped pattern is byte-identical to its notes;
+/// later turns get a derived id that is stable across rebuilds and distinct per turn.
+fn repeat_id(source: &Uuid, rep: u64) -> Uuid {
+    if rep == 0 {
+        *source
+    } else {
+        Uuid::new_v5(source, &rep.to_le_bytes())
     }
 }
 
@@ -556,6 +694,10 @@ impl ProjectModel {
             // Notes keyed by a track that no longer exists are invisible and never played, but
             // survive every save; drop them instead of growing the file forever.
             pattern.notes_by_track.retain(|tid, _| track_ids.contains(tid));
+            pattern.track_loop_beats.retain(|tid, b| track_ids.contains(tid) && b.is_finite() && *b > 0.0);
+            if !pattern.chord_loop_beats.is_some_and(|b| b.is_finite() && b > 0.0) {
+                pattern.chord_loop_beats = None;
+            }
             for notes in pattern.notes_by_track.values_mut() {
                 for n in notes.iter_mut() {
                     *n = n.clone().sanitized();

@@ -5,15 +5,19 @@
 import type {
   AudioStatus,
   AudioStatusEvent,
+  CatalogEntry,
   ChordEvent,
   ExportProgress,
   ExportRequest,
   ExportResult,
   Command,
+  InstallProgress,
   MasterSettings,
   MidiStatus,
   NoteEvent,
   OutputDevice,
+  ParamInfo,
+  PluginDescriptor,
   Settings,
   PlayheadEvent,
   PlayMode,
@@ -21,11 +25,12 @@ import type {
   RecoveryCandidate,
   Snapshot,
   Track,
+  TrackPlugin,
   SongPattern,
   TrackParam,
   TemplateInfo,
 } from "./types";
-import { uuid, withDefaults } from "./types";
+import { chordLoop, hostPlatforms, MIN_LOOP_BEATS, trackLoop, uuid, withDefaults } from "./types";
 import { normalize, progression, STARTERS } from "./theory";
 
 export interface Bridge {
@@ -99,6 +104,29 @@ export interface Bridge {
   testTone(): Promise<void>;
   /** The backend opened or dropped a MIDI input on its own. */
   onMidiStatus(cb: (s: MidiStatus) => void): () => void;
+  /** Plugins found on this computer. `rescan` walks the folders again instead of answering
+   *  from the cache the backend built at startup. */
+  scanPlugins(rescan?: boolean): Promise<PluginDescriptor[]>;
+  /** Put a scanned plugin on a track, or `null` to go back to the built-in voice. The backend
+   *  opens the plugin and edits the document, so the new state arrives on the `document` event. */
+  setTrackPlugin(trackId: string, uid: string | null): Promise<void>;
+  /** The track plugin's parameters, with the values it currently holds. */
+  pluginParams(trackId: string): Promise<ParamInfo[]>;
+  /**
+   * Write one parameter. While dragging, `commit` is false and the value only reaches the
+   * plugin; on release, `commit` is true and the backend folds the plugin's new state into
+   * one undo step. There is no transient document command to close, so `commitGesture` plays
+   * no part here.
+   */
+  setPluginParam(trackId: string, paramId: number, value: number, commit?: boolean): Promise<void>;
+  /** The curated free-plugin list. */
+  pluginCatalog(): Promise<CatalogEntry[]>;
+  /** Download, verify and unpack one catalog entry; progress arrives on `onPluginInstall`. */
+  installPlugin(entryId: string): Promise<void>;
+  onPluginInstall(cb: (p: InstallProgress) => void): () => void;
+  /** Hand a link to the user's own browser. Needed by catalog entries that ship an installer
+   *  rather than a plugin folder: those have to be run by hand from the vendor's page. */
+  openUrl(url: string): Promise<void>;
 }
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -196,6 +224,14 @@ async function tauriBridge(): Promise<Bridge> {
     outputDevices: () => invoke<OutputDevice[]>("output_devices"),
     testTone: () => invoke("test_tone"),
     onMidiStatus: (cb) => subscribe<MidiStatus>("midi-status", cb),
+    scanPlugins: (rescan = false) => invoke<PluginDescriptor[]>("scan_plugins", { rescan }),
+    setTrackPlugin: (trackId, uid) => invoke("set_track_plugin", { trackId, uid }),
+    pluginParams: (trackId) => invoke<ParamInfo[]>("plugin_params", { trackId }),
+    setPluginParam: (trackId, paramId, value, commit = false) => invoke("set_plugin_param", { trackId, paramId, value, commit }),
+    pluginCatalog: () => invoke<CatalogEntry[]>("plugin_catalog"),
+    installPlugin: (entryId) => invoke("install_plugin", { entryId }),
+    onPluginInstall: (cb) => subscribe<InstallProgress>("plugin-install", cb),
+    openUrl: (url) => invoke("open_url", { url }),
   };
 }
 
@@ -213,6 +249,11 @@ const NO_SUCH_SECTION = "no such section";
 const LAST_TRACK = "a project needs at least one track";
 const LAST_PATTERN = "a project needs at least one pattern";
 const INVALID_VALUE = "invalid value";
+const NO_PLUGIN = "track has no plugin";
+const NO_SUCH_PLUGIN = "no such plugin";
+const NO_SUCH_PARAM = "no such parameter";
+const NO_SUCH_ENTRY = "no such catalog entry";
+const NO_ASSET = "no download for this computer";
 
 function fail(message: string): never {
   // A plain string, not an `Error`: that is what Tauri's `invoke` rejects with.
@@ -243,11 +284,12 @@ function newTrack(isDrum: boolean, name: string): Track {
     tone: 18000,
     pan: 0,
     color: null,
+    plugin: null,
   };
 }
 
 function newPattern(name: string): SongPattern {
-  return { id: uuid(), name, lengthBeats: 16, chords: { chords: [] }, notesByTrack: {} };
+  return { id: uuid(), name, lengthBeats: 16, chords: { chords: [] }, notesByTrack: {}, trackLoopBeats: {}, chordLoopBeats: null };
 }
 
 /** `ProjectModel::empty()`: one melody track, one empty pattern, no key, nothing arranged. */
@@ -292,8 +334,9 @@ function sanitizeNote(n: NoteEvent): NoteEvent {
   };
 }
 
-/** The schema this build writes; mirrors `SCHEMA_VERSION` in crates/dissonant-core/src/model.rs. */
-const SCHEMA_VERSION = 5;
+/** The schema this build writes; mirrors `SCHEMA_VERSION` in crates/dissonant-core/src/model.rs.
+ *  7 added `Track::plugin`. */
+const SCHEMA_VERSION = 7;
 
 /** `ProjectModel::normalized`, run on anything read back from storage. */
 function normalizedModel(m: ProjectModel): ProjectModel {
@@ -302,12 +345,20 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   m.schemaVersion = Math.max(m.schemaVersion ?? 0, SCHEMA_VERSION);
   if (m.tracks.length === 0) m.tracks = [newTrack(false, "melody")];
   if (m.patterns.length === 0) m.patterns = [newPattern("pattern 1")];
+  // `#[serde(default)]` on the Rust side: a project saved before plugins existed has no field.
+  for (const t of m.tracks) t.plugin ??= null;
   const trackIds = new Set(m.tracks.map((t) => t.id));
   for (const p of m.patterns) {
+    p.trackLoopBeats ??= {};
+    p.chordLoopBeats ??= null;
     // Notes keyed by a track that no longer exists are invisible and never played.
     for (const id of Object.keys(p.notesByTrack)) {
       if (!trackIds.has(id)) delete p.notesByTrack[id];
     }
+    for (const id of Object.keys(p.trackLoopBeats)) {
+      if (!trackIds.has(id) || !(p.trackLoopBeats[id] > 0)) delete p.trackLoopBeats[id];
+    }
+    if (!(p.chordLoopBeats != null && p.chordLoopBeats > 0)) p.chordLoopBeats = null;
     for (const notes of Object.values(p.notesByTrack)) {
       for (let i = 0; i < notes.length; i++) notes[i] = sanitizeNote(notes[i]);
     }
@@ -348,7 +399,10 @@ function reduce(m: ProjectModel, c: Command): void {
       const before = m.tracks.length;
       m.tracks = m.tracks.filter((t) => t.id !== c.id);
       if (m.tracks.length === before) fail(NO_SUCH_TRACK);
-      for (const p of m.patterns) delete p.notesByTrack[c.id];
+      for (const p of m.patterns) {
+        delete p.notesByTrack[c.id];
+        delete p.trackLoopBeats[c.id];
+      }
       break;
     }
     case "renameTrack":
@@ -374,6 +428,26 @@ function reduce(m: ProjectModel, c: Command): void {
       if (!allFinite(c.value)) fail(INVALID_VALUE);
       const [lo, hi] = TRACK_PARAM_RANGE[c.param];
       track(c.id)[c.param] = clamp(c.value, lo, hi);
+      break;
+    }
+    case "setTrackPlugin": {
+      const t = track(c.id);
+      if (c.plugin === null) {
+        t.plugin = null;
+        break;
+      }
+      const uid = c.plugin.uid.trim();
+      if (!uid) fail(INVALID_VALUE);
+      // A state blob belongs to the plugin that wrote it, so it survives re-picking the same
+      // plugin and is dropped the moment the uid changes.
+      const kept = t.plugin?.uid === uid ? t.plugin.state : null;
+      t.plugin = { uid, name: c.plugin.name.trim() || uid, state: c.plugin.state ?? kept };
+      break;
+    }
+    case "setPluginState": {
+      const t = track(c.id);
+      if (!t.plugin) fail(NO_PLUGIN);
+      t.plugin = { ...t.plugin, state: c.state };
       break;
     }
     case "addPattern": {
@@ -410,6 +484,33 @@ function reduce(m: ProjectModel, c: Command): void {
       if (!allFinite(c.beats) || c.beats < 1) fail(INVALID_VALUE);
       pattern(c.id).lengthBeats = c.beats;
       break;
+    case "setTrackLoop": {
+      track(c.trackId); // Rust checks the track before the pattern.
+      if (c.beats !== null && (!allFinite(c.beats) || c.beats < MIN_LOOP_BEATS)) fail(INVALID_VALUE);
+      const p = pattern(c.patternId);
+      if (c.beats === null) delete p.trackLoopBeats[c.trackId];
+      else p.trackLoopBeats[c.trackId] = c.beats;
+      // The loop is the track's whole extent: cut what no longer fits inside it.
+      const turn = trackLoop(p, c.trackId);
+      const kept = (p.notesByTrack[c.trackId] ?? [])
+        .filter((n) => n.startBeat < turn)
+        .map((n) => ({ ...n, lengthBeats: Math.max(1 / 64, Math.min(n.lengthBeats, turn - n.startBeat)) }));
+      if (kept.length === 0) delete p.notesByTrack[c.trackId];
+      else p.notesByTrack[c.trackId] = kept;
+      break;
+    }
+    case "setChordLoop": {
+      if (c.beats !== null && (!allFinite(c.beats) || c.beats < MIN_LOOP_BEATS)) fail(INVALID_VALUE);
+      const p = pattern(c.patternId);
+      p.chordLoopBeats = c.beats;
+      const turn = chordLoop(p);
+      p.chords = {
+        chords: p.chords.chords
+          .filter((ch) => ch.startBeat < turn)
+          .map((ch) => ({ ...ch, lengthBeats: Math.min(ch.lengthBeats, turn - ch.startBeat) })),
+      };
+      break;
+    }
     case "setNotes": {
       track(c.trackId); // Rust checks the track before the pattern.
       const p = pattern(c.patternId);
@@ -515,6 +616,195 @@ const MAX_UNDO = 200;
 
 /** The mock's stand-in for the filesystem: one slot, written by save, read by open. */
 const STORAGE_KEY = "dissonant.mock.project";
+
+// ─── The mock's plugin world ───────────────────────────────────────────────────────────────
+
+/**
+ * Parameters the mock reports for every hosted plugin. A real CLAP plugin publishes its own
+ * set; this one is picked to exercise the shapes the parameter list has to draw — wide log-ish
+ * ranges, a 0..1 control, a bipolar one and a stepped one.
+ */
+const MOCK_PARAMS: Omit<ParamInfo, "value">[] = [
+  { id: 0, name: "cutoff", module: "filter", min: 20, max: 20_000, default: 8_000, isStepped: false },
+  { id: 1, name: "resonance", module: "filter", min: 0, max: 1, default: 0.2, isStepped: false },
+  { id: 2, name: "attack", module: "envelope", min: 0, max: 4, default: 0.01, isStepped: false },
+  { id: 3, name: "release", module: "envelope", min: 0, max: 8, default: 0.4, isStepped: false },
+  { id: 4, name: "drift", module: "voice", min: -1, max: 1, default: 0, isStepped: false },
+  { id: 5, name: "voices", module: "voice", min: 1, max: 16, default: 8, isStepped: true },
+];
+
+/** `HostedPlugin::save_state` stands in for the plugin's opaque blob: here, its parameters. */
+function encodeState(values: Map<number, number>): string {
+  return btoa(JSON.stringify(Object.fromEntries(values)));
+}
+
+function decodeState(state: string | null): Map<number, number> {
+  const values = new Map(MOCK_PARAMS.map((p) => [p.id, p.default]));
+  if (!state) return values;
+  try {
+    for (const [id, v] of Object.entries(JSON.parse(atob(state)) as Record<string, number>)) {
+      if (Number.isFinite(v)) values.set(Number(id), v);
+    }
+  } catch {
+    // A blob written by some other plugin: its defaults stand, exactly as a real host would
+    // end up when `load_state` is refused.
+  }
+  return values;
+}
+
+/** Plugins the mock pretends were already on this computer before the app was ever run. Only
+ *  some of them are in the catalog, so the browser has both "installed" and installable rows. */
+const MOCK_INSTALLED: PluginDescriptor[] = [
+  {
+    uid: "clap:/Library/Audio/Plug-Ins/CLAP/Surge XT.clap:org.surge-synth-team.surge-xt",
+    format: "clap",
+    path: "/Library/Audio/Plug-Ins/CLAP/Surge XT.clap",
+    pluginId: "org.surge-synth-team.surge-xt",
+    name: "Surge XT",
+    vendor: "Surge Synth Team",
+    version: "1.3.1",
+    kind: "instrument",
+    features: ["instrument", "synthesizer", "pad", "bass"],
+  },
+  {
+    uid: "clap:/Library/Audio/Plug-Ins/CLAP/Tunefish4.clap:de.braincontrol.tunefish4",
+    format: "clap",
+    path: "/Library/Audio/Plug-Ins/CLAP/Tunefish4.clap",
+    pluginId: "de.braincontrol.tunefish4",
+    name: "Tunefish 4",
+    vendor: "Brain Control",
+    version: "4.3.0",
+    kind: "instrument",
+    features: ["instrument", "synthesizer", "pad", "lead"],
+  },
+  {
+    uid: "clap:/Library/Audio/Plug-Ins/CLAP/Airwindows Consolidated.clap:com.airwindows.consolidated",
+    format: "clap",
+    path: "/Library/Audio/Plug-Ins/CLAP/Airwindows Consolidated.clap",
+    pluginId: "com.airwindows.consolidated",
+    name: "Airwindows Consolidated",
+    vendor: "Airwindows",
+    version: "2.1.0",
+    kind: "effect",
+    features: ["audio-effect", "saturation", "lo-fi"],
+  },
+];
+
+/**
+ * The mock's curated list. The real one lives in dissonant-catalog; these entries carry real
+ * names and homepages so the browser can be judged on real text, with stand-in download urls
+ * and hashes because the mock never fetches anything.
+ */
+const MOCK_CATALOG: CatalogEntry[] = [
+  {
+    id: "surge-xt",
+    name: "Surge XT",
+    vendor: "Surge Synth Team",
+    summary: "A big synth that covers almost any sound, with hundreds of ready-made presets.",
+    tags: ["pad", "bass", "lead", "presets"],
+    kind: "instrument",
+    license: "GPL-3.0",
+    homepage: "https://surge-synthesizer.github.io",
+    assets: [
+      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/surge-xt-mac.zip", sha256: "a1".repeat(32), bytes: 128_000_000 },
+      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/surge-xt-mac.zip", sha256: "a1".repeat(32), bytes: 128_000_000 },
+      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/surge-xt-win.zip", sha256: "a2".repeat(32), bytes: 120_000_000 },
+      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/surge-xt-linux.tar.gz", sha256: "a3".repeat(32), bytes: 110_000_000 },
+    ],
+  },
+  {
+    id: "dexed",
+    name: "Dexed",
+    vendor: "Digital Suburban",
+    summary: "Eighties FM sounds: glassy bells, electric pianos and brassy stabs.",
+    tags: ["bell", "electric piano", "retro"],
+    kind: "instrument",
+    license: "GPL-3.0",
+    homepage: "https://asb2m10.github.io/dexed",
+    assets: [
+      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/dexed-mac.zip", sha256: "b1".repeat(32), bytes: 18_000_000 },
+      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/dexed-mac.zip", sha256: "b1".repeat(32), bytes: 18_000_000 },
+      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/dexed-win.zip", sha256: "b2".repeat(32), bytes: 17_000_000 },
+      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/dexed-linux.tar.gz", sha256: "b3".repeat(32), bytes: 16_000_000 },
+    ],
+  },
+  {
+    id: "vital",
+    name: "Vital",
+    vendor: "Matt Tytel",
+    summary: "Moving, modern sounds — good for wobbling basses and slow evolving pads.",
+    tags: ["pad", "bass", "modern", "presets"],
+    kind: "instrument",
+    license: "freeware",
+    homepage: "https://vital.audio",
+    assets: [
+      { platform: "macArm", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c1".repeat(32), bytes: 1_100_000_000 },
+      { platform: "macIntel", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c1".repeat(32), bytes: 1_100_000_000 },
+      { platform: "windows", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c2".repeat(32), bytes: 1_000_000_000 },
+      { platform: "linux", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c3".repeat(32), bytes: 900_000_000 },
+    ],
+  },
+  {
+    id: "airwindows-consolidated",
+    name: "Airwindows Consolidated",
+    vendor: "Airwindows",
+    summary: "Hundreds of small effects in one: warmth, grit, tape wobble and tape hiss.",
+    tags: ["fx", "lo-fi", "saturation"],
+    kind: "effect",
+    license: "MIT",
+    homepage: "https://www.airwindows.com",
+    assets: [
+      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/airwindows-mac.zip", sha256: "d1".repeat(32), bytes: 24_000_000 },
+      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/airwindows-mac.zip", sha256: "d1".repeat(32), bytes: 24_000_000 },
+      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/airwindows-win.zip", sha256: "d2".repeat(32), bytes: 23_000_000 },
+      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/airwindows-linux.tar.gz", sha256: "d3".repeat(32), bytes: 22_000_000 },
+    ],
+  },
+  {
+    id: "odin-2",
+    name: "Odin 2",
+    vendor: "TheWaveWarden",
+    summary: "Three oscillators and a lot of knobs — raw analogue-style bass and leads.",
+    tags: ["bass", "lead", "analogue"],
+    kind: "instrument",
+    license: "GPL-3.0",
+    homepage: "https://www.thewavewarden.com/odin2",
+    assets: [
+      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/odin2-win.zip", sha256: "e1".repeat(32), bytes: 60_000_000 },
+    ],
+  },
+  {
+    id: "bespoke-drums",
+    name: "Bespoke Drums",
+    vendor: "Ryan Challinor",
+    summary: "A kit of sampled drums you can swap one pad at a time.",
+    tags: ["drums", "kit", "samples"],
+    kind: "instrument",
+    license: "GPL-3.0",
+    homepage: "https://www.bespokesynth.com",
+    assets: [
+      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/bespoke-mac.zip", sha256: "f1".repeat(32), bytes: 40_000_000 },
+      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/bespoke-mac.zip", sha256: "f1".repeat(32), bytes: 40_000_000 },
+      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/bespoke-linux.tar.gz", sha256: "f2".repeat(32), bytes: 38_000_000 },
+    ],
+  },
+];
+
+/** What `scanPlugins` reports once an entry has been unpacked into the plugin folder. */
+function installedDescriptor(entry: CatalogEntry): PluginDescriptor {
+  const path = `/Library/Audio/Plug-Ins/CLAP/${entry.name}.clap`;
+  return {
+    uid: `clap:${path}:${entry.id}`,
+    format: "clap",
+    path,
+    pluginId: entry.id,
+    name: entry.name,
+    vendor: entry.vendor,
+    version: "1.0.0",
+    kind: entry.kind,
+    features: entry.tags,
+  };
+}
 
 function mockBridge(): Bridge {
   let model = starterModel();
@@ -657,29 +947,59 @@ function mockBridge(): Bridge {
     pending = null;
   };
 
+  /** Named so the plugin commands can reach it too: a committed param edit is an ordinary
+   *  undoable document edit, it just does not originate from a UI dispatch. */
+  const applyCommand = async (command: Command, transient = false, label?: string): Promise<Snapshot> => {
+    const before = clone(model);
+    const next = clone(model);
+    reduce(next, command);
+    if (JSON.stringify(next) === JSON.stringify(before)) return snapshot();
+    const name = label?.trim() || defaultLabel(command);
+    if (transient) {
+      if (!pending) {
+        pending = before;
+        pendingLabel = name;
+      }
+    } else {
+      commitGesture();
+      pushUndo(before, name);
+    }
+    redo.length = 0;
+    redoLabels.length = 0;
+    model = next;
+    return snapshot();
+  };
+
+  // The mock's plugin folder: what shipped with the fake system plus whatever `installPlugin`
+  // unpacked this session. Scanning is therefore always instant and `rescan` has nothing to do.
+  const installed: PluginDescriptor[] = MOCK_INSTALLED.map((d) => ({ ...d }));
+  const installListeners = new Set<(p: InstallProgress) => void>();
+  /**
+   * Live parameter values per track, the mock's stand-in for the values a `HostedPlugin` holds
+   * on the app thread. Keyed by uid and by the blob they were last reconciled with, so swapping
+   * the plugin or undoing a committed edit reseeds them instead of showing stale knobs.
+   */
+  const paramValues = new Map<string, { uid: string; state: string | null; values: Map<number, number> }>();
+
+  const pluginFor = (uid: string): TrackPlugin => {
+    const d = installed.find((x) => x.uid === uid) ?? fail(NO_SUCH_PLUGIN);
+    return { uid: d.uid, name: d.name, state: null };
+  };
+
+  const liveParams = (trackId: string) => {
+    const t = model.tracks.find((x) => x.id === trackId) ?? fail(NO_SUCH_TRACK);
+    if (!t.plugin) return null;
+    const held = paramValues.get(trackId);
+    if (held && held.uid === t.plugin.uid && held.state === t.plugin.state) return held;
+    const fresh = { uid: t.plugin.uid, state: t.plugin.state, values: decodeState(t.plugin.state) };
+    paramValues.set(trackId, fresh);
+    return fresh;
+  };
+
   return {
     isTauri: false,
     getState: async () => snapshot(),
-    apply: async (command, transient = false, label) => {
-      const before = clone(model);
-      const next = clone(model);
-      reduce(next, command);
-      if (JSON.stringify(next) === JSON.stringify(before)) return snapshot();
-      const name = label?.trim() || defaultLabel(command);
-      if (transient) {
-        if (!pending) {
-          pending = before;
-          pendingLabel = name;
-        }
-      } else {
-        commitGesture();
-        pushUndo(before, name);
-      }
-      redo.length = 0;
-      redoLabels.length = 0;
-      model = next;
-      return snapshot();
-    },
+    apply: applyCommand,
     commitGesture: async () => {
       commitGesture();
       return snapshot();
@@ -886,6 +1206,71 @@ function mockBridge(): Bridge {
     ],
     testTone: async () => blip(69, 100),
     onMidiStatus: () => () => {},
+    scanPlugins: async () => installed.map((d) => ({ ...d })),
+    setTrackPlugin: async (trackId, uid) => {
+      // The track is checked first, like the Rust command: an unknown track is the user's
+      // mistake, an unknown uid is a stale list.
+      model.tracks.find((t) => t.id === trackId) ?? fail(NO_SUCH_TRACK);
+      const plugin = uid === null ? null : pluginFor(uid);
+      await applyCommand({ type: "setTrackPlugin", id: trackId, plugin }, false, "change plugin");
+      paramValues.delete(trackId);
+      for (const cb of docListeners) cb(snapshot());
+    },
+    pluginParams: async (trackId) => {
+      const held = liveParams(trackId);
+      return held ? MOCK_PARAMS.map((p) => ({ ...p, value: held.values.get(p.id) ?? p.default })) : [];
+    },
+    setPluginParam: async (trackId, paramId, value, commit = false) => {
+      const held = liveParams(trackId) ?? fail(NO_PLUGIN);
+      const info = MOCK_PARAMS.find((p) => p.id === paramId) ?? fail(NO_SUCH_PARAM);
+      if (!allFinite(value)) fail(INVALID_VALUE);
+      const v = clamp(value, info.min, info.max);
+      held.values.set(paramId, info.isStepped ? Math.round(v) : v);
+      // Only the end of the gesture touches the document: a dragging value goes straight to
+      // the plugin, which is what `commit: false` means on the Rust side.
+      if (commit) {
+        const state = encodeState(held.values);
+        await applyCommand({ type: "setPluginState", id: trackId, state }, false, "edit plugin");
+        held.state = state;
+        for (const cb of docListeners) cb(snapshot());
+      }
+    },
+    pluginCatalog: async () => MOCK_CATALOG.map(clone),
+    installPlugin: async (entryId) => {
+      const entry = MOCK_CATALOG.find((e) => e.id === entryId) ?? fail(NO_SUCH_ENTRY);
+      const emit = (phase: InstallProgress["phase"], done: number, total: number, message: string) => {
+        for (const cb of installListeners) cb({ entryId, phase, done, total, message });
+      };
+      const platforms = hostPlatforms();
+      const asset = entry.assets.find((a) => platforms.includes(a.platform) && a.kind !== "installer");
+      if (!asset) {
+        emit("failed", 0, 1, NO_ASSET);
+        fail(NO_ASSET);
+      }
+      // A real download is slow enough that the UI has to show progress; the mock keeps the
+      // shape and compresses the time, so a bar that only renders on the last event still
+      // looks wrong here. (`Promise.withResolvers` needs a newer lib than this project targets.)
+      const pause = () => new Promise((r) => setTimeout(r, 12));
+      for (let i = 1; i <= 5; i++) {
+        await pause();
+        emit("downloading", Math.round((asset.bytes * i) / 5), asset.bytes, `downloading ${entry.name}`);
+      }
+      await pause();
+      emit("verifying", 1, 2, "checking the download");
+      await pause();
+      emit("unpacking", 2, 2, `unpacking ${entry.name}`);
+      await pause();
+      const d = installedDescriptor(entry);
+      if (!installed.some((x) => x.uid === d.uid)) installed.push(d);
+      emit("installed", 2, 2, `${entry.name} is ready to use`);
+    },
+    onPluginInstall: (cb) => {
+      installListeners.add(cb);
+      return () => installListeners.delete(cb);
+    },
+    openUrl: async (url) => {
+      window.open(url, "_blank", "noreferrer");
+    },
   };
 }
 

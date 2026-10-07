@@ -1,8 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/dissonant-catalog",
     "crates/dissonant-core",
     "crates/dissonant-engine",
+    "crates/dissonant-plugins",
     "src-tauri",
 ]
 

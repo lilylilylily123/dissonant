@@ -5,11 +5,27 @@ use crate::drums::DrumKit;
 use crate::dsp::{linear_to_db, pan_gains, Biquad, Reverb, StereoBiquad};
 use crate::synth::{PolySynth, VoicePreset};
 use dissonant_core::{MasterSettings, SequenceTrack};
+use dissonant_plugins::PluginAudioUnit;
 
-#[derive(Debug, Clone)]
+/// What makes a track's sound. The built-in voices render mono and are panned by the channel;
+/// a plugin renders its own stereo, so the channel feeds it the pan rather than applying one.
 pub enum Instrument {
     Synth(PolySynth),
     Drums(DrumKit),
+    /// A hosted plugin. Boxed because it is an order of magnitude larger than the other two and
+    /// every `Channel` would otherwise carry that size whether or not it hosts anything.
+    Plugin(Box<PluginAudioUnit>),
+}
+
+impl std::fmt::Debug for Instrument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Instrument::Synth(s) => f.debug_tuple("Synth").field(s).finish(),
+            Instrument::Drums(d) => f.debug_tuple("Drums").field(d).finish(),
+            // A plugin's innards belong to the plugin; naming it is all a log line needs.
+            Instrument::Plugin(_) => f.write_str("Plugin(..)"),
+        }
+    }
 }
 
 impl Instrument {
@@ -17,33 +33,44 @@ impl Instrument {
         match self {
             Instrument::Synth(s) => s.note_on(pitch, velocity),
             Instrument::Drums(d) => d.note_on(pitch, velocity),
+            Instrument::Plugin(p) => p.note_on(pitch, velocity),
         }
     }
     pub fn note_off(&mut self, pitch: u8) {
-        if let Instrument::Synth(s) = self {
-            s.note_off(pitch)
+        match self {
+            Instrument::Synth(s) => s.note_off(pitch),
+            Instrument::Plugin(p) => p.note_off(pitch),
+            // A drum hit is a one-shot: it has no sustain to release.
+            Instrument::Drums(_) => {}
         }
     }
     pub fn all_notes_off(&mut self) {
-        if let Instrument::Synth(s) = self {
-            s.all_notes_off()
+        match self {
+            Instrument::Synth(s) => s.all_notes_off(),
+            Instrument::Plugin(p) => p.all_notes_off(),
+            Instrument::Drums(_) => {}
         }
     }
     pub fn is_silent(&self) -> bool {
         match self {
             Instrument::Synth(s) => s.is_silent(),
             Instrument::Drums(d) => d.is_silent(),
+            Instrument::Plugin(p) => p.is_silent(),
         }
     }
     fn render_add(&mut self, out: &mut [f32]) {
         match self {
             Instrument::Synth(s) => s.render_add(out),
             Instrument::Drums(d) => d.render_add(out),
+            // Stereo instruments go through `Channel::render_add`'s own path.
+            Instrument::Plugin(_) => {}
         }
     }
 }
 
-#[derive(Debug, Clone)]
+/// Not `Clone`: a hosted plugin instance cannot be duplicated, and nothing copies a live
+/// channel — the engine moves them between sequences instead.
+#[derive(Debug)]
 pub struct Channel {
     pub instrument: Instrument,
     voice: String,
@@ -55,16 +82,24 @@ pub struct Channel {
     pan: (f32, f32),
     sample_rate: f32,
     mono: Vec<f32>,
+    /// Stereo scratch for plugin instruments, which render their own two channels.
+    stereo: (Vec<f32>, Vec<f32>),
     pub peak: f32,
 }
 
 impl Channel {
-    pub fn new(track: &SequenceTrack, sample_rate: f32) -> Self {
-        let instrument = if track.is_drum {
+    /// The instrument a track gets from its own settings, with no plugin involved. Shared by
+    /// channel creation and by the engine when a plugin is cleared.
+    pub fn built_in_instrument(track: &SequenceTrack, sample_rate: f32) -> Instrument {
+        if track.is_drum {
             Instrument::Drums(DrumKit::new(sample_rate))
         } else {
             Instrument::Synth(PolySynth::new(VoicePreset::named(&track.voice), sample_rate, 12))
-        };
+        }
+    }
+
+    pub fn new(track: &SequenceTrack, sample_rate: f32) -> Self {
+        let instrument = Self::built_in_instrument(track, sample_rate);
         let mut c = Channel {
             instrument,
             voice: track.voice.clone(),
@@ -76,6 +111,7 @@ impl Channel {
             pan: pan_gains(0.0),
             sample_rate,
             mono: vec![0.0; 8192],
+            stereo: (vec![0.0; 8192], vec![0.0; 8192]),
             peak: 0.0,
         };
         c.apply(track);
@@ -83,16 +119,21 @@ impl Channel {
     }
 
     /// Update params from the track; swaps the instrument if the voice/kind changed.
+    ///
+    /// A plugin is never swapped away here: it is installed by `EngineCommand::SetInstrument`
+    /// from the app thread, because loading one is far too slow for the audio deadline, and a
+    /// sequence rebuild must not silently replace it with the track's fallback voice.
     pub fn apply(&mut self, track: &SequenceTrack) {
-        if track.is_drum != self.is_drum || (!track.is_drum && track.voice != self.voice) {
+        let hosts_plugin = matches!(self.instrument, Instrument::Plugin(_));
+        if !hosts_plugin && (track.is_drum != self.is_drum || (!track.is_drum && track.voice != self.voice)) {
             self.instrument = if track.is_drum {
                 Instrument::Drums(DrumKit::new(self.sample_rate))
             } else {
                 Instrument::Synth(PolySynth::new(VoicePreset::named(&track.voice), self.sample_rate, 12))
             };
-            self.is_drum = track.is_drum;
-            self.voice = track.voice.clone();
         }
+        self.is_drum = track.is_drum;
+        self.voice = track.voice.clone();
         let tone_hz = track.tone.clamp(200.0, 20_000.0) as f32;
         if (tone_hz - self.tone_hz).abs() > 0.5 {
             self.tone.lowpass(self.sample_rate, tone_hz, 0.707);
@@ -103,23 +144,45 @@ impl Channel {
         self.pan = pan_gains(track.pan as f32);
     }
 
-    /// Render `frames` samples and add them (panned) into the stereo mix buffers.
+    /// Render `frames` samples and add them into the stereo mix buffers.
     pub fn render_add(&mut self, mix_l: &mut [f32], mix_r: &mut [f32]) {
         let frames = mix_l.len();
-        if self.mono.len() < frames {
-            self.mono.resize(frames, 0.0);
-        }
         if self.instrument.is_silent() && self.reverb.wet <= 0.0001 {
             // Nothing to render, but the meter still has to fall back to zero — otherwise it
             // freezes at whatever the last audible block measured and the UI stays lit.
             self.hold_peak(0.0, frames);
             return;
         }
+        let (gl, gr) = self.pan;
+        let mut peak = 0.0f32;
+        if let Instrument::Plugin(plugin) = &mut self.instrument {
+            // A plugin produces its own stereo image, so panning scales the two sides it gives
+            // us rather than placing a mono source. The tone filter is mono-only, so the two
+            // sides are filtered independently and the channel's own filter is left for the
+            // built-in voices.
+            if self.stereo.0.len() < frames {
+                self.stereo.0.resize(frames, 0.0);
+                self.stereo.1.resize(frames, 0.0);
+            }
+            let (pl, pr) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
+            pl.fill(0.0);
+            pr.fill(0.0);
+            plugin.render_add(pl, pr);
+            for i in 0..frames {
+                let (l, r) = self.reverb.process(pl[i] * self.gain * gl, pr[i] * self.gain * gr);
+                mix_l[i] += l;
+                mix_r[i] += r;
+                peak = peak.max(l.abs().max(r.abs()));
+            }
+            self.hold_peak(peak, frames);
+            return;
+        }
+        if self.mono.len() < frames {
+            self.mono.resize(frames, 0.0);
+        }
         let mono = &mut self.mono[..frames];
         mono.fill(0.0);
         self.instrument.render_add(mono);
-        let (gl, gr) = self.pan;
-        let mut peak = 0.0f32;
         for i in 0..frames {
             let s = self.tone.process(mono[i]) * self.gain;
             let (l, r) = self.reverb.process(s * gl, s * gr);

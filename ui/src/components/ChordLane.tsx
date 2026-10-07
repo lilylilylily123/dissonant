@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { selectedPattern, useStore } from "../store";
 import { chordAt, chordName, diatonicChords, noteName, tier } from "../theory";
-import type { ChordEvent } from "../types";
+import { chordLoop, layOutLoop, type ChordEvent } from "../types";
 
 export const GUTTER = 64;
 export const BASE_BEAT_W = 96;
@@ -20,15 +20,20 @@ export function ChordLane() {
 
   if (!pattern) return null;
   const beatW = BASE_BEAT_W * zoom;
-  const chords = preview ?? pattern.chords.chords;
-  const current = chordAt(pattern.chords.chords, playhead);
+  const total = Math.max(1, pattern.lengthBeats);
+  const turn = chordLoop(pattern);
+  const source = preview ?? pattern.chords.chords;
+  // One turn is what you edit; the rest of the pattern shows that turn repeating. Shortening
+  // the loop trims the chords, so nothing sits past `turn`.
+  const echoes = layOutLoop(source, turn, total).slice(source.length);
+  const current = chordAt(layOutLoop(pattern.chords.chords, turn, total), playhead);
   const root = key.rootPitchClass ?? 0;
 
   const commit = (next: ChordEvent[]) => void dispatch({ type: "setChords", patternId: pattern.id, chords: next });
 
   const onPointerDown = (e: React.PointerEvent, chord: ChordEvent, kind: "move" | "resize") => {
     if (e.button === 2) {
-      commit(chords.filter((c) => c.id !== chord.id));
+      commit(source.filter((c) => c.id !== chord.id));
       return;
     }
     if (e.button !== 0) return;
@@ -46,9 +51,9 @@ export function ChordLane() {
       pattern.chords.chords.map((c) => {
         if (c.id !== d.id) return c;
         if (d.kind === "move") {
-          return { ...c, startBeat: Math.min(Math.max(0, d.orig.startBeat + dBeats), pattern.lengthBeats - d.orig.lengthBeats) };
+          return { ...c, startBeat: Math.min(Math.max(0, d.orig.startBeat + dBeats), turn - d.orig.lengthBeats) };
         }
-        return { ...c, lengthBeats: Math.min(Math.max(1, d.orig.lengthBeats + dBeats), pattern.lengthBeats - d.orig.startBeat) };
+        return { ...c, lengthBeats: Math.min(Math.max(1, d.orig.lengthBeats + dBeats), turn - d.orig.startBeat) };
       }),
     );
   };
@@ -70,9 +75,20 @@ export function ChordLane() {
       <div className="gut">
         <span className="cap">chords</span>
       </div>
-      <div className="inner" style={{ width: pattern.lengthBeats * beatW }}>
-        {chords.length === 0 && <span className="hint">no chords — pick a starter under HARMONY, or ＋ chord</span>}
-        {chords.map((c) => (
+      <div className="inner" style={{ width: total * beatW }}>
+        {source.length === 0 && <span className="hint">no chords — pick a starter under HARMONY, or ＋ chord</span>}
+        {turn < total && <div className="loopend" style={{ left: turn * beatW }} title="where the chord loop starts over" />}
+        {echoes.map((c) => (
+          <div
+            key={c.id}
+            className={`chordblock echo${current?.id === c.id ? " current" : ""}`}
+            style={{ left: c.startBeat * beatW, width: Math.max(8, c.lengthBeats * beatW - 3) }}
+            title="a repeat of the chord loop — edit the first turn"
+          >
+            {c.name ?? chordName(c.pitchClasses)}
+          </div>
+        ))}
+        {source.map((c) => (
           <div
             key={c.id}
             className={`chordblock${current?.id === c.id ? " current" : ""}`}
@@ -89,8 +105,8 @@ export function ChordLane() {
                 chord={c}
                 root={root}
                 scale={key.scale}
-                onChange={(pcs) => commit(chords.map((x) => (x.id === c.id ? { ...x, pitchClasses: pcs, name: chordName(pcs) } : x)))}
-                onDelete={() => (setEditingId(null), commit(chords.filter((x) => x.id !== c.id)))}
+                onChange={(pcs) => commit(source.map((x) => (x.id === c.id ? { ...x, pitchClasses: pcs, name: chordName(pcs) } : x)))}
+                onDelete={() => (setEditingId(null), commit(source.filter((x) => x.id !== c.id)))}
                 onClose={() => setEditingId(null)}
               />
             )}

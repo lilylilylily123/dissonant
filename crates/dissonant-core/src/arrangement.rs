@@ -4,7 +4,8 @@
 //! song-mode playhead read from these.
 
 use crate::chord_track::ChordTrack;
-use crate::model::{ChordEvent, Clip, NoteEvent, SongPattern};
+use crate::model::{ChordEvent, Clip, NoteEvent, SongPattern, MIN_NOTE_BEATS};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct Arrangement;
@@ -37,14 +38,17 @@ impl Arrangement {
         })
     }
 
-    /// Notes for one track across the whole song. Occurrence ids are derived
-    /// deterministically from (note id, clip id, repetition) so repeats produce stable,
-    /// distinct ids the engine can key on.
+    /// Notes for one track across the whole song. Each pattern is first laid out internally
+    /// (a track that loops shorter than its pattern repeats to fill it), then that layout is
+    /// repeated across the clip. Occurrence ids are derived deterministically from (note id,
+    /// clip id, repetition) so repeats produce stable, distinct ids the engine can key on.
     pub fn flattened_notes(track_id: &Uuid, patterns: &[SongPattern], clips: &[Clip]) -> Vec<NoteEvent> {
+        let looped: HashMap<Uuid, Vec<NoteEvent>> =
+            patterns.iter().map(|p| (p.id, p.looped_notes(track_id))).collect();
         let mut result = Vec::new();
         for (clip, rep, pattern, base) in Self::repetitions(patterns, clips) {
             let clip_end = clip.end_beat();
-            for note in pattern.notes(track_id) {
+            for note in looped.get(&pattern.id).map(Vec::as_slice).unwrap_or_default() {
                 let start = base + note.start_beat;
                 if start < clip.start_beat || start >= clip_end {
                     continue;
@@ -55,7 +59,7 @@ impl Arrangement {
                 result.push(NoteEvent {
                     id: Uuid::new_v5(&note.id, &salt),
                     start_beat: start,
-                    length_beats: (end - start).max(1.0 / 64.0),
+                    length_beats: (end - start).max(MIN_NOTE_BEATS),
                     pitch: note.pitch,
                     velocity: note.velocity,
                     intentional: note.intentional,
@@ -68,10 +72,12 @@ impl Arrangement {
     }
 
     pub fn flattened_chords(patterns: &[SongPattern], clips: &[Clip]) -> ChordTrack {
+        let looped: HashMap<Uuid, ChordTrack> = patterns.iter().map(|p| (p.id, p.looped_chords())).collect();
         let mut chords = Vec::new();
         for (clip, rep, pattern, base) in Self::repetitions(patterns, clips) {
             let clip_end = clip.end_beat();
-            for chord in pattern.chords.chords() {
+            let source = looped.get(&pattern.id).map(ChordTrack::chords).unwrap_or_default();
+            for chord in source {
                 let start = base + chord.start_beat;
                 let end = (start + chord.length_beats).min(clip_end);
                 // A chord that started before the clip still counts from the clip's start.

@@ -1,0 +1,258 @@
+[
+  {
+    "id": "surge-xt",
+    "name": "Surge XT",
+    "vendor": "Surge Synth Team",
+    "summary": "A big free synth with hundreds of ready-made sounds, from soft pads to hard basses.",
+    "tags": ["synth", "pad", "bass", "lead", "keys", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://surge-synthesizer.github.io/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/surge-synthesizer/releases-xt/releases/download/1.3.4/surge-xt-macos-1.3.4-pluginsonly.zip",
+        "sha256": "37d8d809693adc86587b7bc75a2384fc4e905f259aa9b9a21777749d36fbf8aa",
+        "bytes": 186958216
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/surge-synthesizer/releases-xt/releases/download/1.3.4/surge-xt-macos-1.3.4-pluginsonly.zip",
+        "sha256": "37d8d809693adc86587b7bc75a2384fc4e905f259aa9b9a21777749d36fbf8aa",
+        "bytes": 186958216
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/surge-synthesizer/releases-xt/releases/download/1.3.4/surge-xt-win64-1.3.4-pluginsonly.zip",
+        "sha256": "564e162c560af07ad4ed47fe1bfcd827cf97a575de30d06c48249aad2e7c35e6",
+        "bytes": 49093875
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "tarGz",
+        "url": "https://github.com/surge-synthesizer/releases-xt/releases/download/1.3.4/surge-xt-linux-1.3.4-pluginsonly.tar.gz",
+        "sha256": "dd431b75f5fa197c4bffa6ca27ca46970f0a94c834119bb1db7decdeec4c28db",
+        "bytes": 97294804
+      }
+    ]
+  },
+  {
+    "id": "dexed",
+    "name": "Dexed",
+    "vendor": "Digital Suburban",
+    "summary": "A free remake of a famous 1980s synth: bell tones, electric pianos and sharp basses.",
+    "tags": ["synth", "fm", "keys", "bell", "bass", "vintage", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://asb2m10.github.io/dexed/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/asb2m10/dexed/releases/download/v1.0.1/Dexed-1.0.1-macOS.zip",
+        "sha256": "4269448bc1312424cafd29aff615d891bc5905ebfc54b42ce70c56b9b10dc401",
+        "bytes": 16939688
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/asb2m10/dexed/releases/download/v1.0.1/Dexed-1.0.1-macOS.zip",
+        "sha256": "4269448bc1312424cafd29aff615d891bc5905ebfc54b42ce70c56b9b10dc401",
+        "bytes": 16939688
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/asb2m10/dexed/releases/download/v1.0.1/Dexed-1.0.1-win.zip",
+        "sha256": "1f118445f2c5c411636bb41ddf8b456db09af74cd38f9ede8a93a01020505f05",
+        "bytes": 9742538
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/asb2m10/dexed/releases/download/v1.0.1/Dexed-1.0.1-lnx.zip",
+        "sha256": "2bac3d0c4237e8c22c4274b6d5b59fe6329fcae72864f81b5830393eff354fc1",
+        "bytes": 7725160
+      }
+    ]
+  },
+  {
+    "id": "ob-xf",
+    "name": "OB-Xf",
+    "vendor": "Surge Synth Team",
+    "summary": "Copies a classic 1980s analogue keyboard: warm pads, brass stabs and sweeping strings.",
+    "tags": ["synth", "pad", "brass", "strings", "vintage", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/surge-synthesizer/OB-Xf",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/surge-synthesizer/OB-Xf/releases/download/v1.0.3/ob-xf-macOS-v1.0.3.dmg",
+        "sha256": "",
+        "bytes": 60657850
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/surge-synthesizer/OB-Xf/releases/download/v1.0.3/ob-xf-macOS-v1.0.3.dmg",
+        "sha256": "",
+        "bytes": 60657850
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/surge-synthesizer/OB-Xf/releases/download/v1.0.3/ob-xf-Windows-v1.0.3.zip",
+        "sha256": "149fda0649daf8a3aa0851801f92515f0dbf6203acf33c0edc7d3c445e80b1e7",
+        "bytes": 9222959
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/surge-synthesizer/OB-Xf/releases/download/v1.0.3/ob-xf-Linux-v1.0.3.zip",
+        "sha256": "72b60c83cf6426337031df744c34a047104a9d95f1feaf6cd048ecfa39f74c96",
+        "bytes": 21867343
+      }
+    ]
+  },
+  {
+    "id": "six-sines",
+    "name": "Six Sines",
+    "vendor": "Baconpaul",
+    "summary": "Stacks six tones to make metallic bells, glassy keys and pads that keep moving.",
+    "tags": ["synth", "fm", "bell", "keys", "pad", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/baconpaul/six-sines",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/baconpaul/six-sines/releases/download/v1.2.1/six-sines-macOS-2026-07-20-18ecb36.dmg",
+        "sha256": "",
+        "bytes": 63165016
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/baconpaul/six-sines/releases/download/v1.2.1/six-sines-macOS-2026-07-20-18ecb36.dmg",
+        "sha256": "",
+        "bytes": 63165016
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/baconpaul/six-sines/releases/download/v1.2.1/six-sines-Windows-2026-07-20-18ecb36.zip",
+        "sha256": "9f7c7fa5cb1c5e11b53c0a9306ee443149cc7bc0a109380dbbe1578f3a7b6e5d",
+        "bytes": 22398434
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/baconpaul/six-sines/releases/download/v1.2.1/six-sines-Linux-2026-07-20-18ecb36.zip",
+        "sha256": "9b5353eebfec3e462c80ed8c0f53c965e6262bb38537518159cce71de7eace41",
+        "bytes": 28862299
+      }
+    ]
+  },
+  {
+    "id": "odin-2",
+    "name": "Odin 2",
+    "vendor": "TheWaveWarden",
+    "summary": "An all-rounder synth with a built-in note repeater, handy for basses and lead lines.",
+    "tags": ["synth", "bass", "lead", "pad", "arp", "free"],
+    "kind": "instrument",
+    "license": "GPL-3.0",
+    "homepage": "https://www.thewavewarden.com/odin2",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/TheWaveWarden/odin2/releases/download/NightlyDevel/Odin2.4.1MacInstaller.pkg",
+        "sha256": "",
+        "bytes": 132362369
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/TheWaveWarden/odin2/releases/download/NightlyDevel/Odin2.4.1MacInstaller.pkg",
+        "sha256": "",
+        "bytes": 132362369
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/TheWaveWarden/odin2/releases/download/NightlyDevel/Odin2.4.1WinInstaller.exe",
+        "sha256": "",
+        "bytes": 40936418
+      },
+      {
+        "platform": "linux",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/TheWaveWarden/odin2/releases/download/NightlyDevel/Odin2.4.1Linux.zip",
+        "sha256": "462c4fffda99ff91a6c362d8cf41616b50807778ae7a96471753046a799aed63",
+        "bytes": 66588004
+      }
+    ]
+  },
+  {
+    "id": "dragonfly-reverb",
+    "name": "Dragonfly Reverb",
+    "vendor": "Michael Willis",
+    "summary": "Four free reverbs that put a sound in a space, from a tight room to a huge hall.",
+    "tags": ["fx", "reverb", "space", "hall", "room", "free"],
+    "kind": "effect",
+    "license": "GPL-3.0",
+    "homepage": "https://michaelwillis.github.io/dragonfly-reverb/",
+    "assets": [
+      {
+        "platform": "macArm",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/michaelwillis/dragonfly-reverb/releases/download/3.2.10/dragonfly-reverb-3.2.10-macos-universal.dmg",
+        "sha256": "",
+        "bytes": 24954281
+      },
+      {
+        "platform": "macIntel",
+        "format": "clap",
+        "kind": "installer",
+        "url": "https://github.com/michaelwillis/dragonfly-reverb/releases/download/3.2.10/dragonfly-reverb-3.2.10-macos-universal.dmg",
+        "sha256": "",
+        "bytes": 24954281
+      },
+      {
+        "platform": "windows",
+        "format": "clap",
+        "kind": "zip",
+        "url": "https://github.com/michaelwillis/dragonfly-reverb/releases/download/3.2.10/dragonfly-reverb-3.2.10-win64.zip",
+        "sha256": "ca5f35f9dcd9a33f06490d3c92f04061a1a798cb81257d5ca5851bdda0824c66",
+        "bytes": 22447365
+      }
+    ]
+  }
+]

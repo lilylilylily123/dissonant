@@ -1,6 +1,6 @@
 //! The block processor: transport + sample-accurate event scheduling + mixing.
 
-use crate::channel::{Channel, Master};
+use crate::channel::{Channel, Instrument, Master};
 use crate::synth::{PolySynth, VoicePreset};
 use dissonant_core::{swing_warp, MasterSettings, Sequence, Tempo};
 use std::collections::HashMap;
@@ -96,7 +96,10 @@ impl Shared {
 }
 
 /// Messages from the application to the audio thread.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: `SetInstrument` carries a live plugin, which cannot be duplicated. Commands are
+/// sent, not copied.
+#[derive(Debug)]
 pub enum EngineCommand {
     Play,
     Stop,
@@ -125,6 +128,15 @@ pub enum EngineCommand {
     SetMetronome { on: bool, volume: f32 },
     /// Click through `bars` bars with the transport held, then play.
     PlayWithCountIn { bars: u32 },
+    /// Install an instrument built on the app thread. Loading a plugin takes hundreds of
+    /// milliseconds, so it is never done here; the app hands over a ready one and the audio
+    /// thread only swaps a pointer. The displaced instrument is dropped here, the same
+    /// tradeoff `SetSequence` already makes.
+    SetInstrument { track_id: Uuid, instrument: Box<Instrument> },
+    /// Restore a track to its built-in voice, releasing whatever plugin it hosted.
+    ClearInstrument { track_id: Uuid },
+    /// A parameter change on a hosted plugin, applied at the next block.
+    SetPluginParam { track_id: Uuid, param_id: u32, value: f64 },
 }
 
 /// One sounding metronome click: a short decaying sine.
@@ -361,7 +373,33 @@ impl Engine {
                 self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
             EngineCommand::TestTone => self.test_tone = ((self.sample_rate * 0.6) as usize, 0.0),
-
+            EngineCommand::SetInstrument { track_id, instrument } => {
+                if let Some(ch) = self.channel_mut(&track_id) {
+                    // Release what was sounding first: the outgoing instrument is about to be
+                    // dropped and the incoming one has no idea which keys are held.
+                    ch.instrument.all_notes_off();
+                    ch.instrument = *instrument;
+                }
+            }
+            EngineCommand::ClearInstrument { track_id } => {
+                let fallback = self
+                    .sequence
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == track_id)
+                    .map(|t| Channel::built_in_instrument(t, self.sample_rate));
+                if let (Some(ch), Some(instrument)) = (self.channel_mut(&track_id), fallback) {
+                    ch.instrument.all_notes_off();
+                    ch.instrument = instrument;
+                }
+            }
+            EngineCommand::SetPluginParam { track_id, param_id, value } => {
+                if let Some(ch) = self.channel_mut(&track_id) {
+                    if let Instrument::Plugin(p) = &mut ch.instrument {
+                        p.set_param(param_id, value);
+                    }
+                }
+            }
         }
         self.publish();
     }

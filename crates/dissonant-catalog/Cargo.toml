@@ -1,0 +1,26 @@
+[package]
+name = "dissonant-catalog"
+description = "A curated catalog of free audio plugins, and a checksum-pinned installer for them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dissonant-plugins = { path = "../dissonant-plugins" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = "3"
+sha2 = "0.11"
+zip = { version = "8", default-features = false, features = ["deflate", "bzip2"] }
+flate2 = "1"
+tar = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+# Fixture archives are built in-test rather than committed, so the test says what it means and
+# there is no binary blob in the repo to go stale.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.11"

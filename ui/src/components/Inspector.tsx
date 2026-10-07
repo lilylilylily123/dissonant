@@ -2,8 +2,9 @@ import { useState } from "react";
 import { beatsPerBar, dbText, effectiveKey, GRID_OPTIONS, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { chordAt, explainNote, midiName, NOTE_NAMES, noteName, progression, STARTERS, tierMap } from "../theory";
 import { arpeggiateNotes, chopNotes, humanizeNotes, invertNotes, legatoNotes, quantizeNotes, resolveTargets, reverseNotes, scaleNotes, setLength, strumNotes, toggleMute } from "../noteEditing";
-import { DRUM_KIT, TRACK_PALETTE, trackColor, VOICES, type ScaleType, type TrackParam } from "../types";
+import { chordLoop, DRUM_KIT, TRACK_PALETTE, trackColor, trackLoop, type ScaleType, type TrackParam } from "../types";
 import { hz, Knob, lin, log, panText, pct } from "./Knob";
+import { InstrumentPicker, PluginParams } from "./PluginBrowser";
 
 const VOL = lin(0, 1.5);
 const PAN = lin(-1, 1);
@@ -162,6 +163,46 @@ export function Inspector() {
           </div>
         </div>
         <div className="field">
+          <span className="flabel" title="how long one turn of this track is; shorter loops repeat to fill the pattern">
+            {track.isDrum ? "drum loop" : "track loop"}
+          </span>
+          <div className="row" style={{ gap: 3 }}>
+            {[1, 2, 4, 8].map((bars) => {
+              const beats = bars * bpb;
+              if (beats > pattern.lengthBeats) return null;
+              const on = Math.abs(trackLoop(pattern, track.id) - beats) < 1e-9;
+              return (
+                <button
+                  key={bars}
+                  className={`chip tiny${on ? " on" : ""}`}
+                  onClick={() => s.dispatch({ type: "setTrackLoop", patternId: pattern.id, trackId: track.id, beats: beats >= pattern.lengthBeats ? null : beats })}
+                >
+                  {bars}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="field">
+          <span className="flabel" title="how long one turn of the chord progression is">chord loop</span>
+          <div className="row" style={{ gap: 3 }}>
+            {[1, 2, 4, 8].map((bars) => {
+              const beats = bars * bpb;
+              if (beats > pattern.lengthBeats) return null;
+              const on = Math.abs(chordLoop(pattern) - beats) < 1e-9;
+              return (
+                <button
+                  key={bars}
+                  className={`chip tiny${on ? " on" : ""}`}
+                  onClick={() => s.dispatch({ type: "setChordLoop", patternId: pattern.id, beats: beats >= pattern.lengthBeats ? null : beats })}
+                >
+                  {bars}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="field">
           <span className="flabel">notes</span>
           <span className="val">{notes.length}</span>
         </div>
@@ -303,23 +344,18 @@ export function Inspector() {
       <div className="section">
         <div className="head">
           <span className="cap">instrument</span>
-          <span className="mono" style={{ fontSize: 9, color: "var(--text-4b)" }}>{track.isDrum ? "procedural kit" : "poly · 12 voices"}</span>
+          <span className="mono" style={{ fontSize: 9, color: "var(--text-4b)" }}>
+            {track.plugin ? "clap plugin" : track.isDrum ? "procedural kit" : "poly · 12 voices"}
+          </span>
         </div>
         <div className="devchip">
           <span className="led" />
-          <span className="n">{track.isDrum ? "drum kit" : track.voice}</span>
+          <span className="n">{track.plugin ? track.plugin.name : track.isDrum ? "drum kit" : track.voice}</span>
           <span className="spacer" />
-          <span className="meta">{track.isDrum ? DRUM_KIT.map((d) => d.name).join(" · ") : "waveform synth"}</span>
+          <span className="meta">{track.plugin ? "hosted" : track.isDrum ? DRUM_KIT.map((d) => d.name).join(" · ") : "waveform synth"}</span>
         </div>
-        {!track.isDrum && (
-          <div className="chipsrow" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)" }}>
-            {VOICES.map((v) => (
-              <button key={v} className={`chip${track.voice === v ? " on" : ""}`} onClick={() => s.dispatch({ type: "setTrackVoice", id: track.id, voice: v })}>
-                {v}
-              </button>
-            ))}
-          </div>
-        )}
+        <InstrumentPicker columns={3} />
+        {track.plugin && <PluginParams trackId={track.id} uid={track.plugin.uid} state={track.plugin.state} />}
         <div className="knobrow">
           <Knob label="vol" value={VOL.to(track.volume)} display={`${dbText(track.volume)}`} color="#9a9aa4" defaultValue={VOL.to(1)} onChange={(p) => param("volume", VOL.from(p))} onCommit={commit} />
           <Knob label="pan" value={PAN.to(track.pan)} display={panText(track.pan)} color="#9a9aa4" defaultValue={0.5} onChange={(p) => param("pan", PAN.from(p))} onCommit={commit} />

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, Command, ExportProgress, ExportRequest, KeyState, MidiStatus, NoteEvent, OutputDevice, PlayMode, RecoveryCandidate, Settings, Snapshot, SongPattern, TemplateInfo, Track } from "./types";
+import type { AudioStatus, CatalogEntry, Command, ExportProgress, ExportRequest, InstallProgress, KeyState, MidiStatus, NoteEvent, OutputDevice, ParamInfo, PlayMode, PluginDescriptor, RecoveryCandidate, Settings, Snapshot, SongPattern, TemplateInfo, Track } from "./types";
 import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
 
 export interface Toast {
@@ -27,7 +27,7 @@ export interface DialogSpec {
   input?: { placeholder?: string; value?: string };
 }
 
-export type BottomPanel = "devices" | "mixer";
+export type BottomPanel = "devices" | "mixer" | "plugins";
 export type LiveKeyboard = "off" | "tier" | "chromatic";
 
 interface State {
@@ -79,6 +79,12 @@ interface State {
   ghostTrackId: string | null;
   /** Something outside the roll (inspector, menu) asked for this selection. */
   selectionRequest: { ids: string[]; nonce: number } | null;
+  /** Plugins found on this computer, in scan order; empty until `refreshPlugins`. */
+  plugins: PluginDescriptor[];
+  /** The curated free-plugin catalog; empty until `refreshCatalog`. */
+  catalog: CatalogEntry[];
+  /** The latest install event per catalog entry, so a row can show its own progress. */
+  installing: Record<string, InstallProgress>;
 
   init(): Promise<void>;
   /** `label` names the edit in the Edit menu ("move notes"); defaults to the command's name. */
@@ -165,6 +171,23 @@ interface State {
   refreshOutputDevices(): Promise<void>;
   testTone(): void;
   refreshAudio(): Promise<void>;
+  /** Plugins found on this computer; refreshed after an install. */
+  refreshPlugins(rescan?: boolean): Promise<void>;
+  /** The curated free-plugin catalog, loaded when the browser is first shown. */
+  refreshCatalog(): Promise<void>;
+  /** Put a scanned plugin on a track, or `null` to go back to the built-in voice. */
+  setTrackPlugin(trackId: string, uid: string | null): Promise<void>;
+  /** A track plugin's parameters with the values it currently holds. */
+  pluginParams(trackId: string): Promise<ParamInfo[]>;
+  /** Write one plugin parameter: `commit` false while dragging, true on release — only the
+   *  committed one becomes an undo step. */
+  setPluginParam(trackId: string, paramId: number, value: number, commit?: boolean): Promise<void>;
+  /** Install one catalog entry and rescan; progress shows up in `installing`. */
+  installPlugin(entryId: string): Promise<void>;
+  /** Hand an https link to the user's own browser; anything else is ignored. */
+  openUrl(url: string): Promise<void>;
+  /** Show the plugin browser, switching to the mode that has a bottom panel if needed. */
+  openPluginBrowser(): void;
 }
 
 /** Push the appearance section into CSS variables, the live tier palette and the page zoom. */
@@ -291,6 +314,9 @@ export const useStore = create<State>((set, get) => {
     fold: false,
     ghostTrackId: null,
     selectionRequest: null,
+    plugins: [],
+    catalog: [],
+    installing: {},
 
     async init() {
       const b = await getBridge();
@@ -320,6 +346,7 @@ export const useStore = create<State>((set, get) => {
         else if (!midi.open && before) get().showToast(`MIDI in: ${before} disconnected`, true);
       });
       b.onExportProgress((p) => set({ exporting: p.done >= p.total ? null : p }));
+      b.onPluginInstall((p) => set((s) => ({ installing: { ...s.installing, [p.entryId]: p } })));
       // Engine load / xruns in the status bar.
       setInterval(() => void get().refreshAudio(), 2000);
       const audio = await b.audioStatus();
@@ -327,6 +354,7 @@ export const useStore = create<State>((set, get) => {
       if (!audio.running && b.isTauri) get().showToast(`audio: ${audio.error ?? "not running"}`, true);
       void get().refreshMidi();
       void get().refreshRecent();
+      void get().refreshPlugins();
       try {
         const candidates = await b.recoveryCandidates();
         if (candidates.length) void offerRecovery(candidates);
@@ -821,6 +849,76 @@ export const useStore = create<State>((set, get) => {
       } catch {
         /* ignore */
       }
+    },
+
+    async refreshPlugins(rescan = false) {
+      const b = await getBridge();
+      try {
+        set({ plugins: await b.scanPlugins(rescan) });
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async setTrackPlugin(trackId, uid) {
+      const b = await getBridge();
+      try {
+        await b.setTrackPlugin(trackId, uid);
+        applySnapshot(await b.getState());
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async refreshCatalog() {
+      const b = await getBridge();
+      try {
+        set({ catalog: await b.pluginCatalog() });
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async pluginParams(trackId) {
+      const b = await getBridge();
+      try {
+        return await b.pluginParams(trackId);
+      } catch (e) {
+        get().showToast(String(e), true);
+        return [];
+      }
+    },
+    async setPluginParam(trackId, paramId, value, commit = false) {
+      const b = await getBridge();
+      try {
+        await b.setPluginParam(trackId, paramId, value, commit);
+        // A committed value is a document edit; the dragging ones never touch it.
+        if (commit) applySnapshot(await b.getState());
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async installPlugin(entryId) {
+      const b = await getBridge();
+      try {
+        await b.installPlugin(entryId);
+        await get().refreshPlugins(true);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async openUrl(url) {
+      // Only https: handing an arbitrary string to the OS opener is a shell-adjacent surface,
+      // and the backend refuses anything else too.
+      if (!url.startsWith("https://")) return;
+      const b = await getBridge();
+      try {
+        await b.openUrl(url);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    openPluginBrowser() {
+      // The browser lives in the bottom panel, which only exists in song mode.
+      if (get().mode !== "song") get().setMode("song");
+      set({ bottomPanel: "plugins" });
     },
   };
 });
