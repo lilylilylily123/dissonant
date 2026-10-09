@@ -1335,12 +1335,16 @@ fn scan_plugins(state: State<'_, AppState>, rescan: Option<bool>) -> Vec<PluginD
 /// loaded on the plugin thread, its audio half is handed to the engine, and only then is the
 /// document updated — a load that fails leaves the track exactly as it was.
 #[tauri::command]
-fn set_track_plugin(state: State<'_, AppState>, track_id: Uuid, uid: Option<String>) -> Result<Snapshot, String> {
+fn set_track_plugin(app: AppHandle, state: State<'_, AppState>, track_id: Uuid, uid: Option<String>) -> Result<Snapshot, String> {
     let Some(uid) = uid else {
         state.plugin_host.close(track_id);
         state.send(EngineCommand::ClearInstrument { track_id });
         state.loaded_plugin_uids.lock().unwrap().remove(&track_id);
         state.doc.lock().unwrap().apply(Command::SetTrackPlugin { id: track_id, plugin: None }, false).map_err(|e| e.to_string())?;
+        // Its editor is now looking at a plugin that is not there any more.
+        if let Some(w) = app.get_webview_window(&plugin_window_label(track_id)) {
+            let _ = w.close();
+        }
         return Ok(state.snapshot());
     };
     // The engine activates plugins for the rate it is actually running at; with no device yet,
@@ -1371,6 +1375,30 @@ fn plugin_params(state: State<'_, AppState>, track_id: Uuid) -> Vec<ParamInfo> {
     state.plugin_host.params(track_id)
 }
 
+/// Plugin editor windows are labelled `plugin-<track id>`, so one track can only ever have one.
+///
+/// Everything that is not an editor is the project window. Testing for the editor rather than
+/// for `"main"` keeps the save-on-close prompt working even if the main window is ever
+/// relabelled — getting that backwards would skip the prompt and lose work silently.
+const PLUGIN_WINDOW_PREFIX: &str = "plugin-";
+
+fn plugin_window_label(track_id: Uuid) -> String {
+    format!("{PLUGIN_WINDOW_PREFIX}{}", track_id.simple())
+}
+
+fn is_plugin_window(label: &str) -> bool {
+    label.starts_with(PLUGIN_WINDOW_PREFIX)
+}
+
+/// Shut every plugin editor. Used when the project they are looking at goes away.
+fn close_plugin_windows(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if is_plugin_window(&label) {
+            let _ = window.close();
+        }
+    }
+}
+
 /// Open (or raise) a separate window holding one track's plugin controls.
 ///
 /// A plugin like Dexed publishes 156 parameters; a 300px inspector column cannot show that, and
@@ -1385,7 +1413,7 @@ fn open_plugin_window(app: AppHandle, state: State<'_, AppState>, track_id: Uuid
         let plugin = track.plugin.as_ref().ok_or("that track has no plugin")?;
         (track.name.clone(), plugin.name.clone())
     };
-    let label = format!("plugin-{}", track_id.simple());
+    let label = plugin_window_label(track_id);
     if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.unminimize();
         let _ = existing.show();
@@ -1646,7 +1674,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            WindowEvent::CloseRequested { api, .. } => {
+            // Only the main window is the project. A plugin editor is a view onto it: closing
+            // one must not prompt to save, must not clear the autosave, and must certainly not
+            // quit. `Window::emit` reaches every window, so without this guard closing an editor
+            // put the save/discard prompt in front of the main window, which then called `quit`.
+            WindowEvent::CloseRequested { api, .. } if !is_plugin_window(window.label()) => {
                 let state = window.state::<AppState>();
                 let dirty = state.doc.lock().unwrap().is_dirty();
                 if dirty && !state.force_close.load(Ordering::SeqCst) {
@@ -1655,9 +1687,13 @@ pub fn run() {
                     let _ = window.emit("close-requested", ());
                 } else {
                     state.clear_autosave();
+                    // The editors are views onto a project that is going away.
+                    close_plugin_windows(window.app_handle());
                 }
             }
-            WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
+            // A project dropped on a plugin editor is almost certainly a misfire, and opening it
+            // would replace the document the editor is looking at.
+            WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) if !is_plugin_window(window.label()) => {
                 let project = paths.iter().find(|p| {
                     matches!(
                         p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
@@ -1732,3 +1768,30 @@ pub fn run() {
 
 #[allow(dead_code)]
 fn _master_type_is_used(_: MasterSettings) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This predicate decides whether a closing window runs the project's save prompt. Getting
+    /// it backwards either loses unsaved work silently, or — as it did once — lets closing a
+    /// plugin editor put the prompt in front of the main window and take the whole app down
+    /// with it, because `Emitter::emit` reaches every window rather than just the sender.
+    #[test]
+    fn only_plugin_editors_are_treated_as_plugin_windows() {
+        let id = Uuid::new_v4();
+        assert!(is_plugin_window(&plugin_window_label(id)));
+        assert!(!is_plugin_window("main"));
+        // Any future window that is not an editor must still get the save prompt.
+        for other in ["settings", "about", "", "export"] {
+            assert!(!is_plugin_window(other), "{other:?} was mistaken for a plugin editor");
+        }
+    }
+
+    #[test]
+    fn each_track_gets_exactly_one_editor_label() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(plugin_window_label(a), plugin_window_label(a), "a track's editor label must be stable");
+        assert_ne!(plugin_window_label(a), plugin_window_label(b));
+    }
+}
