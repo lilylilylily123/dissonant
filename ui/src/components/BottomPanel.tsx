@@ -1,7 +1,7 @@
 import { dbText, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { DRUM_KIT, trackColor, type MasterSettings, type Track, type TrackParam } from "../types";
 import { eqDb, hz, Knob, lin, log, panText, pct } from "./Knob";
-import { InstrumentPicker, PluginBrowser, PluginParams } from "./PluginBrowser";
+import { InstrumentPicker, PluginParams } from "./PluginBrowser";
 import { VMeter } from "./Meter";
 
 const VOL = lin(0, 1.5);
@@ -27,7 +27,6 @@ export function BottomPanel() {
       <div className="ptabs">
         <div className={`ptab${panel === "devices" ? " on" : ""}`} onClick={() => setBottomPanel("devices")}>devices</div>
         <div className={`ptab${panel === "mixer" ? " on" : ""}`} onClick={() => setBottomPanel("mixer")}>mixer</div>
-        <div className={`ptab${panel === "plugins" ? " on" : ""}`} onClick={() => setBottomPanel("plugins")}>plugins</div>
         <div style={{ width: 1, height: 14, background: "var(--line-1)", margin: "0 8px" }} />
         {track && (
           <>
@@ -41,7 +40,7 @@ export function BottomPanel() {
           </>
         )}
       </div>
-      {panel === "devices" ? <Devices /> : panel === "mixer" ? <Mixer /> : <PluginBrowser />}
+      {panel === "devices" ? <Devices /> : <Mixer />}
     </div>
   );
 }

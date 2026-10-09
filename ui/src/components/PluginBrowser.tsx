@@ -55,7 +55,7 @@ export function InstrumentPicker({ columns }: { columns: number }) {
       {instruments.length === 0 ? (
         <div className="help">
           nothing installed yet —{" "}
-          <button className="quiet" onClick={openPluginBrowser}>
+          <button className="quiet" onClick={() => openPluginBrowser(true)}>
             find a free one
           </button>
         </div>
@@ -71,6 +71,11 @@ export function InstrumentPicker({ columns }: { columns: number }) {
               {p.name}
             </button>
           ))}
+          {/* Wanting a sound you do not have yet is the normal case, so the way to go looking
+              sits with the instruments rather than only in a menu. */}
+          <button className="chip quiet" onClick={() => openPluginBrowser(true)} title="browse free plugins">
+            + find more
+          </button>
         </div>
       )}
       {missing && (
@@ -83,7 +88,7 @@ export function InstrumentPicker({ columns }: { columns: number }) {
           </div>
           <div className="help">this track asks for a plugin that is not here. install it, or go back to a built-in voice.</div>
           <div className="row" style={{ gap: 4 }}>
-            <button onClick={openPluginBrowser}>browse plugins</button>
+            <button onClick={() => openPluginBrowser(true)}>browse plugins</button>
             <button className="quiet" onClick={() => void pickBuiltIn(track.isDrum ? null : track.voice)}>
               use the built-in voice
             </button>
@@ -367,6 +372,45 @@ export function PluginBrowser() {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+/**
+ * The browser as an overlay, reachable from anywhere.
+ *
+ * It used to live only in the bottom panel, which exists in song mode alone — so from the piano
+ * roll, where you are when you notice you need a different sound, there was no plugin browser
+ * at all. Finding a sound is not a reason to change what the window is showing.
+ */
+export function PluginBrowserWindow() {
+  const open = useStore((s) => s.pluginBrowserOpen);
+  const setOpen = useStore((s) => s.openPluginBrowser);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, setOpen]);
+
+  if (!open) return null;
+  return (
+    <div className="modal-backdrop" onPointerDown={() => setOpen(false)}>
+      <div className="modal plugins" role="dialog" aria-modal="true" aria-label="Free plugins" onPointerDown={(e) => e.stopPropagation()}>
+        <div className="shead">
+          <span className="mtitle">Free plugins</span>
+          <span className="spacer" />
+          <button className="ico" onClick={() => setOpen(false)} title="close (Esc)">
+            ×
+          </button>
+        </div>
+        <PluginBrowser />
       </div>
     </div>
   );

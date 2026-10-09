@@ -1953,6 +1953,26 @@ select {
   gap: 0;
   overflow: hidden;
 }
+/* The plugin browser is a list you read, not a form you fill: it wants width for the summaries
+   and height for the rows, and it scrolls internally. */
+.modal.plugins {
+  width: 860px;
+  height: min(620px, calc(100vh - 80px));
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.modal.plugins .shead {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  height: 34px;
+  border-bottom: 1px solid var(--line-1);
+}
+.modal.plugins .browser {
+  flex: 1;
+  min-height: 0;
+}
 .settings .shead {
   display: flex;
   align-items: center;

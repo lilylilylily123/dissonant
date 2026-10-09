@@ -27,7 +27,7 @@ export interface DialogSpec {
   input?: { placeholder?: string; value?: string };
 }
 
-export type BottomPanel = "devices" | "mixer" | "plugins";
+export type BottomPanel = "devices" | "mixer";
 export type LiveKeyboard = "off" | "tier" | "chromatic";
 
 interface State {
@@ -188,8 +188,10 @@ interface State {
   openUrl(url: string): Promise<void>;
   /** Open (or raise) the separate window holding one track's plugin controls. */
   openPluginWindow(trackId: string): Promise<void>;
-  /** Show the plugin browser, switching to the mode that has a bottom panel if needed. */
-  openPluginBrowser(): void;
+  /** The free-plugin browser is an overlay, like settings and export: finding a sound is
+   *  something you do from wherever you are, not a reason to change what the window shows. */
+  pluginBrowserOpen: boolean;
+  openPluginBrowser(open?: boolean): void;
 }
 
 /** Push the appearance section into CSS variables, the live tier palette and the page zoom. */
@@ -297,6 +299,7 @@ export const useStore = create<State>((set, get) => {
     recent: [],
     settings: DEFAULT_SETTINGS,
     settingsOpen: false,
+    pluginBrowserOpen: false,
     outputDevices: [],
     dialogText: "",
     exportOpen: false,
@@ -925,10 +928,8 @@ export const useStore = create<State>((set, get) => {
         get().showToast(String(e), true);
       }
     },
-    openPluginBrowser() {
-      // The browser lives in the bottom panel, which only exists in song mode.
-      if (get().mode !== "song") get().setMode("song");
-      set({ bottomPanel: "plugins" });
+    openPluginBrowser(open = true) {
+      set({ pluginBrowserOpen: open });
     },
   };
 });

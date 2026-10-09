@@ -9,6 +9,7 @@ import { Inspector } from "./components/Inspector";
 import { Editor } from "./components/Editor";
 import { Dialog } from "./components/Dialog";
 import { SettingsWindow } from "./components/Settings";
+import { PluginBrowserWindow } from "./components/PluginBrowser";
 import { ExportDialog, ExportProgressBar } from "./components/ExportDialog";
 import { TemplatePicker } from "./components/TemplatePicker";
 import { useStore } from "./store";
@@ -126,6 +127,7 @@ export default function App() {
       <StatusBar />
       {toast && <div className={`toast${toast.error ? " error" : ""}`}>{toast.text}</div>}
       <SettingsWindow />
+      <PluginBrowserWindow />
       <ExportDialog />
       <TemplatePicker />
       <ExportProgressBar />

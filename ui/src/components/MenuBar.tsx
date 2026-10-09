@@ -85,6 +85,8 @@ export function MenuBar() {
       { label: `${s.showLandscape ? "✓ " : ""}Harmonic map`, action: () => s.toggleLandscape() },
       { label: `${s.hearChords ? "✓ " : ""}Hear chord bed`, action: () => s.toggleHearChords() },
       { sep: true },
+      { label: "Free plugins…", action: () => s.openPluginBrowser(true) },
+      { sep: true },
       { label: "Zoom in", sc: `${mod}=`, action: () => s.setZoom(s.zoom * 1.25) },
       { label: "Zoom out", sc: `${mod}-`, action: () => s.setZoom(s.zoom / 1.25) },
     ],
