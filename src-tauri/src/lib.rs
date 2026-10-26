@@ -2,14 +2,24 @@
 //! and streams the playhead back as events. All model edits go through `apply`, which keeps
 //! undo/redo in one place and re-feeds the engine a fresh [`Sequence`] after every change.
 
+pub mod audio_files;
 pub mod plugins;
+pub mod recording;
 pub mod settings;
 
 use dissonant_catalog::{install, CatalogEntry, InstallEvent, Platform};
-use dissonant_core::{midi_file, Command, Document, MasterSettings, MidiScope, NoteEvent, ProjectModel, Sequence, TrackPlugin};
-use dissonant_engine::{default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, EngineCommand, RenderOptions};
+use dissonant_core::{
+    bar_ticks, midi_file, Command, Document, Insert, InsertTarget, MasterSettings, MidiScope, NoteEvent, ProjectModel,
+    Sequence, TrackPlugin, TICKS_PER_BEAT,
+};
+use dissonant_engine::audio::{AudioBuffer, AudioPool};
+use dissonant_engine::{
+    default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, AudioInput, EngineCommand, EngineIo,
+    InputDeviceInfo, InsertSlot, RenderOptions,
+};
 use dissonant_plugins::{ParamInfo, PluginDescriptor, PluginFormat};
 use plugins::PluginHostThread;
+use recording::TakeWriter;
 use settings::{NewProjectKind, Settings};
 use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
@@ -37,6 +47,7 @@ struct PlaybackContext {
     live_track: Option<Uuid>,
     /// Mirrors of engine transport settings, re-sent when the audio device restarts.
     looping: bool,
+    /// Loop sub-range in ticks.
     loop_region: Option<(f64, f64)>,
     metronome: bool,
     metronome_volume: f32,
@@ -57,12 +68,12 @@ impl Default for PlaybackContext {
     }
 }
 
-/// Record-arm state. Held notes are keyed by (track, pitch) with their start beat + velocity.
+/// Record-arm state. Held notes are keyed by (track, pitch) with their start tick + velocity.
 #[derive(Default)]
 struct Recorder {
     armed: bool,
-    /// Grid to snap recorded note starts to (0 = off).
-    quantize: f64,
+    /// Grid in ticks to snap recorded note starts to (0 = off).
+    quantize: i64,
     held: HashMap<(Uuid, u8), (f64, u8)>,
 }
 
@@ -87,9 +98,29 @@ pub struct AppState {
     settings: Mutex<Settings>,
     /// Every loaded plugin, pinned to its own thread; see `plugins` for why.
     plugin_host: PluginHostThread,
-    /// What each track currently has loaded, so reconciling after undo or a project open can
-    /// skip the tracks that are already right — loading a plugin costs hundreds of milliseconds.
+    /// What is loaded under each key — a track id for its instrument, an insert id for an
+    /// effect — so reconciling after undo or a project open can skip what is already right:
+    /// loading a plugin costs hundreds of milliseconds.
     loaded_plugin_uids: Mutex<HashMap<Uuid, String>>,
+    /// The insert ids the engine is holding for each chain, in the order it holds them: `None`
+    /// is the master's chain, `Some(track)` a track's. Without it a reconcile could not tell a
+    /// reorder from an add, and would reload plugins that only moved.
+    loaded_insert_chains: Mutex<HashMap<Option<Uuid>, Vec<Uuid>>>,
+    /// The live capture stream, when one is open. Independent of the output device: losing
+    /// the input must not take playback down with it.
+    input: Mutex<Option<AudioInput>>,
+    input_error: Mutex<Option<String>>,
+    /// Drains the engine's capture ring to disk.
+    takes: Mutex<Option<TakeWriter>>,
+    /// Decoded audio sources, shared by `Arc` with the engine's pool.
+    audio_cache: Mutex<HashMap<Uuid, Arc<AudioBuffer>>>,
+    /// Waveform envelopes, computed once per source.
+    peak_cache: Mutex<HashMap<Uuid, Arc<Vec<[f32; 2]>>>>,
+    /// Which audio track hears the input, and whether it is monitored.
+    armed_audio: Mutex<(Option<Uuid>, bool)>,
+    /// The source id the current take is being written to.
+    recording_source: Mutex<Option<Uuid>>,
+    importing: AtomicBool,
 }
 
 /// What every editing command returns to the UI.
@@ -148,12 +179,16 @@ const MAX_RECENT: usize = 12;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayheadEvent {
-    pub beat: f64,
+    pub tick: f64,
     pub playing: bool,
     pub master_peak: [f32; 2],
     pub track_peaks: Vec<f32>,
     /// Beats of count-in left (0 when not counting in).
     pub count_in: f32,
+    /// Peak of the live input (0 when nothing is captured).
+    pub input_peak: f32,
+    /// True while a take is actually being captured.
+    pub recording: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +207,16 @@ pub struct AudioStatus {
     /// 0…1+: render time over block time, smoothed.
     pub load: f32,
     pub xruns: u32,
+    /// The capture device in use, if one opened.
+    pub input_device: Option<String>,
+    /// Why the capture device did not open, if it did not.
+    pub input_error: Option<String>,
+    /// Input latency implied by the block size, in ms.
+    pub input_latency_ms: f64,
+    /// What a guitarist actually feels: in plus out.
+    pub round_trip_ms: f64,
+    /// Blocks in which the input ring ran dry.
+    pub input_underruns: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +249,15 @@ impl AppState {
             // thread starts cacheless and `set_data_dir` is not worth the churn for one file.
             plugin_host: PluginHostThread::spawn(dirs::cache_dir().map(|d| d.join("dissonant").join("plugin-scan.json"))),
             loaded_plugin_uids: Mutex::new(HashMap::new()),
+            loaded_insert_chains: Mutex::new(HashMap::new()),
+            input: Mutex::new(None),
+            input_error: Mutex::new(None),
+            takes: Mutex::new(None),
+            audio_cache: Mutex::new(HashMap::new()),
+            peak_cache: Mutex::new(HashMap::new()),
+            armed_audio: Mutex::new((None, false)),
+            recording_source: Mutex::new(None),
+            importing: AtomicBool::new(false),
         }
     }
 
@@ -233,7 +287,7 @@ impl AppState {
 
     fn engine_position(&self) -> Option<(f64, bool)> {
         let audio = self.audio.lock().unwrap();
-        audio.as_ref().map(|a| (a.shared().position_beats(), a.shared().is_playing()))
+        audio.as_ref().map(|a| (a.shared().position_ticks(), a.shared().is_playing()))
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -254,6 +308,17 @@ impl AppState {
         let shared = audio.as_ref().map(|a| a.shared());
         let block = shared.map(|s| s.block_frames()).unwrap_or(0);
         let sr = audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
+        let latency_ms = if sr > 0 { block as f64 * 1000.0 / sr as f64 } else { 0.0 };
+        let input = self.input.lock().unwrap();
+        // What the player actually feels: the capture block, whatever the engine is still
+        // holding in the ring, and the playback block. Reporting only the two block sizes
+        // understates it by however much slack the ring is carrying.
+        let queued = shared.map(|s| s.input_backlog()).unwrap_or(0);
+        let input_latency_ms = if input.is_some() && sr > 0 {
+            (block as f64 + queued as f64) * 1000.0 / sr as f64
+        } else {
+            0.0
+        };
         AudioStatus {
             running: audio.is_some(),
             sample_rate: audio.as_ref().map(|a| a.sample_rate),
@@ -261,9 +326,14 @@ impl AppState {
             device_name: audio.as_ref().map(|a| a.device_name.clone()),
             buffer_size: audio.as_ref().and_then(|a| a.buffer_size),
             block_frames: block,
-            latency_ms: if sr > 0 { block as f64 * 1000.0 / sr as f64 } else { 0.0 },
+            latency_ms,
             load: shared.map(|s| s.load()).unwrap_or(0.0),
             xruns: shared.map(|s| s.xruns()).unwrap_or(0),
+            input_device: input.as_ref().map(|i| i.device_name.clone()),
+            input_error: self.input_error.lock().unwrap().clone(),
+            input_latency_ms,
+            round_trip_ms: latency_ms + input_latency_ms,
+            input_underruns: shared.map(|s| s.input_underruns()).unwrap_or(0),
         }
     }
 
@@ -286,17 +356,67 @@ impl AppState {
     /// it was. Returns the new status.
     fn restart_audio(&self) -> AudioStatus {
         let was = self.engine_position();
+        // Order matters: the input and take writer hold the far ends of the engine's rings,
+        // so they go before the device that owns the engine.
+        *self.input.lock().unwrap() = None;
+        *self.takes.lock().unwrap() = None;
         *self.audio.lock().unwrap() = None;
         self.start_audio();
         self.sync_engine();
+        self.sync_audio_pool();
+        // The new engine starts with empty chains, and its plugins have to be re-opened for
+        // whatever rate the new device came up at. Forgetting what the old engine held is what
+        // makes the reconcile below rebuild every chain instead of thinking it is already right.
+        self.loaded_insert_chains.lock().unwrap().clear();
+        self.sync_inserts(true);
         self.resend_transport();
-        if let Some((beat, playing)) = was {
-            self.send(EngineCommand::Seek { beat });
+        let (armed, monitor) = *self.armed_audio.lock().unwrap();
+        self.send(EngineCommand::SetAudioArm { track_id: armed, monitor });
+        if let Some((tick, playing)) = was {
+            self.send(EngineCommand::Seek { tick });
             if playing {
                 self.send(EngineCommand::Play);
             }
         }
         self.audio_status()
+    }
+
+    /// Hand the engine every decoded source the model refers to.
+    ///
+    /// Modelled on `sync_plugins`: the cache is keyed by source id, a miss is filled from the
+    /// audio store, and a file that is gone is logged and skipped — the clip stays visible and
+    /// plays silence rather than taking the project down.
+    fn sync_audio_pool(&self) {
+        let wanted: Vec<Uuid> = self.doc.lock().unwrap().model().audio_sources.iter().map(|s| s.id).collect();
+        if wanted.is_empty() {
+            self.send(EngineCommand::SetAudioPool(Arc::new(AudioPool::default())));
+            return;
+        }
+        let Some(dir) = self.data_dir().map(|d| audio_files::store_dir(&d)) else { return };
+        let mut cache = self.audio_cache.lock().unwrap();
+        for id in &wanted {
+            if cache.contains_key(id) {
+                continue;
+            }
+            match audio_files::read_source(&dir, *id) {
+                Ok(buffer) => {
+                    cache.insert(*id, Arc::new(buffer));
+                }
+                Err(e) => log::warn!("audio source {id} is missing: {e}"),
+            }
+        }
+        // Sources nothing refers to any more stay on disk (undo may want them back) but need
+        // not stay in memory.
+        cache.retain(|id, _| wanted.contains(id));
+        let sources: HashMap<Uuid, Arc<AudioBuffer>> = cache.iter().map(|(k, v)| (*k, Arc::clone(v))).collect();
+        drop(cache);
+        self.send(EngineCommand::SetAudioPool(Arc::new(AudioPool::new(sources))));
+    }
+
+    /// The pool as the offline renderer wants it, for export.
+    fn audio_pool(&self) -> Arc<AudioPool> {
+        let cache = self.audio_cache.lock().unwrap();
+        Arc::new(AudioPool::new(cache.iter().map(|(k, v)| (*k, Arc::clone(v))).collect()))
     }
 
     // ── Files on disk: recent list and autosave ───────────────────────────────────────────
@@ -436,9 +556,13 @@ impl AppState {
         }
         self.playback.lock().unwrap().pattern_id = None;
         self.send(EngineCommand::Stop);
-        self.send(EngineCommand::Seek { beat: 0.0 });
+        self.send(EngineCommand::Seek { tick: 0.0 });
         self.sync_engine();
         self.sync_plugins();
+        // A freshly opened project's sources are still on disk, not in memory.
+        self.audio_cache.lock().unwrap().clear();
+        self.peak_cache.lock().unwrap().clear();
+        self.sync_audio_pool();
     }
 
     fn send(&self, cmd: EngineCommand) {
@@ -461,7 +585,17 @@ impl AppState {
         self.send(EngineCommand::SetMaster(master));
     }
 
-    /// Make the plugin host match what the document says each track should be hosting.
+    /// The rate the engine activates plugins for: what it is actually running at, or — with no
+    /// device open yet — the rate it will come up on. 48k is cpal's own fallback.
+    fn plugin_sample_rate(&self) -> f64 {
+        self.audio_status()
+            .sample_rate
+            .or(self.settings().audio.sample_rate)
+            .unwrap_or(48_000) as f64
+    }
+
+    /// Make the plugin host match what the document says each track should be hosting, as an
+    /// instrument and as a chain of effects.
     ///
     /// Called after anything that can rewrite tracks wholesale — opening a project, undo, redo,
     /// restoring an autosave. Loading is slow, so a track already hosting the right plugin is
@@ -472,11 +606,7 @@ impl AppState {
             let doc = self.doc.lock().unwrap();
             doc.model().tracks.iter().map(|t| (t.id, t.plugin.clone())).collect()
         };
-        let sample_rate = self
-            .audio_status()
-            .sample_rate
-            .or(self.settings().audio.sample_rate)
-            .unwrap_or(48_000) as f64;
+        let sample_rate = self.plugin_sample_rate();
         for (track_id, plugin) in wanted {
             let Some(plugin) = plugin else {
                 self.plugin_host.close(track_id);
@@ -509,18 +639,176 @@ impl AppState {
                 }
             }
         }
+        self.sync_inserts(true);
     }
 
+    /// Make the engine's insert chains — every track's, and the master's — match the document.
+    ///
+    /// Diffs by slot id rather than rebuilding: a chain that only moved an effect sends a
+    /// `MoveInsert` and keeps the plugin exactly where it was, parameters and all. A slot whose
+    /// plugin is not installed keeps its place with no unit, so the order of everything after
+    /// it survives, and is retried on the next reconcile in case it has since been installed.
+    ///
+    /// `restore_state` pushes each slot's saved blob back into its plugin, which is what undo,
+    /// redo and opening a project need. The insert commands pass `false`: re-feeding a stored
+    /// blob mid-session would throw away a knob move that has not been committed yet.
+    fn sync_inserts(&self, restore_state: bool) {
+        let wanted: Vec<(Option<Uuid>, Vec<Insert>)> = {
+            let doc = self.doc.lock().unwrap();
+            let model = doc.model();
+            let mut chains: Vec<(Option<Uuid>, Vec<Insert>)> =
+                model.tracks.iter().map(|t| (Some(t.id), t.inserts.clone())).collect();
+            chains.push((None, model.master_inserts.clone()));
+            chains
+        };
+        let sample_rate = self.plugin_sample_rate();
+
+        self.prune_insert_chains();
+
+        for (key, inserts) in wanted {
+            let target = key.map_or(InsertTarget::Master, InsertTarget::Track);
+            let mut have = self.loaded_insert_chains.lock().unwrap().get(&key).cloned().unwrap_or_default();
+
+            // Slots the document no longer has.
+            have.retain(|id| {
+                if inserts.iter().any(|i| i.id == *id) {
+                    return true;
+                }
+                self.send(EngineCommand::RemoveInsert { target, id: *id });
+                self.release_insert(*id);
+                false
+            });
+
+            for (index, insert) in inserts.iter().enumerate() {
+                // A slot whose plugin never loaded is torn down and tried again: installing the
+                // effect and reopening the project is then enough to get the sound back.
+                let loaded = self.loaded_plugin_uids.lock().unwrap().get(&insert.id).cloned();
+                if loaded.as_deref() != Some(insert.uid.as_str()) {
+                    if let Some(at) = have.iter().position(|id| *id == insert.id) {
+                        self.send(EngineCommand::RemoveInsert { target, id: insert.id });
+                        self.release_insert(insert.id);
+                        have.remove(at);
+                    }
+                }
+                match have.iter().position(|id| *id == insert.id) {
+                    Some(at) if at == index => {}
+                    Some(at) => {
+                        self.send(EngineCommand::MoveInsert { target, id: insert.id, to: index });
+                        let id = have.remove(at);
+                        have.insert(index.min(have.len()), id);
+                    }
+                    None => {
+                        let unit = self.open_insert(insert, sample_rate);
+                        let mut slot = InsertSlot::new(insert.id, unit);
+                        slot.enabled = insert.enabled;
+                        self.send(EngineCommand::AddInsert { target, index, slot });
+                        have.insert(index.min(have.len()), insert.id);
+                    }
+                }
+                self.send(EngineCommand::SetInsertEnabled { target, id: insert.id, on: insert.enabled });
+                if restore_state {
+                    if let Some(state) = insert.state.as_deref().and_then(b64_decode) {
+                        if let Err(e) = self.plugin_host.load_state(insert.id, state) {
+                            log::warn!("could not restore insert state for {}: {e}", insert.uid);
+                        }
+                    }
+                }
+            }
+            self.loaded_insert_chains.lock().unwrap().insert(key, have);
+        }
+    }
+
+    /// Forget the chains of tracks that no longer exist, releasing their plugins.
+    ///
+    /// A deleted track takes its channel — and with it the engine's copy of its chain — away on
+    /// the next sequence rebuild, so the record of what the engine holds has to go too.
+    /// Otherwise undoing the delete would find the chain "already loaded" and bring the track
+    /// back silent.
+    fn prune_insert_chains(&self) {
+        let live: Vec<Uuid> = self.doc.lock().unwrap().model().tracks.iter().map(|t| t.id).collect();
+        let dropped: Vec<Uuid> = {
+            let mut chains = self.loaded_insert_chains.lock().unwrap();
+            let mut gone = Vec::new();
+            chains.retain(|key, ids| match key {
+                Some(track_id) if !live.contains(track_id) => {
+                    gone.extend(ids.iter().copied());
+                    false
+                }
+                _ => true,
+            });
+            gone
+        };
+        for id in dropped {
+            self.release_insert(id);
+        }
+    }
+
+    /// Load one insert's plugin, or report why it could not be loaded and leave the slot empty.
+    ///
+    /// A project naming an effect this machine does not have keeps the slot and its name, the
+    /// same bargain a missing instrument gets: losing the reference would be worse than playing
+    /// the chain without it.
+    fn open_insert(&self, insert: &Insert, sample_rate: f64) -> Option<Box<dissonant_plugins::PluginAudioUnit>> {
+        match self.plugin_host.open(insert.id, &insert.uid, sample_rate) {
+            Ok((unit, _)) => {
+                self.loaded_plugin_uids.lock().unwrap().insert(insert.id, insert.uid.clone());
+                Some(Box::new(unit))
+            }
+            Err(e) => {
+                log::warn!("could not load insert {} ({}): {e}", insert.name, insert.uid);
+                self.loaded_plugin_uids.lock().unwrap().remove(&insert.id);
+                None
+            }
+        }
+    }
+
+    /// Drop whatever an insert id was holding on the plugin thread.
+    fn release_insert(&self, id: Uuid) {
+        self.plugin_host.close(id);
+        self.loaded_plugin_uids.lock().unwrap().remove(&id);
+    }
+
+    /// Open the output device, then the capture device and the take writer that hang off it.
+    ///
+    /// The input is secondary: if it fails, playback still runs and the guitar screen shows
+    /// why. The reverse is not true — the engine owns both rings, so there is no input
+    /// without an output device.
     fn start_audio(&self) {
         let master = self.doc.lock().unwrap().model().master.clone();
-        match AudioDevice::start_with(master, self.audio_config()) {
+        let config = self.audio_config();
+        // Half a second of input slack and four seconds of take buffer: enough that a stalled
+        // writer thread never costs recorded audio, small enough to be a rounding error in RAM.
+        let nominal = config.sample_rate.unwrap_or(48_000) as usize;
+        let (in_prod, in_cons) = rtrb::RingBuffer::<f32>::new(nominal / 2);
+        let (cap_prod, cap_cons) = rtrb::RingBuffer::<f32>::new(nominal * 4);
+        let io = EngineIo { input: in_cons, capture: cap_prod };
+
+        match AudioDevice::start_with(master, config.clone(), Some(io)) {
             Ok(device) => {
+                let rate = device.sample_rate;
+                let block = device.buffer_size;
                 *self.audio.lock().unwrap() = Some(device);
                 *self.audio_error.lock().unwrap() = None;
+
+                let settings = self.settings().audio;
+                match AudioInput::start_with(settings.input_device.as_deref(), rate, block, settings.input_channel, in_prod) {
+                    Ok(input) => {
+                        log::info!("capturing from {} at {rate} Hz", input.device_name);
+                        *self.input.lock().unwrap() = Some(input);
+                        *self.input_error.lock().unwrap() = None;
+                    }
+                    Err(e) => {
+                        log::warn!("no audio input: {e}");
+                        *self.input.lock().unwrap() = None;
+                        *self.input_error.lock().unwrap() = Some(e.to_string());
+                    }
+                }
+                *self.takes.lock().unwrap() = Some(TakeWriter::spawn(cap_cons));
             }
             Err(e) => {
                 log::error!("audio device failed to start: {e}");
                 *self.audio_error.lock().unwrap() = Some(e.to_string());
+                *self.input_error.lock().unwrap() = Some("no audio device".into());
             }
         }
     }
@@ -535,7 +823,8 @@ fn autosave_path_for(project: &std::path::Path) -> PathBuf {
 
 fn build_sequence(model: &ProjectModel, mode: PlayMode, pattern_id: Option<Uuid>) -> Sequence {
     match mode {
-        PlayMode::Song if !model.clips.is_empty() => Sequence::from_song(model),
+        // A song with nothing but a guitar take is still a song.
+        PlayMode::Song if !(model.clips.is_empty() && model.audio_clips.is_empty()) => Sequence::from_song(model),
         _ => {
             let pid = pattern_id
                 .filter(|id| model.pattern(id).is_some())
@@ -555,6 +844,19 @@ fn get_state(state: State<'_, AppState>) -> Snapshot {
 
 #[tauri::command]
 fn apply(state: State<'_, AppState>, command: Command, transient: Option<bool>, label: Option<String>) -> Result<Snapshot, String> {
+    // Only `AddAudioTake` can introduce a source; everything else leaves the pool alone, and
+    // re-reading the store on every knob drag would be absurd.
+    let touches_audio = matches!(command, Command::AddAudioTake { .. });
+    // The dedicated insert commands below reconcile themselves, but an insert edit can also
+    // arrive here, and deleting a track takes a whole chain with it.
+    let touches_chains = matches!(
+        command,
+        Command::AddInsert { .. }
+            | Command::RemoveInsert { .. }
+            | Command::MoveInsert { .. }
+            | Command::SetInsertEnabled { .. }
+            | Command::DeleteTrack { .. }
+    );
     state
         .doc
         .lock()
@@ -562,6 +864,12 @@ fn apply(state: State<'_, AppState>, command: Command, transient: Option<bool>, 
         .apply_labeled(command, transient.unwrap_or(false), label)
         .map_err(|e| e.to_string())?;
     state.sync_engine();
+    if touches_audio {
+        state.sync_audio_pool();
+    }
+    if touches_chains {
+        state.sync_inserts(false);
+    }
     Ok(state.snapshot())
 }
 
@@ -576,6 +884,9 @@ fn undo(state: State<'_, AppState>) -> Snapshot {
     state.doc.lock().unwrap().undo();
     state.sync_engine();
     state.sync_plugins();
+    // Undo can bring a take back or take one away, so the pool is re-derived rather than
+    // guessed at.
+    state.sync_audio_pool();
     state.snapshot()
 }
 
@@ -584,6 +895,7 @@ fn redo(state: State<'_, AppState>) -> Snapshot {
     state.doc.lock().unwrap().redo();
     state.sync_engine();
     state.sync_plugins();
+    state.sync_audio_pool();
     state.snapshot()
 }
 
@@ -596,27 +908,27 @@ fn new_project(state: State<'_, AppState>, starter: Option<bool>) -> Snapshot {
     let mut model = if starter { ProjectModel::starter() } else { ProjectModel::empty() };
     model.tempo = e.default_tempo;
     model.time_signature = e.default_time_signature;
-    let beats = e.default_pattern_bars as f64 * e.default_time_signature.beats_per_bar();
-    if beats != model.patterns[0].length_beats && !starter {
-        model.patterns[0].length_beats = beats;
-    } else if beats != model.patterns[0].length_beats {
+    let ticks = e.default_pattern_bars as i64 * bar_ticks(e.default_time_signature);
+    let current = model.patterns[0].length_ticks.max(1);
+    if ticks != current && !starter {
+        model.patterns[0].length_ticks = ticks;
+    } else if ticks != current {
         // Keep the starter's progression but stretch its chords and clip to the new length.
-        let scale = beats / model.patterns[0].length_beats;
         let chords: Vec<_> = model.patterns[0]
             .chords
             .chords()
             .iter()
             .cloned()
             .map(|mut c| {
-                c.start_beat *= scale;
-                c.length_beats *= scale;
+                c.start_tick = c.start_tick * ticks / current;
+                c.length_ticks = c.length_ticks * ticks / current;
                 c
             })
             .collect();
         model.patterns[0].chords = dissonant_core::ChordTrack::new(chords);
-        model.patterns[0].length_beats = beats;
+        model.patterns[0].length_ticks = ticks;
         for clip in &mut model.clips {
-            clip.length_beats = beats;
+            clip.length_ticks = ticks;
         }
     }
     state.load_model(model, None, false);
@@ -710,7 +1022,7 @@ fn set_playback_context(state: State<'_, AppState>, mode: PlayMode, pattern_id: 
         ctx.mode = mode;
         ctx.pattern_id = pattern_id;
         if changed {
-            state.send(EngineCommand::Seek { beat: 0.0 });
+            state.send(EngineCommand::Seek { tick: 0.0 });
         }
     }
     state.sync_engine();
@@ -745,8 +1057,8 @@ fn transport_stop(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn transport_seek(state: State<'_, AppState>, beat: f64) {
-    state.send(EngineCommand::Seek { beat });
+fn transport_seek(state: State<'_, AppState>, tick: f64) {
+    state.send(EngineCommand::Seek { tick });
 }
 
 #[tauri::command]
@@ -814,8 +1126,8 @@ fn live_note_on(app: &AppHandle, pitch: u8, velocity: u8) {
     state.midi_last_ms.store(now_ms(), Ordering::Relaxed);
     let mut rec = state.recorder.lock().unwrap();
     if rec.armed {
-        if let Some((beat, true)) = state.engine_position() {
-            rec.held.insert((track_id, pitch), (beat, velocity));
+        if let Some((tick, true)) = state.engine_position() {
+            rec.held.insert((track_id, pitch), (tick, velocity));
         }
     }
     let _ = app.emit("midi-activity", pitch);
@@ -831,7 +1143,7 @@ fn live_note_off(app: &AppHandle, pitch: u8) {
     let Some((end, _)) = state.engine_position() else { return };
     let quantize = state.recorder.lock().unwrap().quantize;
 
-    let (pattern_id, length_beats, existing) = {
+    let (pattern_id, length_ticks, existing) = {
         let ctx = state.playback.lock().unwrap();
         let doc = state.doc.lock().unwrap();
         let model = doc.model();
@@ -847,19 +1159,21 @@ fn live_note_off(app: &AppHandle, pitch: u8) {
         (p.id, p.track_loop(&track_id), p.notes(&track_id).to_vec())
     };
     // In song mode the engine position is a song position; fold it into the loop.
-    let start_in = start % length_beats;
+    let loop_ticks = length_ticks.max(1) as f64;
+    let start_in = start % loop_ticks;
     let mut len = end - start;
     if len < 0.0 {
-        len += length_beats; // the loop wrapped while the key was held
+        len += loop_ticks; // the loop wrapped while the key was held
     }
-    let grid = if quantize > 0.0 { quantize } else { 1.0 / 32.0 };
-    let snapped_start = (start_in / grid).round() * grid;
-    let snapped_len = ((len / grid).round() * grid).max(grid);
-    let note = NoteEvent::new(snapped_start.min(length_beats - grid).max(0.0), snapped_len, pitch as i32).with_velocity(velocity as i32);
+    let grid = if quantize > 0 { quantize } else { TICKS_PER_BEAT / 32 };
+    let snapped_start = (start_in / grid as f64).round() as i64 * grid;
+    let snapped_len = ((len / grid as f64).round() as i64 * grid).max(grid);
+    let note = NoteEvent::new(snapped_start.min(length_ticks - grid).max(0), snapped_len, pitch as i32)
+        .with_velocity(velocity as i32);
 
     let mut notes = existing;
     // Replace a note that starts on the same pitch and grid slot instead of stacking.
-    notes.retain(|n| !(n.pitch == note.pitch && (n.start_beat - note.start_beat).abs() < grid / 2.0));
+    notes.retain(|n| !(n.pitch == note.pitch && (n.start_tick - note.start_tick).abs() < grid / 2));
     notes.push(note);
     let applied = state
         .doc
@@ -976,11 +1290,11 @@ fn set_live_track(state: State<'_, AppState>, track_id: Option<Uuid>) {
 }
 
 #[tauri::command]
-fn set_record(state: State<'_, AppState>, armed: bool, quantize: Option<f64>) -> MidiStatus {
+fn set_record(state: State<'_, AppState>, armed: bool, quantize: Option<i64>) -> MidiStatus {
     let mut rec = state.recorder.lock().unwrap();
     rec.armed = armed;
     if let Some(q) = quantize {
-        rec.quantize = q.max(0.0);
+        rec.quantize = q.max(0);
     }
     if !armed {
         rec.held.clear();
@@ -1065,7 +1379,9 @@ async fn export_wav(app: AppHandle, state: State<'_, AppState>, request: ExportR
         let ctx = state.playback.lock().unwrap();
         (doc.model().clone(), ctx.pattern_id, request.hear_chords.unwrap_or(ctx.hear_chords))
     };
-    let song = request.scope != "pattern" && !model.clips.is_empty();
+    // Audio clips make it a song export even when no pattern is placed, or a guitar-only
+    // project would export silence.
+    let song = request.scope != "pattern" && !(model.clips.is_empty() && model.audio_clips.is_empty());
     let build = move |m: &ProjectModel| if song { Sequence::from_song(m) } else { build_sequence(m, PlayMode::Pattern, pattern_id) };
     let options = RenderOptions {
         sample_rate: request.sample_rate.unwrap_or(x.sample_rate),
@@ -1076,6 +1392,8 @@ async fn export_wav(app: AppHandle, state: State<'_, AppState>, request: ExportR
         normalize_db: request.normalize_db,
         dither: request.dither.unwrap_or(x.dither),
         loops: request.loops.unwrap_or(1).clamp(1, 64),
+        // Without the pool the renderer has no samples and every guitar take exports silent.
+        audio_pool: Some(state.audio_pool()),
     };
     let mix_path = PathBuf::from(&request.path);
     // Stem jobs: (file, model with only that track audible).
@@ -1148,15 +1466,15 @@ fn export_midi(state: State<'_, AppState>, path: String, scope: String) -> Resul
 #[tauri::command]
 fn import_midi(state: State<'_, AppState>, path: String, pattern_id: Uuid) -> Result<Snapshot, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
-    let bpb = state.doc.lock().unwrap().model().time_signature.beats_per_bar();
-    let imported = midi_file::import(&bytes, bpb).map_err(|e| e.to_string())?;
+    let bar = bar_ticks(state.doc.lock().unwrap().model().time_signature);
+    let imported = midi_file::import(&bytes, bar).map_err(|e| e.to_string())?;
     let count = imported.tracks.len();
     state
         .doc
         .lock()
         .unwrap()
         .apply_labeled(
-            Command::ImportTracks { pattern_id, tracks: imported.tracks, length_beats: imported.length_beats },
+            Command::ImportTracks { pattern_id, tracks: imported.tracks, length_ticks: imported.length_ticks },
             false,
             Some(format!("import {count} MIDI track{}", if count == 1 { "" } else { "s" })),
         )
@@ -1291,6 +1609,330 @@ fn test_tone(state: State<'_, AppState>) {
     state.send(EngineCommand::TestTone);
 }
 
+// ─── Guitar: input, recording and audio import ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputDevice {
+    pub name: String,
+    pub is_default: bool,
+    pub channels: u16,
+    pub default_sample_rate: u32,
+}
+
+impl From<InputDeviceInfo> for InputDevice {
+    fn from(d: InputDeviceInfo) -> Self {
+        InputDevice {
+            name: d.name,
+            is_default: d.is_default,
+            channels: d.channels,
+            default_sample_rate: d.default_sample_rate,
+        }
+    }
+}
+
+/// What the UI's progress strip reads while a file imports.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioImportProgress {
+    pub name: String,
+    pub fraction: f32,
+}
+
+#[tauri::command]
+fn input_devices() -> Vec<InputDevice> {
+    dissonant_engine::list_input_devices().into_iter().map(Into::into).collect()
+}
+
+/// Point the live input at one audio track, and say whether it is monitored through the rig.
+#[tauri::command]
+fn set_audio_arm(state: State<'_, AppState>, track_id: Option<Uuid>, monitor: bool) -> Result<AudioStatus, String> {
+    if let Some(id) = track_id {
+        let doc = state.doc.lock().unwrap();
+        match doc.model().track(&id) {
+            Some(t) if t.is_audio => {}
+            Some(_) => return Err("not an audio track".into()),
+            None => return Err("no such track".into()),
+        }
+    }
+    *state.armed_audio.lock().unwrap() = (track_id, monitor);
+    state.send(EngineCommand::SetAudioArm { track_id, monitor });
+    Ok(state.audio_status())
+}
+
+/// Arm the take writer and tell the engine to start capturing.
+///
+/// This does *not* start the transport: the UI calls `play` next, and the engine only captures
+/// once it is actually playing, so a count-in is excluded without anyone having to subtract it.
+#[tauri::command]
+fn start_audio_record(state: State<'_, AppState>) -> Result<(), String> {
+    let (armed, _) = *state.armed_audio.lock().unwrap();
+    let track_id = armed.ok_or("arm an audio track first")?;
+    if !state.doc.lock().unwrap().model().track(&track_id).is_some_and(|t| t.is_audio) {
+        return Err("the armed track is gone".into());
+    }
+    let rate = state.audio.lock().unwrap().as_ref().map(|a| a.sample_rate).ok_or("no audio device")?;
+    if state.input.lock().unwrap().is_none() {
+        return Err(state.input_error.lock().unwrap().clone().unwrap_or_else(|| "no audio input".into()));
+    }
+    let dir = state
+        .data_dir()
+        .map(|d| audio_files::store_dir(&d))
+        .ok_or("the audio store is not available")?;
+
+    let source_id = Uuid::new_v4();
+    state
+        .takes
+        .lock()
+        .unwrap()
+        .as_ref()
+        .ok_or("the take writer is not running")?
+        .start(audio_files::source_path(&dir, source_id), rate)?;
+    *state.recording_source.lock().unwrap() = Some(source_id);
+    state.send(EngineCommand::StartRecord);
+    Ok(())
+}
+
+/// Finish the take and land it as a clip, in one undo step.
+#[tauri::command]
+fn stop_audio_record(state: State<'_, AppState>) -> Result<Snapshot, String> {
+    state.send(EngineCommand::StopRecord);
+    let Some(source_id) = state.recording_source.lock().unwrap().take() else {
+        return Ok(state.snapshot());
+    };
+    // Give the audio thread one block to see the stop before the writer closes the file.
+    std::thread::sleep(Duration::from_millis(30));
+
+    let (start_tick, captured) = state
+        .audio
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|a| a.shared().take_span())
+        .unwrap_or((0.0, 0));
+    let rate = state.audio.lock().unwrap().as_ref().map(|a| a.sample_rate).unwrap_or(48_000);
+    let frames = state
+        .takes
+        .lock()
+        .unwrap()
+        .as_ref()
+        .ok_or("the take writer is not running")?
+        .stop()?
+        .min(captured.max(1));
+
+    let dir = state
+        .data_dir()
+        .map(|d| audio_files::store_dir(&d))
+        .ok_or("the audio store is not available")?;
+    if frames == 0 {
+        // Nothing was played: leave no trace rather than a zero-length clip to clean up.
+        let _ = std::fs::remove_file(audio_files::source_path(&dir, source_id));
+        return Ok(state.snapshot());
+    }
+
+    let (track_id, _) = *state.armed_audio.lock().unwrap();
+    let track_id = track_id.ok_or("the armed track went away mid-take")?;
+    let take_number = state.doc.lock().unwrap().model().audio_clips_on(track_id).count() + 1;
+
+    let source = dissonant_core::AudioSource {
+        id: source_id,
+        name: format!("take {take_number}"),
+        frames,
+        sample_rate: rate,
+        channels: 1,
+    };
+    let clip = dissonant_core::AudioClip::new(track_id, source_id, start_tick.round() as i64, frames as f64 / rate as f64);
+
+    match audio_files::read_source(&dir, source_id) {
+        Ok(buffer) => {
+            state.audio_cache.lock().unwrap().insert(source_id, Arc::new(buffer));
+        }
+        Err(e) => log::warn!("the take was written but could not be read back: {e}"),
+    }
+
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(
+            Command::AddAudioTake { track_id, source, clip },
+            false,
+            Some("record take".into()),
+        )
+        .map_err(|e| e.to_string())?;
+    state.sync_engine();
+    state.sync_audio_pool();
+    Ok(state.snapshot())
+}
+
+/// Decode a file into the audio store and place it on `track_id`.
+///
+/// With no track, a new audio track named after the file is added first — two commands, so the
+/// Edit menu shows "import audio" twice. Honest, and better than one command that has to know
+/// how to make tracks.
+#[tauri::command]
+async fn import_audio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    track_id: Option<Uuid>,
+    start_tick: Option<i64>,
+) -> Result<Snapshot, String> {
+    if state.importing.swap(true, Ordering::SeqCst) {
+        return Err("an import is already running".into());
+    }
+    let result = import_audio_inner(&app, &state, path, track_id, start_tick.unwrap_or(0)).await;
+    state.importing.store(false, Ordering::SeqCst);
+    result
+}
+
+async fn import_audio_inner(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    path: String,
+    track_id: Option<Uuid>,
+    start_tick: i64,
+) -> Result<Snapshot, String> {
+    let source_path = PathBuf::from(&path);
+    let name = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio")
+        .to_string();
+    let dir = state
+        .data_dir()
+        .map(|d| audio_files::store_dir(&d))
+        .ok_or("the audio store is not available")?;
+    let source_id = Uuid::new_v4();
+
+    let handle = app.clone();
+    let progress_name = name.clone();
+    // Decoding a long file takes seconds; the UI thread must not wait on it.
+    let decoded = tauri::async_runtime::spawn_blocking(move || {
+        let mut last = -1.0f32;
+        let mut audio = audio_files::decode(&source_path, &mut |fraction| {
+            // One event per percent: enough for a smooth bar, few enough not to flood the webview.
+            if fraction - last >= 0.01 {
+                last = fraction;
+                let _ = handle.emit(
+                    "audio-import",
+                    AudioImportProgress { name: progress_name.clone(), fraction },
+                );
+            }
+        })?;
+        audio.channels = audio.channels.min(2);
+        audio_files::write_source(&dir, source_id, &audio)?;
+        Ok::<_, String>((audio, dir))
+    })
+    .await
+    .map_err(|e| format!("the import thread failed: {e}"))??;
+    let (audio, dir) = decoded;
+
+    let frames = audio.frames() as u64;
+    if frames == 0 {
+        let _ = std::fs::remove_file(audio_files::source_path(&dir, source_id));
+        return Err("that file holds no audio".into());
+    }
+    let seconds = frames as f64 / audio.sample_rate as f64;
+
+    let track_id = match track_id {
+        Some(id) if state.doc.lock().unwrap().model().track(&id).is_some_and(|t| t.is_audio) => id,
+        _ => {
+            let stem = source_path_stem(&path);
+            state
+                .doc
+                .lock()
+                .unwrap()
+                .apply_labeled(Command::AddAudioTrack { name: stem }, false, Some("import audio".into()))
+                .map_err(|e| e.to_string())?;
+            state
+                .doc
+                .lock()
+                .unwrap()
+                .model()
+                .tracks
+                .last()
+                .map(|t| t.id)
+                .ok_or("could not add an audio track")?
+        }
+    };
+
+    match audio_files::read_source(&dir, source_id) {
+        Ok(buffer) => {
+            state.audio_cache.lock().unwrap().insert(source_id, Arc::new(buffer));
+        }
+        Err(e) => log::warn!("the import was written but could not be read back: {e}"),
+    }
+
+    let source = dissonant_core::AudioSource {
+        id: source_id,
+        name,
+        frames,
+        sample_rate: audio.sample_rate,
+        channels: audio.channels,
+    };
+    let clip = dissonant_core::AudioClip::new(track_id, source_id, start_tick.max(0), seconds);
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(
+            Command::AddAudioTake { track_id, source, clip },
+            false,
+            Some("import audio".into()),
+        )
+        .map_err(|e| e.to_string())?;
+    state.sync_engine();
+    state.sync_audio_pool();
+    Ok(state.snapshot())
+}
+
+fn source_path_stem(path: &str) -> String {
+    PathBuf::from(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio")
+        .to_string()
+}
+
+/// The waveform envelope for one source: `buckets` min/max pairs over the mono sum.
+#[tauri::command]
+fn audio_peaks(state: State<'_, AppState>, source_id: Uuid, buckets: u32) -> Vec<[f32; 2]> {
+    let buckets = buckets.clamp(1, 8192) as usize;
+    // Cached at a fixed resolution and resampled down: a lane that resizes must not redo the
+    // whole file on every frame.
+    const CACHED: usize = 4096;
+    let cached = {
+        let cache = state.peak_cache.lock().unwrap();
+        cache.get(&source_id).cloned()
+    };
+    let cached = match cached {
+        Some(c) => c,
+        None => {
+            let Some(buffer) = state.audio_cache.lock().unwrap().get(&source_id).cloned() else {
+                return vec![[0.0, 0.0]; buckets];
+            };
+            let computed = Arc::new(audio_files::peaks(&buffer, CACHED));
+            state.peak_cache.lock().unwrap().insert(source_id, Arc::clone(&computed));
+            computed
+        }
+    };
+    if buckets >= cached.len() {
+        return cached.as_ref().clone();
+    }
+    let per = cached.len() as f64 / buckets as f64;
+    (0..buckets)
+        .map(|b| {
+            let from = (b as f64 * per) as usize;
+            let to = (((b + 1) as f64 * per) as usize).clamp(from + 1, cached.len());
+            cached[from..to]
+                .iter()
+                .fold([f32::MAX, f32::MIN], |[lo, hi], [a, b]| [lo.min(*a), hi.max(*b)])
+        })
+        .map(|[lo, hi]| if lo > hi { [0.0, 0.0] } else { [lo, hi] })
+        .collect()
+}
+
 // ─── Plugins ─────────────────────────────────────────────────────────────────────────────────
 
 /// Base64 without a dependency: the plugin state blob is the only thing that needs it, and it
@@ -1373,6 +2015,165 @@ fn set_track_plugin(app: AppHandle, state: State<'_, AppState>, track_id: Uuid, 
 #[tauri::command]
 fn plugin_params(state: State<'_, AppState>, track_id: Uuid) -> Vec<ParamInfo> {
     state.plugin_host.params(track_id)
+}
+
+// ─── Insert chains ───────────────────────────────────────────────────────────────────────────
+
+/// Add an effect to a chain. The name comes from the scan, so the document carries something
+/// readable even on a machine where the plugin later goes missing; the plugin itself is loaded
+/// by the reconcile below, which is also what undo and redo go through.
+///
+/// `index` appends when absent. `label` is the undo label the UI is showing ("add Consolidated");
+/// without one the core's own wording is used.
+#[tauri::command]
+fn add_insert(
+    state: State<'_, AppState>,
+    target: InsertTarget,
+    uid: String,
+    index: Option<usize>,
+    label: Option<String>,
+) -> Result<Snapshot, String> {
+    let name = state
+        .plugin_host
+        .scan(false)
+        .into_iter()
+        .find(|d| d.uid == uid)
+        .map(|d| d.name)
+        .ok_or("no such plugin")?;
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(Command::AddInsert { target, uid, name, index }, false, label)
+        .map_err(|e| e.to_string())?;
+    state.sync_inserts(false);
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn remove_insert(
+    state: State<'_, AppState>,
+    target: InsertTarget,
+    insert_id: Uuid,
+    label: Option<String>,
+) -> Result<Snapshot, String> {
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(Command::RemoveInsert { target, insert_id }, false, label)
+        .map_err(|e| e.to_string())?;
+    state.sync_inserts(false);
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn move_insert(
+    state: State<'_, AppState>,
+    target: InsertTarget,
+    insert_id: Uuid,
+    to_index: usize,
+    label: Option<String>,
+) -> Result<Snapshot, String> {
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(Command::MoveInsert { target, insert_id, to_index }, false, label)
+        .map_err(|e| e.to_string())?;
+    state.sync_inserts(false);
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn set_insert_enabled(
+    state: State<'_, AppState>,
+    target: InsertTarget,
+    insert_id: Uuid,
+    on: bool,
+    label: Option<String>,
+) -> Result<Snapshot, String> {
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(Command::SetInsertEnabled { target, insert_id, on }, false, label)
+        .map_err(|e| e.to_string())?;
+    state.sync_inserts(false);
+    Ok(state.snapshot())
+}
+
+/// One insert's parameters. An id nothing is loaded under answers with an empty list rather than
+/// an error: the UI fetches these as the selection moves, and a fetch can land after a removal.
+#[tauri::command]
+fn insert_params(state: State<'_, AppState>, insert_id: Uuid) -> Vec<ParamInfo> {
+    state.plugin_host.params(insert_id)
+}
+
+/// A parameter move on an insert, with the same bargain as `set_plugin_param`: while the knob is
+/// being dragged (`commit` false) it only reaches the audio thread, and on release the plugin's
+/// state is read once and recorded as a single undo step.
+#[tauri::command]
+fn set_insert_param(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    insert_id: Uuid,
+    param_id: u32,
+    value: f64,
+    commit: Option<bool>,
+) -> Result<Option<Snapshot>, String> {
+    state.send(EngineCommand::SetInsertParam { id: insert_id, param_id, value });
+    if !commit.unwrap_or(false) {
+        return Ok(None);
+    }
+    let Some(bytes) = state.plugin_host.save_state(insert_id) else {
+        // An effect with no state extension still sounds right; there is simply nothing to
+        // record, so the move is not undoable. Saying so beats inventing a blob.
+        return Ok(None);
+    };
+    // Which chain the slot lives in is the document's business, not the UI's: a knob knows its
+    // own insert and nothing else.
+    let (target, name) = {
+        let doc = state.doc.lock().unwrap();
+        let target = insert_target_of(doc.model(), insert_id).ok_or("no such insert")?;
+        let name = insert_in(doc.model(), target, insert_id).map(|i| i.name.clone()).unwrap_or_default();
+        (target, name)
+    };
+    state
+        .doc
+        .lock()
+        .unwrap()
+        .apply_labeled(
+            Command::SetInsertState { target, insert_id, state: b64_encode(&bytes) },
+            false,
+            Some(format!("{name} settings")),
+        )
+        .map_err(|e| e.to_string())?;
+    let snapshot = state.snapshot();
+    // Mirrors `set_plugin_param`: the edit can come from a window that is not the one holding
+    // the undo history, so everyone is told.
+    let _ = app.emit("document", snapshot.clone());
+    Ok(Some(snapshot))
+}
+
+/// The chain an insert id belongs to, searched the only way the app can: by looking.
+fn insert_target_of(model: &ProjectModel, insert_id: Uuid) -> Option<InsertTarget> {
+    if model.master_inserts.iter().any(|i| i.id == insert_id) {
+        return Some(InsertTarget::Master);
+    }
+    model
+        .tracks
+        .iter()
+        .find(|t| t.inserts.iter().any(|i| i.id == insert_id))
+        .map(|t| InsertTarget::Track(t.id))
+}
+
+fn insert_in(model: &ProjectModel, target: InsertTarget, insert_id: Uuid) -> Option<&Insert> {
+    let chain = match target {
+        InsertTarget::Master => &model.master_inserts,
+        InsertTarget::Track(id) => &model.track(&id)?.inserts,
+    };
+    chain.iter().find(|i| i.id == insert_id)
 }
 
 /// Plugin editor windows are labelled `plugin-<track id>`, so one track can only ever have one.
@@ -1537,7 +2338,7 @@ fn spawn_playhead_emitter(app: AppHandle) {
                     let audio = state.audio.lock().unwrap();
                     let Some(device) = audio.as_ref() else { continue };
                     let shared = device.shared();
-                    let beat = shared.position_beats();
+                    let tick = shared.position_ticks();
                     let playing = shared.is_playing();
                     let (l, r) = shared.master_peak();
                     let track_count = state
@@ -1550,15 +2351,21 @@ fn spawn_playhead_emitter(app: AppHandle) {
                         .min(dissonant_engine::MAX_TRACKS);
                     let track_peaks = (0..track_count).map(|i| shared.track_peak(i)).collect();
                     PlayheadEvent {
-                        beat,
+                        tick,
                         playing,
                         master_peak: [l, r],
                         track_peaks,
                         count_in: shared.count_in_beats(),
+                        input_peak: shared.input_peak(),
+                        recording: shared.is_recording(),
                     }
                 };
-                let key = (payload.beat.to_bits(), payload.playing);
-                if last == Some(key) && payload.master_peak == [0.0, 0.0] && payload.count_in == 0.0 {
+                let key = (payload.tick.to_bits(), payload.playing);
+                // The input meter and the recording light ride this event too, so a block
+                // that moved neither the playhead nor the meters but has signal on the input
+                // still has to go out.
+                let quiet = payload.master_peak == [0.0, 0.0] && payload.count_in == 0.0 && payload.input_peak == 0.0 && !payload.recording;
+                if last == Some(key) && quiet {
                     continue; // nothing moved; don't spam the webview
                 }
                 last = Some(key);
@@ -1642,6 +2449,10 @@ pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     tauri::Builder::default()
+        // Reopen where it was last closed, on whatever monitor that was. Without this the OS
+        // places the window itself, which under `tauri dev` means it lands on the primary
+        // display again after every rebuild.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
@@ -1702,6 +2513,12 @@ pub fn run() {
                 });
                 if let Some(p) = project {
                     let _ = window.emit("file-dropped", p.display().to_string());
+                    return;
+                }
+                // Audio gets its own event: routing it through `file-dropped` would make the
+                // UI try to open a WAV as a project.
+                if let Some(p) = paths.iter().find(|p| audio_files::is_audio_path(p)) {
+                    let _ = window.emit("audio-dropped", p.display().to_string());
                 }
             }
             _ => {}
@@ -1757,10 +2574,22 @@ pub fn run() {
             set_track_plugin,
             plugin_params,
             set_plugin_param,
+            add_insert,
+            remove_insert,
+            move_insert,
+            set_insert_enabled,
+            insert_params,
+            set_insert_param,
             plugin_catalog,
             install_plugin,
             open_url,
             open_plugin_window,
+            input_devices,
+            set_audio_arm,
+            start_audio_record,
+            stop_audio_record,
+            import_audio,
+            audio_peaks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

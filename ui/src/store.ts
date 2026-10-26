@@ -1,7 +1,41 @@
 import { create } from "zustand";
 import { getBridge } from "./bridge";
-import type { AudioStatus, CatalogEntry, Command, ExportProgress, ExportRequest, InstallProgress, KeyState, MidiStatus, NoteEvent, OutputDevice, ParamInfo, PlayMode, PluginDescriptor, RecoveryCandidate, Settings, Snapshot, SongPattern, TemplateInfo, Track } from "./types";
-import { beatsPerBar as bpbOf, DEFAULT_SETTINGS, fileNameOf, keyAt, TIER_COLORS } from "./types";
+import type {
+  AmpRig,
+  AudioImportProgress,
+  AudioStatus,
+  CatalogEntry,
+  Command,
+  ExportProgress,
+  ExportRequest,
+  InputDevice,
+  InsertTarget,
+  InstallProgress,
+  KeyState,
+  MidiStatus,
+  NoteEvent,
+  NoteProp,
+  OutputDevice,
+  ParamInfo,
+  PlayMode,
+  PluginDescriptor,
+  RecoveryCandidate,
+  Settings,
+  Snapshot,
+  SongPattern,
+  TemplateInfo,
+  Track,
+} from "./types";
+import {
+  barTicks as barTicksOf,
+  beatsPerBar as bpbOf,
+  DEFAULT_SETTINGS,
+  fileNameOf,
+  insertChain,
+  keyAt,
+  TIER_COLORS,
+  ticksToBeats,
+} from "./types";
 
 export interface Toast {
   text: string;
@@ -28,6 +62,12 @@ export interface DialogSpec {
 }
 
 export type BottomPanel = "devices" | "mixer";
+/**
+ * Which top-level screen is showing. Separate from `mode`: `PlayMode` is a Rust enum that
+ * decides what the engine sequences, and the guitar screen plays the song like any other
+ * view — a third variant there would be a lie.
+ */
+export type Screen = "pattern" | "song" | "guitar";
 export type LiveKeyboard = "off" | "tier" | "chromatic";
 
 interface State {
@@ -36,6 +76,7 @@ interface State {
   selectedTrackId: string | null;
   selectedPatternId: string | null;
   selectedNoteIds: string[];
+  /** Grid / default note length, in ticks. */
   noteLength: number;
   zoom: number;
   arrZoom: number; // px per bar in the arrangement
@@ -43,6 +84,7 @@ interface State {
   highlightRows: boolean;
   hearChords: boolean;
   bottomPanel: BottomPanel;
+  /** Transport position in ticks (fractional between blocks). */
   playhead: number;
   playing: boolean;
   /** Beats of count-in left (0 = none). */
@@ -62,6 +104,7 @@ interface State {
   templates: TemplateInfo[];
   templatesOpen: boolean;
   looping: boolean;
+  /** Loop start/end in ticks. */
   loopRegion: [number, number] | null;
   armed: boolean;
   midi: MidiStatus | null;
@@ -77,6 +120,8 @@ interface State {
   fold: boolean;
   /** Another track whose notes are drawn as ghosts behind the roll. */
   ghostTrackId: string | null;
+  /** Which per-note property the lane under the roll (and the drum graph editor) edits. */
+  laneProp: NoteProp;
   /** Something outside the roll (inspector, menu) asked for this selection. */
   selectionRequest: { ids: string[]; nonce: number } | null;
   /** Plugins found on this computer, in scan order; empty until `refreshPlugins`. */
@@ -85,18 +130,37 @@ interface State {
   catalog: CatalogEntry[];
   /** The latest install event per catalog entry, so a row can show its own progress. */
   installing: Record<string, InstallProgress>;
+  /** Which top-level screen is showing. */
+  screen: Screen;
+  /** Peak of the live input (0 when nothing is captured). */
+  inputPeak: number;
+  /** True while a take is being captured. */
+  recordingAudio: boolean;
+  inputDevices: InputDevice[];
+  /** The audio track that hears the live input. */
+  armedAudioTrackId: string | null;
+  /** Hear the input through the rig, with or without the transport running. */
+  monitor: boolean;
+  selectedAudioClipId: string | null;
+  /** Non-null while a file decodes. */
+  importing: AudioImportProgress | null;
 
   init(): Promise<void>;
   /** `label` names the edit in the Edit menu ("move notes"); defaults to the command's name. */
-  dispatch(command: Command, transient?: boolean, label?: string): Promise<void>;
+  dispatch(
+    command: Command,
+    transient?: boolean,
+    label?: string,
+  ): Promise<void>;
   commitGesture(): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
-  setMode(mode: PlayMode): void;
+  /** Switch screens. The only writer of `screen` and `mode`. */
+  setScreen(screen: Screen): void;
   selectTrack(id: string): void;
   selectPattern(id: string): void;
   setSelectedNoteIds(ids: string[]): void;
-  setNoteLength(len: number): void;
+  setNoteLength(ticks: number): void;
   setZoom(zoom: number): void;
   setArrZoom(px: number): void;
   toggleLandscape(): void;
@@ -108,10 +172,10 @@ interface State {
   toggleMetronome(): void;
   togglePlay(): void;
   rewind(): void;
-  seek(beat: number): void;
+  seek(tick: number): void;
   tapTempo(): void;
-  /** Preview a pitch. `beats` defaults to the current grid, so a preview never outlasts the note. */
-  audition(pitch: number, velocity?: number, beats?: number): void;
+  /** Preview a pitch. `lengthTicks` defaults to the current grid, so a preview never outlasts the note. */
+  audition(pitch: number, velocity?: number, lengthTicks?: number): void;
   setLoopRegion(region: [number, number] | null): void;
   toggleLooping(): void;
   toggleRecord(): void;
@@ -127,9 +191,13 @@ interface State {
   toggleFollow(): void;
   toggleFold(): void;
   setGhostTrack(id: string | null): void;
+  setLaneProp(prop: NoteProp): void;
   requestSelection(ids: string[]): void;
   /** Apply a pure edit to the selected track's notes in the selected pattern (ids = current selection). */
-  transformSelection(fn: (notes: NoteEvent[], ids: Set<string>) => NoteEvent[], label: string): void;
+  transformSelection(
+    fn: (notes: NoteEvent[], ids: Set<string>) => NoteEvent[],
+    label: string,
+  ): void;
   newProject(): Promise<void>;
   openProject(): Promise<void>;
   /** Open a known path (recent file, dropped file), asking about unsaved work first. */
@@ -145,7 +213,13 @@ interface State {
   importMidi(): Promise<void>;
   setDialogText(text: string): void;
   /** A dialog with one text field; resolves with the text, or null on cancel. */
-  askInput(title: string, message: string, placeholder?: string, okLabel?: string, initial?: string): Promise<string | null>;
+  askInput(
+    title: string,
+    message: string,
+    placeholder?: string,
+    okLabel?: string,
+    initial?: string,
+  ): Promise<string | null>;
   openTemplates(open?: boolean): void;
   refreshTemplates(): Promise<void>;
   saveAsTemplate(): Promise<void>;
@@ -156,7 +230,12 @@ interface State {
   /** Show an in-app dialog and resolve with the chosen button's value. */
   ask(spec: DialogSpec): Promise<string>;
   /** Yes/no convenience over `ask`. */
-  confirm(title: string, message?: string, okLabel?: string, danger?: boolean): Promise<boolean>;
+  confirm(
+    title: string,
+    message?: string,
+    okLabel?: string,
+    danger?: boolean,
+  ): Promise<boolean>;
   /** Called by a dialog button; resolves the pending `ask`. */
   answerDialog(value: string): void;
   /** Unsaved changes stand in the way of `what`; returns true when it is OK to proceed. */
@@ -167,7 +246,10 @@ interface State {
   clearRecent(): Promise<void>;
   openSettings(open?: boolean): void;
   /** Merge a partial patch into one settings section, persist, and apply it. */
-  updateSettings<K extends keyof Settings>(section: K, patch: Partial<Settings[K]>): Promise<void>;
+  updateSettings<K extends keyof Settings>(
+    section: K,
+    patch: Partial<Settings[K]>,
+  ): Promise<void>;
   refreshOutputDevices(): Promise<void>;
   testTone(): void;
   refreshAudio(): Promise<void>;
@@ -181,17 +263,69 @@ interface State {
   pluginParams(trackId: string): Promise<ParamInfo[]>;
   /** Write one plugin parameter: `commit` false while dragging, true on release — only the
    *  committed one becomes an undo step. */
-  setPluginParam(trackId: string, paramId: number, value: number, commit?: boolean): Promise<void>;
+  setPluginParam(
+    trackId: string,
+    paramId: number,
+    value: number,
+    commit?: boolean,
+  ): Promise<void>;
   /** Install one catalog entry and rescan; progress shows up in `installing`. */
   installPlugin(entryId: string): Promise<void>;
   /** Hand an https link to the user's own browser; anything else is ignored. */
   openUrl(url: string): Promise<void>;
   /** Open (or raise) the separate window holding one track's plugin controls. */
   openPluginWindow(trackId: string): Promise<void>;
+
+  // ── Effect inserts ──────────────────────────────────────────────────────────────────────
+  /** Put a scanned effect in a chain, appended unless `index` says otherwise. */
+  addInsert(
+    target: InsertTarget,
+    uid: string,
+    index?: number | null,
+  ): Promise<void>;
+  removeInsert(target: InsertTarget, insertId: string): Promise<void>;
+  /** Move an insert within its chain; out-of-range indices land on the nearest end. */
+  moveInsert(target: InsertTarget, insertId: string, toIndex: number): Promise<void>;
+  setInsertEnabled(
+    target: InsertTarget,
+    insertId: string,
+    on: boolean,
+  ): Promise<void>;
+  /** One insert's parameters with the values its effect currently holds. */
+  insertParams(insertId: string): Promise<ParamInfo[]>;
+  /** Write one insert parameter: `commit` false while dragging, true on release — only the
+   *  committed one becomes an undo step. */
+  setInsertParam(
+    insertId: string,
+    paramId: number,
+    value: number,
+    commit?: boolean,
+  ): Promise<void>;
   /** The free-plugin browser is an overlay, like settings and export: finding a sound is
    *  something you do from wherever you are, not a reason to change what the window shows. */
   pluginBrowserOpen: boolean;
   openPluginBrowser(open?: boolean): void;
+
+  // ── Guitar ──────────────────────────────────────────────────────────────────────────────
+  addAudioTrack(): Promise<void>;
+  /** Point the live input at one audio track (null disarms). */
+  setArm(trackId: string | null): Promise<void>;
+  toggleMonitor(): Promise<void>;
+  /** Arm the recorder, then start the transport — so a count-in is never recorded. */
+  startRecording(): Promise<void>;
+  stopRecording(): Promise<void>;
+  /** Pick a file and import it onto `trackId` (or a new audio track). */
+  importAudioFile(trackId?: string | null): Promise<void>;
+  /** Import a known path (dropped file). */
+  importAudioPath(path: string, trackId?: string | null): Promise<void>;
+  selectAudioClip(id: string | null): void;
+  /** Merge a patch into the selected audio track's rig. `transient` while a knob is dragged. */
+  setAmp(
+    trackId: string,
+    patch: Partial<AmpRig>,
+    transient?: boolean,
+  ): Promise<void>;
+  refreshInputDevices(): Promise<void>;
 }
 
 /** Push the appearance section into CSS variables, the live tier palette and the page zoom. */
@@ -205,11 +339,15 @@ export function applyAppearance(a: Settings["appearance"]) {
   root.style.setProperty("--tier-dissonance", a.tierColors.dissonance);
   root.style.setProperty("--ok", a.tierColors.chordTone);
   root.style.setProperty("--accent", a.accent);
-  const [r, g, b] = [1, 3, 5].map((i) => parseInt(a.accent.slice(i, i + 2), 16));
+  const [r, g, b] = [1, 3, 5].map((i) =>
+    parseInt(a.accent.slice(i, i + 2), 16),
+  );
   root.style.setProperty("--accent-rgb", `${r}, ${g}, ${b}`);
   root.style.setProperty("--accent-bg", `rgba(${r}, ${g}, ${b}, 0.16)`);
   root.style.setProperty("--accent-border", `rgba(${r}, ${g}, ${b}, 0.45)`);
-  (root.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(a.uiScale);
+  (root.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(
+    a.uiScale,
+  );
   root.classList.toggle("reduced-motion", a.reducedMotion);
 }
 
@@ -225,6 +363,14 @@ export const useStore = create<State>((set, get) => {
     await b.setPlaybackContext(mode, selectedPatternId);
   };
 
+  /** What the user is seeing this insert called, for an undo label. Falls back to the plain
+   *  word when the slot has already gone — an undo label is never worth an error. */
+  const insertName = (target: InsertTarget, insertId: string) => {
+    const m = get().snapshot?.model;
+    const found = m && insertChain(m, target).find((i) => i.id === insertId);
+    return found ? found.name : "insert";
+  };
+
   const applySnapshot = (snapshot: Snapshot) => {
     const { selectedTrackId, selectedPatternId } = get();
     const tracks = snapshot.model.tracks;
@@ -234,7 +380,9 @@ export const useStore = create<State>((set, get) => {
     set({
       snapshot,
       selectedTrackId: trackOk ? selectedTrackId : (tracks[0]?.id ?? null),
-      selectedPatternId: patternOk ? selectedPatternId : (patterns[0]?.id ?? null),
+      selectedPatternId: patternOk
+        ? selectedPatternId
+        : (patterns[0]?.id ?? null),
     });
     if (!patternOk) void syncPlayback();
     // OS window title: "song.dissonant • — dissonant"
@@ -281,7 +429,7 @@ export const useStore = create<State>((set, get) => {
     selectedTrackId: null,
     selectedPatternId: null,
     selectedNoteIds: [],
-    noteLength: 0.25,
+    noteLength: 240,
     zoom: 1,
     arrZoom: 30,
     showLandscape: false,
@@ -318,16 +466,28 @@ export const useStore = create<State>((set, get) => {
     follow: true,
     fold: false,
     ghostTrackId: null,
+    laneProp: "velocity",
     selectionRequest: null,
     plugins: [],
     catalog: [],
     installing: {},
+    screen: "pattern",
+    inputPeak: 0,
+    recordingAudio: false,
+    inputDevices: [],
+    armedAudioTrackId: null,
+    monitor: false,
+    selectedAudioClipId: null,
+    importing: null,
 
     async init() {
       const b = await getBridge();
       try {
         const settings = await b.getSettings();
-        set({ settings, noteLength: settings.editing.defaultGrid });
+        set({
+          settings,
+          noteLength: settings.editing.defaultGrid,
+        });
         applyAppearance(settings.appearance);
       } catch (e) {
         console.warn("settings unavailable", e);
@@ -335,11 +495,23 @@ export const useStore = create<State>((set, get) => {
       applySnapshot(await b.getState());
       await syncPlayback();
       await b.setLiveTrack(get().selectedTrackId);
-      b.onPlayhead((e) => set({ playhead: e.beat, playing: e.playing, masterPeak: e.masterPeak, trackPeaks: e.trackPeaks, countIn: e.countIn ?? 0 }));
+      b.onPlayhead((e) =>
+        set({
+          playhead: e.tick,
+          playing: e.playing,
+          masterPeak: e.masterPeak,
+          trackPeaks: e.trackPeaks,
+          countIn: e.countIn ?? 0,
+          inputPeak: e.inputPeak ?? 0,
+          recordingAudio: e.recording ?? false,
+        }),
+      );
       b.onDocument((snap) => applySnapshot(snap));
       b.onMidiActivity(() => set({ midiActivityAt: performance.now() }));
       b.onCloseRequested(() => void get().requestClose());
       b.onFileDropped((path) => void get().openPath(path));
+      b.onAudioDropped((path) => void get().importAudioPath(path));
+      b.onAudioImport((p) => set({ importing: p.fraction >= 1 ? null : p }));
       b.onAudioStatus((e) => {
         set({ audio: e.status });
         get().showToast(e.message, !e.status.running);
@@ -347,19 +519,27 @@ export const useStore = create<State>((set, get) => {
       b.onMidiStatus((midi) => {
         const before = get().midi?.open ?? null;
         set({ midi });
-        if (midi.open && midi.open !== before) get().showToast(`MIDI in: ${midi.open}`);
-        else if (!midi.open && before) get().showToast(`MIDI in: ${before} disconnected`, true);
+        if (midi.open && midi.open !== before)
+          get().showToast(`MIDI in: ${midi.open}`);
+        else if (!midi.open && before)
+          get().showToast(`MIDI in: ${before} disconnected`, true);
       });
-      b.onExportProgress((p) => set({ exporting: p.done >= p.total ? null : p }));
-      b.onPluginInstall((p) => set((s) => ({ installing: { ...s.installing, [p.entryId]: p } })));
+      b.onExportProgress((p) =>
+        set({ exporting: p.done >= p.total ? null : p }),
+      );
+      b.onPluginInstall((p) =>
+        set((s) => ({ installing: { ...s.installing, [p.entryId]: p } })),
+      );
       // Engine load / xruns in the status bar.
       setInterval(() => void get().refreshAudio(), 2000);
       const audio = await b.audioStatus();
       set({ audio });
-      if (!audio.running && b.isTauri) get().showToast(`audio: ${audio.error ?? "not running"}`, true);
+      if (!audio.running && b.isTauri)
+        get().showToast(`audio: ${audio.error ?? "not running"}`, true);
       void get().refreshMidi();
       void get().refreshRecent();
       void get().refreshPlugins();
+      void get().refreshInputDevices();
       try {
         const candidates = await b.recoveryCandidates();
         if (candidates.length) void offerRecovery(candidates);
@@ -392,8 +572,9 @@ export const useStore = create<State>((set, get) => {
       applySnapshot(await b.redo());
     },
 
-    setMode(mode) {
-      set({ mode });
+    setScreen(screen) {
+      // The guitar screen plays the song timeline, so it shares song mode with the arrangement.
+      set({ screen, mode: screen === "pattern" ? "pattern" : "song" });
       void syncPlayback();
     },
     selectTrack(id) {
@@ -408,9 +589,9 @@ export const useStore = create<State>((set, get) => {
     setSelectedNoteIds(ids) {
       set({ selectedNoteIds: ids });
     },
-    setNoteLength(len) {
-      set({ noteLength: len });
-      if (get().armed) void getBridge().then((b) => b.setRecord(true, len));
+    setNoteLength(ticks) {
+      set({ noteLength: ticks });
+      if (get().armed) void getBridge().then((b) => b.setRecord(true, ticks));
     },
     setZoom(zoom) {
       set({ zoom: Math.min(3, Math.max(0.25, zoom)) });
@@ -438,8 +619,8 @@ export const useStore = create<State>((set, get) => {
       const m = settings.metronome;
       void getBridge().then(async (b) => {
         if (armed && m.preRollBars > 0) {
-          const bpb = bpbOf(snapshot?.model.timeSignature);
-          await b.seek(Math.max(0, playhead - m.preRollBars * bpb));
+          const bar = barTicksOf(snapshot?.model.timeSignature);
+          await b.seek(Math.max(0, playhead - m.preRollBars * bar));
         }
         await b.play(armed ? m.countInBars : 0);
       });
@@ -458,8 +639,8 @@ export const useStore = create<State>((set, get) => {
     rewind() {
       void getBridge().then((b) => b.seek(0));
     },
-    seek(beat) {
-      void getBridge().then((b) => b.seek(beat));
+    seek(tick) {
+      void getBridge().then((b) => b.seek(tick));
     },
 
     tapTempo() {
@@ -480,17 +661,19 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    audition(pitch, velocity = 100, beats) {
+    audition(pitch, velocity = 100, lengthTicks) {
       const { selectedTrackId: id, noteLength, snapshot } = get();
       if (!id) return;
       const bpm = snapshot?.model.tempo ?? 120;
-      const seconds = ((beats ?? noteLength) * 60) / bpm;
+      const seconds = (ticksToBeats(lengthTicks ?? noteLength) * 60) / bpm;
       void getBridge().then((b) => b.audition(id, pitch, velocity, seconds));
     },
 
     setLoopRegion(region) {
       set({ loopRegion: region });
-      void getBridge().then((b) => (region ? b.setLoop(region[0], region[1]) : b.clearLoop()));
+      void getBridge().then((b) =>
+        region ? b.setLoop(region[0], region[1]) : b.clearLoop(),
+      );
     },
     toggleLooping() {
       const on = !get().looping;
@@ -500,7 +683,9 @@ export const useStore = create<State>((set, get) => {
     toggleRecord() {
       const armed = !get().armed;
       set({ armed });
-      void getBridge().then(async (b) => set({ midi: await b.setRecord(armed, get().noteLength) }));
+      void getBridge().then(async (b) =>
+        set({ midi: await b.setRecord(armed, get().noteLength) }),
+      );
     },
     async openMidi(name) {
       const b = await getBridge();
@@ -550,8 +735,13 @@ export const useStore = create<State>((set, get) => {
     setGhostTrack(id) {
       set({ ghostTrackId: id });
     },
+    setLaneProp(prop) {
+      set({ laneProp: prop });
+    },
     requestSelection(ids) {
-      set((s) => ({ selectionRequest: { ids, nonce: (s.selectionRequest?.nonce ?? 0) + 1 } }));
+      set((s) => ({
+        selectionRequest: { ids, nonce: (s.selectionRequest?.nonce ?? 0) + 1 },
+      }));
     },
     transformSelection(fn, label) {
       const st = get();
@@ -561,7 +751,16 @@ export const useStore = create<State>((set, get) => {
       const notes = pattern.notesByTrack[track.id] ?? [];
       const next = fn(notes, new Set(st.selectedNoteIds));
       if (next === notes) return;
-      void st.dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
+      void st.dispatch(
+        {
+          type: "setNotes",
+          patternId: pattern.id,
+          trackId: track.id,
+          notes: next,
+        },
+        false,
+        label,
+      );
     },
 
     async newProject() {
@@ -589,7 +788,8 @@ export const useStore = create<State>((set, get) => {
     async openPath(path) {
       const b = await getBridge();
       if (path === get().snapshot?.path && !get().snapshot?.dirty) return;
-      if (!(await get().confirmDiscard(`opening “${fileNameOf(path)}”`))) return;
+      if (!(await get().confirmDiscard(`opening “${fileNameOf(path)}”`)))
+        return;
       try {
         applySnapshot(await b.openProject(path));
         await syncPlayback();
@@ -604,7 +804,10 @@ export const useStore = create<State>((set, get) => {
       const b = await getBridge();
       let path: string | undefined;
       if (saveAs || !get().snapshot?.path) {
-        const picked = await b.pickSavePath(fileNameOf(get().snapshot?.path), "dissonant");
+        const picked = await b.pickSavePath(
+          fileNameOf(get().snapshot?.path),
+          "dissonant",
+        );
         if (!picked) return false;
         path = picked;
       }
@@ -628,12 +831,26 @@ export const useStore = create<State>((set, get) => {
     async runExport(request) {
       const b = await getBridge();
       const base = fileNameOf(get().snapshot?.path).replace(/\.dissonant$/, "");
-      const path = await b.pickSavePath(`${request.scope === "pattern" ? `${base} - ${selectedPattern(get())?.name ?? "pattern"}` : base}.wav`, "wav");
+      const path = await b.pickSavePath(
+        `${request.scope === "pattern" ? `${base} - ${selectedPattern(get())?.name ?? "pattern"}` : base}.wav`,
+        "wav",
+      );
       if (!path) return;
-      set({ exportOpen: false, exporting: { done: 0, total: request.stems ? 2 : 1, current: "rendering…" } });
+      set({
+        exportOpen: false,
+        exporting: {
+          done: 0,
+          total: request.stems ? 2 : 1,
+          current: "rendering…",
+        },
+      });
       try {
         const out = await b.exportWav({ ...request, path });
-        get().showToast(out.files.length > 1 ? `exported ${out.files.length} files next to ${fileNameOf(path)}` : `exported ${fileNameOf(path)}`);
+        get().showToast(
+          out.files.length > 1
+            ? `exported ${out.files.length} files next to ${fileNameOf(path)}`
+            : `exported ${fileNameOf(path)}`,
+        );
       } catch (e) {
         get().showToast(String(e), true);
       }
@@ -642,9 +859,17 @@ export const useStore = create<State>((set, get) => {
     async exportMidi() {
       const b = await getBridge();
       const st = get();
-      const scope = st.mode === "song" && st.snapshot?.model.clips.length ? "song" : "pattern";
+      const scope =
+        st.mode === "song" && st.snapshot?.model.clips.length
+          ? "song"
+          : "pattern";
       const base = fileNameOf(st.snapshot?.path).replace(/\.dissonant$/, "");
-      const path = await b.pickSavePath(scope === "pattern" ? `${base} - ${selectedPattern(st)?.name ?? "pattern"}.mid` : `${base}.mid`, "mid");
+      const path = await b.pickSavePath(
+        scope === "pattern"
+          ? `${base} - ${selectedPattern(st)?.name ?? "pattern"}.mid`
+          : `${base}.mid`,
+        "mid",
+      );
       if (!path) return;
       try {
         await b.exportMidi(path, scope);
@@ -661,7 +886,9 @@ export const useStore = create<State>((set, get) => {
       if (!path) return;
       try {
         applySnapshot(await b.importMidi(path, pattern.id));
-        get().showToast(`imported ${fileNameOf(path)} into ${pattern.name} as new tracks`);
+        get().showToast(
+          `imported ${fileNameOf(path)} into ${pattern.name} as new tracks`,
+        );
       } catch (e) {
         get().showToast(String(e), true);
       }
@@ -697,8 +924,17 @@ export const useStore = create<State>((set, get) => {
     },
     async saveAsTemplate() {
       const b = await getBridge();
-      const suggested = fileNameOf(get().snapshot?.path).replace(/\.dissonant$/, "");
-      const name = await get().askInput("Save as template", "New projects can start from this one (tracks, chords, notes and mix included).", "template name", "Save", suggested === "untitled" ? "" : suggested);
+      const suggested = fileNameOf(get().snapshot?.path).replace(
+        /\.dissonant$/,
+        "",
+      );
+      const name = await get().askInput(
+        "Save as template",
+        "New projects can start from this one (tracks, chords, notes and mix included).",
+        "template name",
+        "Save",
+        suggested === "untitled" ? "" : suggested,
+      );
       if (!name) return;
       try {
         await b.saveTemplate(name);
@@ -710,7 +946,15 @@ export const useStore = create<State>((set, get) => {
     },
     async deleteTemplate(name) {
       const b = await getBridge();
-      if (!(await get().confirm("Delete template?", `“${name}” will be removed.`, "Delete", true))) return;
+      if (
+        !(await get().confirm(
+          "Delete template?",
+          `“${name}” will be removed.`,
+          "Delete",
+          true,
+        ))
+      )
+        return;
       await b.deleteTemplate(name);
       void get().refreshTemplates();
     },
@@ -719,7 +963,8 @@ export const useStore = create<State>((set, get) => {
       if (!(await get().confirmDiscard("creating a new project"))) return;
       set({ templatesOpen: false });
       try {
-        if (name === "starter" || name === "empty") applySnapshot(await b.newProject(name === "starter"));
+        if (name === "starter" || name === "empty")
+          applySnapshot(await b.newProject(name === "starter"));
         else applySnapshot(await b.newFromTemplate(name));
         await syncPlayback();
       } catch (e) {
@@ -731,7 +976,12 @@ export const useStore = create<State>((set, get) => {
       const b = await getBridge();
       const audio = await b.restartAudio();
       set({ audio });
-      get().showToast(audio.running ? `audio running @ ${audio.sampleRate} Hz` : `audio: ${audio.error}`, !audio.running);
+      get().showToast(
+        audio.running
+          ? `audio running @ ${audio.sampleRate} Hz`
+          : `audio: ${audio.error}`,
+        !audio.running,
+      );
     },
 
     showToast(text, error = false) {
@@ -824,10 +1074,14 @@ export const useStore = create<State>((set, get) => {
     },
     async updateSettings(section, patch) {
       const b = await getBridge();
-      const next: Settings = { ...get().settings, [section]: { ...get().settings[section], ...patch } };
+      const next: Settings = {
+        ...get().settings,
+        [section]: { ...get().settings[section], ...patch },
+      };
       set({ settings: next });
       if (section === "appearance") applyAppearance(next.appearance);
-      if (section === "metronome") void b.setMetronome(next.metronome.on, next.metronome.volume);
+      if (section === "metronome")
+        void b.setMetronome(next.metronome.on, next.metronome.volume);
       try {
         const audio = await b.setSettings(next);
         if (b.isTauri) set({ audio });
@@ -931,6 +1185,181 @@ export const useStore = create<State>((set, get) => {
     openPluginBrowser(open = true) {
       set({ pluginBrowserOpen: open });
     },
+
+    // ── Effect inserts ────────────────────────────────────────────────────────────────────
+    // Every one of these names the effect in its undo label, so the Edit menu reads
+    // "undo bypass Airwindows Consolidated" rather than "undo bypass insert".
+    async addInsert(target, uid, index = null) {
+      const b = await getBridge();
+      const name = get().plugins.find((p) => p.uid === uid)?.name ?? "effect";
+      try {
+        applySnapshot(await b.addInsert(target, uid, index, `add ${name}`));
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async removeInsert(target, insertId) {
+      const b = await getBridge();
+      const label = `remove ${insertName(target, insertId)}`;
+      try {
+        applySnapshot(await b.removeInsert(target, insertId, label));
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async moveInsert(target, insertId, toIndex) {
+      const b = await getBridge();
+      const label = `reorder ${insertName(target, insertId)}`;
+      try {
+        applySnapshot(await b.moveInsert(target, insertId, toIndex, label));
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async setInsertEnabled(target, insertId, on) {
+      const b = await getBridge();
+      const label = `${on ? "enable" : "bypass"} ${insertName(target, insertId)}`;
+      try {
+        applySnapshot(await b.setInsertEnabled(target, insertId, on, label));
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async insertParams(insertId) {
+      const b = await getBridge();
+      try {
+        return await b.insertParams(insertId);
+      } catch (e) {
+        get().showToast(String(e), true);
+        return [];
+      }
+    },
+    async setInsertParam(insertId, paramId, value, commit = false) {
+      const b = await getBridge();
+      try {
+        // A committed value is a document edit and comes back as a snapshot; a dragged one
+        // only reaches the effect and answers null.
+        const s = await b.setInsertParam(insertId, paramId, value, commit);
+        if (s) applySnapshot(s);
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+
+    // ── Guitar ────────────────────────────────────────────────────────────────────────────
+
+    async addAudioTrack() {
+      const n =
+        (get().snapshot?.model.tracks.filter((t) => t.isAudio).length ?? 0) + 1;
+      await get().dispatch({
+        type: "addAudioTrack",
+        name: n === 1 ? "guitar" : `guitar ${n}`,
+      });
+      const tracks = get().snapshot?.model.tracks ?? [];
+      const added = tracks[tracks.length - 1];
+      if (added?.isAudio) {
+        set({ selectedTrackId: added.id });
+        await get().setArm(added.id);
+      }
+    },
+
+    async setArm(trackId) {
+      const b = await getBridge();
+      try {
+        const audio = await b.setAudioArm(trackId, get().monitor);
+        set({ armedAudioTrackId: trackId, audio });
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+
+    async toggleMonitor() {
+      const monitor = !get().monitor;
+      set({ monitor });
+      const b = await getBridge();
+      try {
+        set({ audio: await b.setAudioArm(get().armedAudioTrackId, monitor) });
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+
+    async startRecording() {
+      const b = await getBridge();
+      try {
+        await b.startAudioRecord();
+      } catch (e) {
+        get().showToast(String(e), true);
+        return;
+      }
+      // Arming first and playing second is what keeps the count-in out of the take.
+      get().play();
+    },
+
+    async stopRecording() {
+      const b = await getBridge();
+      get().stop();
+      try {
+        const snap = await b.stopAudioRecord();
+        applySnapshot(snap);
+        const clips = snap.model.audioClips ?? [];
+        if (clips.length)
+          set({ selectedAudioClipId: clips[clips.length - 1].id });
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+
+    async importAudioFile(trackId = null) {
+      const b = await getBridge();
+      const path = await b.pickOpenPath(
+        ["wav", "wave", "aif", "aiff", "flac", "mp3", "m4a", "aac"],
+        "audio file",
+      );
+      if (!path) return;
+      await get().importAudioPath(path, trackId);
+    },
+
+    async importAudioPath(path, trackId = null) {
+      const b = await getBridge();
+      // Drop onto the selected audio track when there is one, so a drag does the obvious thing.
+      const selected = get().snapshot?.model.tracks.find(
+        (t) => t.id === get().selectedTrackId,
+      );
+      const target = trackId ?? (selected?.isAudio ? selected.id : null);
+      try {
+        applySnapshot(await b.importAudio(path, target, 0));
+        set({ screen: "guitar", mode: "song", importing: null });
+        await syncPlayback();
+        get().showToast(`imported ${fileNameOf(path)}`);
+      } catch (e) {
+        set({ importing: null });
+        get().showToast(String(e), true);
+      }
+    },
+
+    selectAudioClip(id) {
+      set({ selectedAudioClipId: id });
+    },
+
+    async setAmp(trackId, patch, transient = false) {
+      const track = get().snapshot?.model.tracks.find((t) => t.id === trackId);
+      const amp = track?.amp;
+      if (!amp) return;
+      await get().dispatch(
+        { type: "setTrackAmp", id: trackId, amp: { ...amp, ...patch } },
+        transient,
+      );
+    },
+
+    async refreshInputDevices() {
+      const b = await getBridge();
+      try {
+        set({ inputDevices: await b.inputDevices() });
+      } catch {
+        set({ inputDevices: [] });
+      }
+    },
   };
 });
 
@@ -939,13 +1368,28 @@ export const useStore = create<State>((set, get) => {
 export function selectedPattern(s: State): SongPattern | null {
   const m = s.snapshot?.model;
   if (!m) return null;
-  return m.patterns.find((p) => p.id === s.selectedPatternId) ?? m.patterns[0] ?? null;
+  return (
+    m.patterns.find((p) => p.id === s.selectedPatternId) ??
+    m.patterns[0] ??
+    null
+  );
 }
 
 export function selectedTrack(s: State): Track | null {
   const m = s.snapshot?.model;
   if (!m) return null;
-  return m.tracks.find((t) => t.id === s.selectedTrackId) ?? m.tracks[0] ?? null;
+  return (
+    m.tracks.find((t) => t.id === s.selectedTrackId) ?? m.tracks[0] ?? null
+  );
+}
+
+/**
+ * The audio track the guitar screen is showing: the selected one when it is an audio track,
+ * else the first. One rule so the screen and the status bar never disagree about it.
+ */
+export function selectedAudioTrack(s: State): Track | null {
+  const tracks = s.snapshot?.model.tracks.filter((t) => t.isAudio) ?? [];
+  return tracks.find((t) => t.id === s.selectedTrackId) ?? tracks[0] ?? null;
 }
 
 export function selectedTrackIndex(s: State): number {
@@ -956,16 +1400,16 @@ export function selectedTrackIndex(s: State): number {
 }
 
 export const GRID_OPTIONS: [string, number][] = [
-  ["1/32", 0.125],
-  ["1/16", 0.25],
-  ["1/8", 0.5],
-  ["1/4", 1],
-  ["1/2", 2],
-  ["1", 4],
+  ["1/32", 120],
+  ["1/16", 240],
+  ["1/8", 480],
+  ["1/4", 960],
+  ["1/2", 1920],
+  ["1", 3840],
 ];
 
-export function gridLabel(len: number): string {
-  return GRID_OPTIONS.find(([, v]) => v === len)?.[0] ?? `${len}`;
+export function gridLabel(ticks: number): string {
+  return GRID_OPTIONS.find(([, v]) => v === ticks)?.[0] ?? `${ticks}`;
 }
 
 export function dbText(gain: number): string {
@@ -987,6 +1431,11 @@ export function beatsPerBar(s: State): number {
   return bpbOf(s.snapshot?.model.timeSignature);
 }
 
+/** Ticks per bar at the project's time signature. */
+export function barTicks(s: State): number {
+  return barTicksOf(s.snapshot?.model.timeSignature);
+}
+
 /**
  * The key the selected pattern is tiered against: if the pattern sits in a section with
  * its own key (its first clip), that key; otherwise the project key.
@@ -996,5 +1445,5 @@ export function effectiveKey(s: State): KeyState {
   if (!m) return { rootPitchClass: null, scale: "major", isLocked: false };
   const p = selectedPattern(s);
   const clip = p ? m.clips.find((c) => c.patternId === p.id) : undefined;
-  return clip ? keyAt(m, clip.startBeat) : m.key;
+  return clip ? keyAt(m, clip.startTick) : m.key;
 }

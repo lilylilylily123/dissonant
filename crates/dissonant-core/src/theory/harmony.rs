@@ -84,31 +84,31 @@ pub fn diatonic_chords(root: i32, scale: ScaleType) -> Vec<ChordSuggestion> {
         .collect()
 }
 
-/// Build a progression from scale degrees, filling `total_beats` by cycling the degrees so long
+/// Build a progression from scale degrees, filling `total_ticks` by cycling the degrees so long
 /// patterns get chords across their whole length.
 ///
-/// The result always fits inside `total_beats`: on a pattern too short for one pass of the
-/// degrees at `chord_beats` each, the chords are divided to fit rather than written past the end
+/// The result always fits inside `total_ticks`: on a pattern too short for one pass of the
+/// degrees at `chord_ticks` each, the chords are divided to fit rather than written past the end
 /// (where they would be invisible in the lane, never heard, and still saved into the document).
-pub fn progression(degrees: &[i32], root: i32, scale: ScaleType, total_beats: f64, chord_beats: f64) -> Vec<ChordEvent> {
-    if degrees.is_empty() || chord_beats <= 0.0 || total_beats <= 0.0 {
+pub fn progression(degrees: &[i32], root: i32, scale: ScaleType, total_ticks: i64, chord_ticks: i64) -> Vec<ChordEvent> {
+    if degrees.is_empty() || chord_ticks <= 0 || total_ticks <= 0 {
         return vec![];
     }
     let diatonic = diatonic_chords(root, scale);
-    let whole_slots = (total_beats / chord_beats).floor() as usize;
+    let whole_slots = (total_ticks / chord_ticks) as usize;
     // One chord per degree at minimum, so a starter always lands as the progression it names.
-    let (slots, beats) = if whole_slots < degrees.len() {
-        (degrees.len(), total_beats / degrees.len() as f64)
+    let (slots, ticks) = if whole_slots < degrees.len() {
+        (degrees.len(), total_ticks / degrees.len() as i64)
     } else {
-        (whole_slots, chord_beats)
+        (whole_slots, chord_ticks)
     };
     (0..slots)
         .map(|i| {
             let degree = degrees[i % degrees.len()].rem_euclid(7) as usize;
             let c = &diatonic[degree];
-            let start = i as f64 * beats;
+            let start = i as i64 * ticks;
             // The last chord absorbs any remainder so the lane is covered with no gap.
-            let length = if i + 1 == slots { total_beats - start } else { beats };
+            let length = if i + 1 == slots { total_ticks - start } else { ticks };
             ChordEvent::new(start, length, c.pitch_classes.clone(), Some(c.name.clone()))
         })
         .collect()
@@ -227,21 +227,24 @@ mod tests {
 
     #[test]
     fn progression_fills_pattern_and_follows_key() {
-        let chords = progression(&[0, 3, 4, 5], 0, ScaleType::Major, 32.0, 4.0);
+        let beat = crate::ticks::TICKS_PER_BEAT;
+        let chords = progression(&[0, 3, 4, 5], 0, ScaleType::Major, 32 * beat, 4 * beat);
         assert_eq!(chords.len(), 8);
         assert_eq!(chords[0].name.as_deref(), Some("C"));
         assert_eq!(chords[5].name.as_deref(), Some("F"));
-        assert_eq!(chords[7].start_beat, 28.0);
+        assert_eq!(chords[7].start_tick, 28 * beat);
 
-        let g = progression(&[0, 3, 4, 5], 7, ScaleType::Major, 16.0, 4.0);
+        let g = progression(&[0, 3, 4, 5], 7, ScaleType::Major, 16 * beat, 4 * beat);
         let names: Vec<&str> = g.iter().map(|c| c.name.as_deref().unwrap()).collect();
         assert_eq!(names, vec!["G", "C", "D", "Em"]);
     }
 
     #[test]
     fn progression_never_shorter_than_degrees() {
-        let chords = progression(&[0, 3, 4, 5], 0, ScaleType::Major, 4.0, 4.0);
+        let beat = crate::ticks::TICKS_PER_BEAT;
+        let chords = progression(&[0, 3, 4, 5], 0, ScaleType::Major, 4 * beat, 4 * beat);
         assert_eq!(chords.len(), 4);
-        assert!(progression(&[], 0, ScaleType::Major, 16.0, 4.0).is_empty());
+        assert_eq!(chords[0].length_ticks, beat, "four degrees share the one-bar pattern");
+        assert!(progression(&[], 0, ScaleType::Major, 16 * beat, 4 * beat).is_empty());
     }
 }

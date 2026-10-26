@@ -35,7 +35,7 @@ use clack_host::process::audio_buffers::{
 use serde::{Deserialize, Serialize};
 
 use crate::scan::load_entry;
-use crate::PluginDescriptor;
+use crate::{PluginDescriptor, PluginKind};
 
 /// Stereo is what the mixer speaks, and what a plugin with no audio-ports extension is assumed to
 /// produce.
@@ -223,7 +223,7 @@ impl HostedPlugin {
         let state_ext = shared.get_extension::<PluginState>();
         let ports_ext = shared.get_extension::<PluginAudioPorts>();
 
-        let (in_channels, out_channels) = port_channel_counts(&mut instance, ports_ext);
+        let (in_channels, out_channels) = port_channel_counts(&mut instance, ports_ext, desc.kind);
         let params = read_params(&mut instance, params_ext);
 
         let processor = instance
@@ -245,11 +245,12 @@ impl HostedPlugin {
         let max_frames = max_frames as usize;
         let unit = PluginAudioUnit {
             processor: processor.into(),
+            kind: desc.kind,
             input_events: EventBuffer::with_capacity(EVENT_CAPACITY),
             output_events: EventBuffer::with_capacity(EVENT_CAPACITY),
             in_ports: AudioPorts::with_capacity(in_channels.max(1), 1),
             out_ports: AudioPorts::with_capacity(out_channels, 1),
-            silence: vec![0.0; in_channels * max_frames],
+            input: vec![0.0; in_channels * max_frames],
             scratch: vec![0.0; out_channels * max_frames],
             in_channels,
             out_channels,
@@ -371,14 +372,23 @@ impl Drop for HostedPlugin {
 /// Channel counts of the plugin's main input and output ports.
 ///
 /// A plugin without the audio-ports extension has no ports at all by the CLAP spec, but hosts that
-/// take that literally break a good number of real instruments, so an output is assumed. An
-/// instrument legitimately reports zero inputs, and gets no input buffers at all.
+/// take that literally break a good number of real plugins, so ports are assumed from what the
+/// plugin is for: an instrument gets an output only, an effect gets a stereo pair on both sides,
+/// since an effect with no input to process would be pointless.
+///
+/// The two sides are read independently, so a plugin whose layouts differ — mono in, stereo out,
+/// or the reverse — is described as it really is; [`PluginAudioUnit`] converts between that and
+/// the mixer's stereo.
 fn port_channel_counts(
     instance: &mut PluginInstance<DissonantHost>,
     ports: Option<PluginAudioPorts>,
+    kind: PluginKind,
 ) -> (usize, usize) {
     let Some(ports) = ports else {
-        return (0, DEFAULT_OUTPUT_CHANNELS);
+        return match kind {
+            PluginKind::Instrument => (0, DEFAULT_OUTPUT_CHANNELS),
+            PluginKind::Effect => (DEFAULT_OUTPUT_CHANNELS, DEFAULT_OUTPUT_CHANNELS),
+        };
     };
 
     let handle = instance.plugin_handle();
@@ -444,6 +454,8 @@ fn read_params(
 /// [`HostedPlugin::open`] has returned.
 pub struct PluginAudioUnit {
     processor: PluginAudioProcessor<DissonantHost>,
+    /// What the plugin is for, which decides how it is fed and when it may be skipped.
+    kind: PluginKind,
     /// Notes and parameter changes queued since the last render, in insertion order.
     input_events: EventBuffer,
     /// Where the plugin writes events back. Nothing upstream consumes them, so it is emptied every
@@ -451,8 +463,11 @@ pub struct PluginAudioUnit {
     output_events: EventBuffer,
     in_ports: AudioPorts,
     out_ports: AudioPorts,
-    /// Permanently-zero input, for plugins that declare an input port they do not need fed.
-    silence: Vec<f32>,
+    /// De-interleaved plugin input, `in_channels` blocks of `max_frames`. It stays permanently
+    /// zero for an instrument — which is fed silence on any input port it insists on declaring —
+    /// and is refilled from the caller's buffers by every
+    /// [`process_replace`](PluginAudioUnit::process_replace) chunk.
+    input: Vec<f32>,
     /// De-interleaved plugin output, `out_channels` blocks of `max_frames`.
     scratch: Vec<f32>,
     in_channels: usize,
@@ -464,6 +479,15 @@ pub struct PluginAudioUnit {
     /// not be skipped before the plugin has seen it.
     pending_events: bool,
     status: ProcessStatus,
+}
+
+/// What the plugin's input port carries for one `process` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortInput {
+    /// Silence, flagged constant so a plugin is free to skip reading it at all.
+    Silence,
+    /// The caller's audio, already copied into `input` by `fill_input`.
+    Audio,
 }
 
 impl PluginAudioUnit {
@@ -501,16 +525,29 @@ impl PluginAudioUnit {
         self.push(&event);
     }
 
-    /// Whether the mixer can skip this channel entirely.
+    /// Whether the mixer can skip this unit entirely.
     ///
-    /// True only when the plugin itself asked to be put to sleep, no note is held, and nothing is
-    /// waiting to be delivered to it. Any other `ProcessStatus` — including a reverb tail — keeps
-    /// the channel awake.
+    /// For an instrument: true only when the plugin itself asked to be put to sleep, no note is
+    /// held, and nothing is waiting to be delivered to it. Any other `ProcessStatus` — including
+    /// a release tail — keeps the channel awake.
+    ///
+    /// For an effect: true only when the plugin asked to be put to sleep, whatever is queued for
+    /// it. An effect is driven by its input rather than by notes, so the answer is "has the tail
+    /// finished", and a reverb reporting `Tail` or `Continue` must keep being processed after its
+    /// input has gone quiet. It is **not** a licence to bypass an effect whose input is sounding:
+    /// the chain only consults this once the signal reaching the slot is already silent.
     pub fn is_silent(&self) -> bool {
-        !self.pending_events && self.held == 0 && self.status == ProcessStatus::Sleep
+        match self.kind {
+            PluginKind::Instrument => {
+                !self.pending_events && self.held == 0 && self.status == ProcessStatus::Sleep
+            }
+            PluginKind::Effect => self.status == ProcessStatus::Sleep,
+        }
     }
 
     /// Renders the plugin and **adds** its stereo output into `l` and `r`.
+    ///
+    /// This is the instrument path: the plugin is fed silence on any input port it declares.
     ///
     /// Requests longer than the `max_frames` this unit was opened with are split into several
     /// `process` calls, so nothing here allocates or resizes. A plugin whose main output is mono
@@ -522,7 +559,7 @@ impl PluginAudioUnit {
 
         while done < frames {
             let chunk = (frames - done).min(self.max_frames);
-            self.process_chunk(chunk);
+            self.process_chunk(chunk, PortInput::Silence);
 
             let left = &self.scratch[..chunk];
             let right = if self.out_channels >= 2 {
@@ -545,15 +582,79 @@ impl PluginAudioUnit {
         self.pending_events = false;
     }
 
+    /// Runs the plugin over `l` and `r` and writes its output back over them.
+    ///
+    /// This is the effect path, and it **replaces**: an insert hears the signal reaching it and
+    /// decides entirely what leaves the slot, wet/dry included. The caller's buffers are copied
+    /// into this unit's own input before the plugin runs and overwritten from its output
+    /// afterwards, so the plugin never sees the mixer's memory and `l` and `r` may be any two
+    /// buffers the caller likes, including ones it reuses for the rest of the chain.
+    ///
+    /// Blocks longer than `max_frames` are split into several `process` calls, exactly as in
+    /// [`render_add`](Self::render_add), and nothing here allocates. A plugin with a mono input
+    /// hears the mean of the two sides; one with a mono output is written to both; channels
+    /// beyond the first two are fed silence and ignored respectively, which is what the stereo
+    /// mixer can carry. A plugin that declares no input at all — rare, but legal for an effect —
+    /// still has its output written over the caller's buffers.
+    pub fn process_replace(&mut self, l: &mut [f32], r: &mut [f32]) {
+        let frames = l.len().min(r.len());
+        let mut done = 0;
+
+        while done < frames {
+            let chunk = (frames - done).min(self.max_frames);
+            self.fill_input(&l[done..done + chunk], &r[done..done + chunk]);
+            self.process_chunk(chunk, PortInput::Audio);
+
+            let left = &self.scratch[..chunk];
+            let right = if self.out_channels >= 2 {
+                &self.scratch[self.max_frames..self.max_frames + chunk]
+            } else {
+                left
+            };
+            l[done..done + chunk].copy_from_slice(left);
+            r[done..done + chunk].copy_from_slice(right);
+
+            // As in `render_add`: frame-zero events belong to the first chunk only.
+            self.input_events.clear();
+            done += chunk;
+        }
+
+        self.input_events.clear();
+        self.pending_events = false;
+    }
+
+    /// Copies one chunk of the caller's stereo pair into the plugin's input buffer.
+    ///
+    /// Channels past the second keep the zeros they were opened with: the mixer has nothing to
+    /// put there, and silence is the only honest filler.
+    fn fill_input(&mut self, l: &[f32], r: &[f32]) {
+        let frames = l.len();
+        match self.in_channels {
+            0 => {}
+            // Mono in: the centre of the pair, not an arbitrary side, so nothing is lost when the
+            // two differ.
+            1 => {
+                let mono = &mut self.input[..frames];
+                for (sample, (left, right)) in mono.iter_mut().zip(l.iter().zip(r)) {
+                    *sample = 0.5 * (left + right);
+                }
+            }
+            _ => {
+                self.input[..frames].copy_from_slice(l);
+                self.input[self.max_frames..self.max_frames + frames].copy_from_slice(r);
+            }
+        }
+    }
+
     /// One `process` call of at most `max_frames`, leaving the result in `scratch`.
-    fn process_chunk(&mut self, frames: usize) {
+    fn process_chunk(&mut self, frames: usize, port_input: PortInput) {
         let Self {
             processor,
             input_events,
             output_events,
             in_ports,
             out_ports,
-            silence,
+            input,
             scratch,
             in_channels,
             max_frames,
@@ -573,9 +674,12 @@ impl PluginAudioUnit {
         } else {
             in_ports.with_input_buffers([AudioPortBuffer {
                 latency: 0,
-                channels: AudioPortBufferType::f32_input_only(
-                    silence.chunks_mut(*max_frames).map(InputChannel::constant),
-                ),
+                channels: AudioPortBufferType::f32_input_only(input.chunks_mut(*max_frames).map(
+                    |channel| match port_input {
+                        PortInput::Silence => InputChannel::constant(channel),
+                        PortInput::Audio => InputChannel::variable(channel),
+                    },
+                )),
             }])
         };
         let mut outputs = out_ports.with_output_buffers([AudioPortBuffer {

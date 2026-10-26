@@ -1,6 +1,7 @@
 //! Offline rendering: run the same [`Engine`] faster than real time into a WAV file.
 //! Deterministic, no device needed — this is what export, stems and tests use.
 
+use crate::audio::AudioPool;
 use crate::engine::{Engine, EngineCommand, Shared};
 use dissonant_core::{MasterSettings, Sequence};
 use std::path::Path;
@@ -30,6 +31,9 @@ pub struct RenderOptions {
     pub dither: bool,
     /// How many times through the sequence (1 = once). Lets a pattern export as a longer loop.
     pub loops: u32,
+    /// Decoded audio for the sequence's clips. `None` renders notes only — an export without
+    /// this would silently drop every guitar take.
+    pub audio_pool: Option<Arc<AudioPool>>,
 }
 
 impl Default for RenderOptions {
@@ -43,13 +47,14 @@ impl Default for RenderOptions {
             normalize_db: None,
             dither: true,
             loops: 1,
+            audio_pool: None,
         }
     }
 }
 
 /// Render `sequence` once (no looping) plus a tail, as interleaved stereo f32.
 pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Result<Vec<f32>, RenderError> {
-    if sequence.length_beats <= 0.0 {
+    if sequence.length_ticks <= 0 {
         return Err(RenderError::Empty);
     }
     let sr = options.sample_rate as f32;
@@ -58,7 +63,10 @@ pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Res
     // Looping stays on while there are repetitions left; the engine wraps at the sequence end.
     engine.handle(EngineCommand::SetLooping(loops > 1));
     engine.handle(EngineCommand::SetHearChords(options.hear_chords));
-    let loop_secs = sequence.tempo_map.seconds_at(sequence.length_beats);
+    if let Some(pool) = &options.audio_pool {
+        engine.handle(EngineCommand::SetAudioPool(Arc::clone(pool)));
+    }
+    let loop_secs = sequence.tempo_map.seconds_at_tick(sequence.length_ticks as f64);
     let seconds = loop_secs * loops as f64 + options.tail_seconds;
     engine.handle(EngineCommand::SetSequence(sequence));
     engine.handle(EngineCommand::Play);
@@ -155,14 +163,14 @@ pub fn write_wav(path: &Path, samples: &[f32], options: &RenderOptions) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dissonant_core::{NoteEvent, ProjectModel};
+    use dissonant_core::{NoteEvent, ProjectModel, TICKS_PER_BEAT};
 
     #[test]
     fn renders_a_wav_with_the_expected_length() {
         let mut model = ProjectModel::starter();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
-        model.patterns[0].length_beats = 4.0;
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.0, 1.0, 60)]);
+        model.patterns[0].length_ticks = 4 * TICKS_PER_BEAT;
+        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0, TICKS_PER_BEAT, 60)]);
         let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
         let dir = std::env::temp_dir().join(format!("dissonant-render-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -185,8 +193,8 @@ mod tests {
         let mut model = ProjectModel::starter();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         model.tracks[0].voice = "sine".into();
-        model.patterns[0].length_beats = 2.0;
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.0, 0.25, 69)]);
+        model.patterns[0].length_ticks = 2 * TICKS_PER_BEAT;
+        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0, TICKS_PER_BEAT / 4, 69)]);
         let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
         let opts = RenderOptions { tail_seconds: 0.0, loops: 3, ..Default::default() };
         let buf = render_to_buffer(seq, &opts).unwrap();

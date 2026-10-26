@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { selectedPattern, useStore } from "../store";
-import type { ExportRequest } from "../types";
+import { ticksToBeats, type ExportRequest } from "../types";
 
 /**
  * ⌘E — export audio. Starts from the export defaults in Settings; every field can be changed
@@ -30,8 +30,8 @@ export function ExportDialog() {
 
   if (!open || !model) return null;
   const hasSong = model.clips.length > 0;
-  const beats = scope === "song" ? model.clips.reduce((m, c) => Math.max(m, c.startBeat + c.lengthBeats), 0) : (pattern?.lengthBeats ?? 0);
-  const seconds = (beats * loops * 60) / model.tempo + tail;
+  const ticks = scope === "song" ? model.clips.reduce((m, c) => Math.max(m, c.startTick + c.lengthTicks), 0) : (pattern?.lengthTicks ?? 0);
+  const seconds = (ticksToBeats(ticks * loops) * 60) / model.tempo + tail;
   const mm = Math.floor(seconds / 60);
   const ss = Math.round(seconds - mm * 60);
 
@@ -86,7 +86,7 @@ export function ExportDialog() {
           </Row>
           <Row label="loops" hint="render the whole thing this many times through (a pattern as a longer loop)">
             <Seg value={loops} options={[[1, "1"], [2, "2"], [4, "4"], [8, "8"]]} onChange={setLoops} />
-            <span className="k mono">{beats ? `${mm}:${String(ss).padStart(2, "0")} with tail` : "nothing to render"}</span>
+            <span className="k mono">{ticks ? `${mm}:${String(ss).padStart(2, "0")} with tail` : "nothing to render"}</span>
           </Row>
           <Row label="chord bed" hint="include the chord track's pad in the mix">
             <Toggle on={chords} onChange={setChords} />
@@ -128,7 +128,7 @@ export function ExportDialog() {
             </label>
             <span className="spacer" />
             <button className="quiet" onClick={() => close(false)}>Cancel</button>
-            <button className="solid" onClick={go} disabled={!beats}>Export…</button>
+            <button className="solid" onClick={go} disabled={!ticks}>Export…</button>
           </Row>
         </div>
       </div>

@@ -4,6 +4,10 @@
 //! case the host has to degrade gracefully for rather than panic on. It is also an effect, so the
 //! scanner's instrument-versus-effect decision has something to disagree with the sine fixture
 //! about.
+//!
+//! Having no audio-ports extension, it takes whatever ports the host decided to give it. It copies
+//! them straight through, which is both the only honest thing an effect with no opinions can do
+//! and the one way a test can see what the host assumed.
 
 use clack_plugin::prelude::*;
 
@@ -57,11 +61,34 @@ impl<'a> PluginAudioProcessor<'a, (), BareMainThread> for BareAudio {
     fn process(
         &mut self,
         _process: Process,
-        _audio: Audio,
+        mut audio: Audio,
         _events: Events,
     ) -> Result<ProcessStatus, PluginError> {
-        // Produces nothing and asks to be left alone, which is exactly what it claims to be.
-        Ok(ProcessStatus::Sleep)
+        let frames = audio.frames_count() as usize;
+        let Some(mut port) = audio.port_pair(0) else {
+            // The host gave it no ports at all, which is the letter of the spec for a plugin with
+            // no audio-ports extension. Nothing to do, and nothing to complain about.
+            return Ok(ProcessStatus::Continue);
+        };
+        let mut channels = port
+            .channels()?
+            .into_f32()
+            .ok_or(PluginError::Message("host asked for f64 audio"))?;
+
+        for channel in channels.iter_mut() {
+            match channel {
+                ChannelPair::InputOutput(input, output) => {
+                    output[..frames].copy_from_slice(&input[..frames]);
+                }
+                // The host handed over one buffer for both: the input is already in place.
+                ChannelPair::InPlace(_) => {}
+                // An output with nothing feeding it can only be silence.
+                ChannelPair::OutputOnly(output) => output[..frames].fill(0.0),
+                ChannelPair::InputOnly(_) => {}
+            }
+        }
+
+        Ok(ProcessStatus::Continue)
     }
 }
 

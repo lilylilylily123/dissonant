@@ -3,7 +3,7 @@
 // same expectations.
 
 import type { ChordEvent, KeyState, ScaleType, Tier } from "./types";
-import { uuid } from "./types";
+import { TICKS_PER_BEAT, uuid } from "./types";
 
 export const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11];
@@ -95,31 +95,31 @@ export const STARTERS: Starter[] = [
 ];
 
 /**
- * Mirrors `harmony::progression`. The result always fits inside `totalBeats`: on a pattern too
- * short for one pass of the degrees at `chordBeats` each, the chords are divided to fit rather
+ * Mirrors `harmony::progression`. The result always fits inside `totalTicks`: on a pattern too
+ * short for one pass of the degrees at `chordTicks` each, the chords are divided to fit rather
  * than written past the end, where they would be invisible and never heard.
  */
 export function progression(
   degrees: number[],
   root: number,
   scale: ScaleType,
-  totalBeats: number,
-  chordBeats = 4,
+  totalTicks: number,
+  chordTicks = 4 * TICKS_PER_BEAT,
 ): ChordEvent[] {
-  if (degrees.length === 0 || chordBeats <= 0 || totalBeats <= 0) return [];
+  if (degrees.length === 0 || chordTicks <= 0 || totalTicks <= 0) return [];
   const diatonic = diatonicChords(root, scale);
-  const wholeSlots = Math.floor(totalBeats / chordBeats);
+  const wholeSlots = Math.floor(totalTicks / chordTicks);
   const short = wholeSlots < degrees.length;
   const slots = short ? degrees.length : wholeSlots;
-  const beats = short ? totalBeats / degrees.length : chordBeats;
+  const ticks = short ? totalTicks / degrees.length : chordTicks;
   return Array.from({ length: slots }, (_, i) => {
     const c = diatonic[((degrees[i % degrees.length] % 7) + 7) % 7];
-    const startBeat = i * beats;
+    const startTick = Math.round(i * ticks);
     return {
       id: uuid(),
-      startBeat,
+      startTick,
       // The last chord absorbs any remainder so the lane is covered with no gap.
-      lengthBeats: i + 1 === slots ? totalBeats - startBeat : beats,
+      lengthTicks: (i + 1 === slots ? totalTicks : Math.round((i + 1) * ticks)) - startTick,
       pitchClasses: [...c.pitchClasses],
       name: c.name,
     };
@@ -140,21 +140,21 @@ export function tier(pitchClass: number, chord: number[], key: number[] | null):
   return "tension";
 }
 
-/** The chord sounding at `beat`. Where chords overlap the later-starting one wins, matching
+/** The chord sounding at `tick`. Where chords overlap the later-starting one wins, matching
  *  dissonant-core's ChordTrack — which keeps its chords sorted, while this array may not be. */
-export function chordAt(chords: ChordEvent[], beat: number): ChordEvent | null {
+export function chordAt(chords: ChordEvent[], tick: number): ChordEvent | null {
   let best: ChordEvent | null = null;
   for (const c of chords) {
-    if (beat < c.startBeat || beat >= c.startBeat + c.lengthBeats) continue;
-    if (best === null || c.startBeat >= best.startBeat) best = c;
+    if (tick < c.startTick || tick >= c.startTick + c.lengthTicks) continue;
+    if (best === null || c.startTick >= best.startTick) best = c;
   }
   return best;
 }
 
-/** Tier for every pitch class at `beat`; `null` entries mean "no guidance". */
-export function tierMap(beat: number, chords: ChordEvent[], key: KeyState): (Tier | null)[] {
+/** Tier for every pitch class at `tick`; `null` entries mean "no guidance". */
+export function tierMap(tick: number, chords: ChordEvent[], key: KeyState): (Tier | null)[] {
   const keyPcs = keyPitchClasses(key);
-  const chord = chordAt(chords, beat);
+  const chord = chordAt(chords, tick);
   if (chord) return Array.from({ length: 12 }, (_, pc) => tier(pc, chord.pitchClasses, keyPcs));
   if (keyPcs) return Array.from({ length: 12 }, (_, pc) => (keyPcs.includes(pc) ? "chordTone" : "dissonance"));
   return Array(12).fill(null);
@@ -231,11 +231,11 @@ export function chordRoot(chord: ChordEvent): number {
 }
 
 /**
- * Plain words for why a pitch is tiered the way it is against the chord at `beat`.
+ * Plain words for why a pitch is tiered the way it is against the chord at `tick`.
  * The voice from PRODUCT.md: names things plainly, never condescends, never forbids.
  */
-export function explainNote(pitch: number, chords: ChordEvent[], key: KeyState, beat: number): string {
-  const chord = chordAt(chords, beat);
+export function explainNote(pitch: number, chords: ChordEvent[], key: KeyState, tick: number): string {
+  const chord = chordAt(chords, tick);
   const keyPcs = keyPitchClasses(key);
   const pc = normalize(pitch);
   const name = noteName(pc);

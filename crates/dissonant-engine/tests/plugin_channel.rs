@@ -8,7 +8,7 @@
 //! the machine's own plugin folders and skip when there is none. Skipping is reported, never
 //! silent: a green run that tested nothing is worse than a red one.
 
-use dissonant_core::{NoteEvent, ProjectModel, Sequence};
+use dissonant_core::{NoteEvent, ProjectModel, Sequence, TICKS_PER_BEAT};
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
 use dissonant_engine::Instrument;
 use dissonant_plugins::{HostedPlugin, PluginDescriptor, PluginFormat, Scanner};
@@ -34,9 +34,9 @@ fn rms(x: &[f32]) -> f64 {
 /// Model with one track carrying one long note, so the plugin has something to play.
 fn model() -> ProjectModel {
     let mut m = ProjectModel::empty();
-    m.patterns[0].length_beats = 8.0;
+    m.patterns[0].length_ticks = 8 * TICKS_PER_BEAT;
     let id = m.tracks[0].id;
-    m.patterns[0].notes_by_track.insert(id, vec![NoteEvent::new(0.0, 4.0, 69)]);
+    m.patterns[0].notes_by_track.insert(id, vec![NoteEvent::new(0, 4 * TICKS_PER_BEAT, 69)]);
     m
 }
 
@@ -79,7 +79,7 @@ fn a_hosted_plugin_sounds_through_the_mixer_and_stops_when_it_is_cleared() {
     // Clearing restores the track's built-in voice. The note is still sounding, so the channel
     // stays audible — what must change is that the plugin is gone, which the drop proves by not
     // deadlocking or crashing the audio thread.
-    e.handle(EngineCommand::Seek { beat: 0.0 });
+    e.handle(EngineCommand::Seek { tick: 0.0 });
     e.handle(EngineCommand::ClearInstrument { track_id });
     e.handle(EngineCommand::Play);
     let after = run(&mut e, 22_050);

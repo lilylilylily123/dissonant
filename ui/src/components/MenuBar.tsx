@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { selectedPattern, selectedTrack, useStore } from "../store";
-import { fileNameOf } from "../types";
+import { fileNameOf, TICKS_PER_BEAT } from "../types";
 import { duplicateBySpan, glueNotes, moveNotes, splitNotes, toggleMute } from "../noteEditing";
 
 type Item = { label: string; sc?: string; sub?: string; action?: () => void; disabled?: boolean; sep?: false } | { sep: true };
@@ -46,6 +46,7 @@ export function MenuBar() {
       { label: "Export audio…", sc: `${mod}E`, action: () => s.exportWav() },
       { label: `Export MIDI (${s.mode === "song" && snapshot.model.clips.length ? "song" : "pattern"})…`, action: () => s.exportMidi() },
       { label: "Import MIDI into this pattern…", action: () => s.importMidi() },
+      { label: "Import audio…", action: () => s.importAudioFile() },
       { sep: true },
       { label: "Settings…", sc: `${mod},`, action: () => s.openSettings(true) },
       { label: "Quit", sc: `${mod}Q`, action: () => s.requestClose() },
@@ -64,7 +65,7 @@ export function MenuBar() {
       { sep: true },
       { label: "Split at playhead", sc: `${mod}E`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => splitNotes(ns, ids, s.playhead), "split notes") },
       { label: "Glue notes", sc: `${mod}J`, disabled: !hasSel, action: () => s.transformSelection(glueNotes, "glue notes") },
-      { label: "Duplicate one loop later", sc: `${mod}B`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => duplicateBySpan(ns, ids, pattern?.lengthBeats ?? 16).notes, "duplicate to next loop") },
+      { label: "Duplicate one loop later", sc: `${mod}B`, disabled: !hasSel, action: () => s.transformSelection((ns, ids) => duplicateBySpan(ns, ids, pattern?.lengthTicks ?? 16 * TICKS_PER_BEAT).notes, "duplicate to next loop") },
       { label: "Mute / unmute notes", sc: "0", disabled: !hasSel, action: () => s.transformSelection(toggleMute, "mute notes") },
       { sep: true },
       {
@@ -79,7 +80,9 @@ export function MenuBar() {
       },
     ],
     view: [
-      { label: `${s.mode === "pattern" ? "Song (arrangement)" : "Pattern (piano roll)"}`, sc: "Tab", action: () => s.setMode(s.mode === "pattern" ? "song" : "pattern") },
+      { label: `${s.screen === "pattern" ? "✓ " : ""}Pattern (piano roll)`, sc: "Tab", action: () => s.setScreen("pattern") },
+      { label: `${s.screen === "song" ? "✓ " : ""}Song (arrangement)`, action: () => s.setScreen("song") },
+      { label: `${s.screen === "guitar" ? "✓ " : ""}Guitar`, action: () => s.setScreen("guitar") },
       { sep: true },
       { label: `${s.highlightRows ? "✓ " : ""}Highlight rows by tier`, action: () => s.toggleHighlight() },
       { label: `${s.showLandscape ? "✓ " : ""}Harmonic map`, action: () => s.toggleLandscape() },

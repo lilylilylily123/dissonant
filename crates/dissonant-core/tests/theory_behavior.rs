@@ -10,7 +10,7 @@
 use dissonant_core::chord_track::ChordTrack;
 use dissonant_core::model::{ChordEvent, KeyState, ScaleType};
 use dissonant_core::theory::harmony;
-use dissonant_core::{HighlightEngine, KeyDetector, Tier, TierClassifier};
+use dissonant_core::{HighlightEngine, KeyDetector, Tier, TierClassifier, TICKS_PER_BEAT as BEAT};
 
 const C_MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 const A_MINOR: [i32; 7] = [9, 11, 0, 2, 4, 5, 7];
@@ -236,7 +236,7 @@ fn every_starter_stays_diatonic_in_every_key() {
         for scale in [ScaleType::Major, ScaleType::Minor] {
             let in_key = harmony::scale_pitch_classes(root, scale);
             for starter in harmony::starters() {
-                let chords = harmony::progression(&starter.degrees, root, scale, 16.0, 4.0);
+                let chords = harmony::progression(&starter.degrees, root, scale, 16 * BEAT, 4 * BEAT);
                 assert!(!chords.is_empty());
                 for c in &chords {
                     for pc in &c.pitch_classes {
@@ -258,47 +258,47 @@ fn every_starter_stays_diatonic_in_every_key() {
 
 #[test]
 fn a_progression_tiles_its_length_with_no_gaps_or_overlaps() {
-    let chords = harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 32.0, 4.0);
+    let chords = harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 32 * BEAT, 4 * BEAT);
     assert_eq!(chords.len(), 8, "the degrees cycle to fill the requested length");
     for (i, c) in chords.iter().enumerate() {
-        assert_eq!(c.start_beat, i as f64 * 4.0);
-        assert_eq!(c.length_beats, 4.0);
+        assert_eq!(c.start_tick, i as i64 * 4 * BEAT);
+        assert_eq!(c.length_ticks, 4 * BEAT);
         if i > 0 {
-            assert_eq!(chords[i - 1].end_beat(), c.start_beat, "no gap, no overlap");
+            assert_eq!(chords[i - 1].end_tick(), c.start_tick, "no gap, no overlap");
         }
     }
-    assert_eq!(chords.last().unwrap().end_beat(), 32.0);
+    assert_eq!(chords.last().unwrap().end_tick(), 32 * BEAT);
     // Chord lookup over the result is total across the covered span.
     let track = ChordTrack::new(chords.clone());
-    let mut beat = 0.0;
-    while beat < 32.0 {
-        assert!(track.chord_at(beat).is_some(), "beat {beat} uncovered");
-        beat += 0.5;
+    let mut tick = 0;
+    while tick < 32 * BEAT {
+        assert!(track.chord_at(tick).is_some(), "tick {tick} uncovered");
+        tick += BEAT / 2;
     }
     // The degrees cycle, so the pattern repeats exactly.
     assert_eq!(chords[0].pitch_classes, chords[4].pitch_classes);
 
     // A pattern too short for one chord per degree divides the length instead of running past
     // the end: on a 1-bar pattern a 4-chord starter becomes four 1-beat chords that all fit.
-    let short = harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 4.0, 4.0);
+    let short = harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 4 * BEAT, 4 * BEAT);
     assert_eq!(short.len(), 4, "a starter always lands as the progression it names");
-    assert_eq!(short[0].start_beat, 0.0);
-    assert_eq!(short.last().unwrap().end_beat(), 4.0, "chords must fit inside the pattern");
+    assert_eq!(short[0].start_tick, 0);
+    assert_eq!(short.last().unwrap().end_tick(), 4 * BEAT, "chords must fit inside the pattern");
     for (i, c) in short.iter().enumerate() {
-        assert_eq!(c.length_beats, 1.0);
+        assert_eq!(c.length_ticks, BEAT);
         if i > 0 {
-            assert_eq!(short[i - 1].end_beat(), c.start_beat, "no gap, no overlap");
+            assert_eq!(short[i - 1].end_tick(), c.start_tick, "no gap, no overlap");
         }
     }
     // A length that is not a whole number of chords is still covered to the end.
-    let ragged = harmony::progression(&[0, 3], 0, ScaleType::Major, 18.0, 4.0);
-    assert_eq!(ragged.last().unwrap().end_beat(), 18.0, "the last chord absorbs the remainder");
+    let ragged = harmony::progression(&[0, 3], 0, ScaleType::Major, 18 * BEAT, 4 * BEAT);
+    assert_eq!(ragged.last().unwrap().end_tick(), 18 * BEAT, "the last chord absorbs the remainder");
     // Degenerate inputs yield nothing rather than panicking or looping forever.
-    assert!(harmony::progression(&[], 0, ScaleType::Major, 16.0, 4.0).is_empty());
-    assert!(harmony::progression(&[0], 0, ScaleType::Major, 16.0, 0.0).is_empty());
-    assert!(harmony::progression(&[0], 0, ScaleType::Major, -8.0, 4.0).is_empty());
+    assert!(harmony::progression(&[], 0, ScaleType::Major, 16 * BEAT, 4 * BEAT).is_empty());
+    assert!(harmony::progression(&[0], 0, ScaleType::Major, 16 * BEAT, 0).is_empty());
+    assert!(harmony::progression(&[0], 0, ScaleType::Major, -8 * BEAT, 4 * BEAT).is_empty());
     // Degrees outside 0–6 wrap onto the scale instead of panicking.
-    let wrapped = harmony::progression(&[-1, 9], 0, ScaleType::Major, 8.0, 4.0);
+    let wrapped = harmony::progression(&[-1, 9], 0, ScaleType::Major, 8 * BEAT, 4 * BEAT);
     assert_eq!(wrapped[0].name.as_deref(), Some("Bdim"));
     assert_eq!(wrapped[1].name.as_deref(), Some("Em"));
 }
@@ -343,55 +343,55 @@ fn chord_suggestions_are_in_key_and_deterministically_ordered() {
 
 fn two_bar_track() -> ChordTrack {
     ChordTrack::new(vec![
-        ChordEvent::new(0.0, 4.0, vec![0, 4, 7], Some("C".into())),
-        ChordEvent::new(4.0, 4.0, vec![5, 9, 0], Some("F".into())),
+        ChordEvent::new(0, 4 * BEAT, vec![0, 4, 7], Some("C".into())),
+        ChordEvent::new(4 * BEAT, 4 * BEAT, vec![5, 9, 0], Some("F".into())),
     ])
 }
 
 #[test]
-fn the_tier_map_tracks_the_chord_sounding_at_that_beat() {
+fn the_tier_map_tracks_the_chord_sounding_at_that_tick() {
     let e = HighlightEngine::default();
     let track = two_bar_track();
     let key = KeyState::locked(0, ScaleType::Major);
     // Over C: F is the avoid note, B is the maj7.
-    assert_eq!(e.tier(65, 0.0, &track, &key), Some(Tier::Dissonance));
-    assert_eq!(e.tier(71, 3.999, &track, &key), Some(Tier::Tension));
+    assert_eq!(e.tier(65, 0, &track, &key), Some(Tier::Dissonance));
+    assert_eq!(e.tier(71, 4 * BEAT - 1, &track, &key), Some(Tier::Tension));
     // One beat later the same two pitches mean something else: over F (F A C), F is a chord
     // tone and E is the maj7 — the colors must move with the chord.
-    assert_eq!(e.tier(65, 4.0, &track, &key), Some(Tier::ChordTone));
-    assert_eq!(e.tier(64, 4.0, &track, &key), Some(Tier::Tension));
+    assert_eq!(e.tier(65, 4 * BEAT, &track, &key), Some(Tier::ChordTone));
+    assert_eq!(e.tier(64, 4 * BEAT, &track, &key), Some(Tier::Tension));
     // The boundary is half-open: beat 4 belongs to the second chord, not the first.
-    assert_eq!(track.chord_at(3.999).unwrap().name.as_deref(), Some("C"));
-    assert_eq!(track.chord_at(4.0).unwrap().name.as_deref(), Some("F"));
+    assert_eq!(track.chord_at(4 * BEAT - 1).unwrap().name.as_deref(), Some("C"));
+    assert_eq!(track.chord_at(4 * BEAT).unwrap().name.as_deref(), Some("F"));
     // The whole map is populated whenever a chord is sounding.
-    assert!(e.tier_map(1.0, &track, &key).iter().all(Option::is_some));
+    assert!(e.tier_map(BEAT, &track, &key).iter().all(Option::is_some));
 }
 
 #[test]
-fn beats_outside_the_chords_fall_back_to_scale_level_instead_of_panicking() {
+fn ticks_outside_the_chords_fall_back_to_scale_level_instead_of_panicking() {
     let e = HighlightEngine::default();
     let key = KeyState::locked(0, ScaleType::Major);
     let gapped = ChordTrack::new(vec![
-        ChordEvent::new(4.0, 2.0, vec![0, 4, 7], Some("C".into())),
-        ChordEvent::new(10.0, 2.0, vec![7, 11, 2], Some("G".into())),
+        ChordEvent::new(4 * BEAT, 2 * BEAT, vec![0, 4, 7], Some("C".into())),
+        ChordEvent::new(10 * BEAT, 2 * BEAT, vec![7, 11, 2], Some("G".into())),
     ]);
     // Before the first chord, inside the gap, and past the last chord: scale-level guidance.
-    for beat in [-8.0, -0.5, 0.0, 3.999, 6.0, 9.0, 12.0, 1_000.0] {
-        assert!(gapped.chord_at(beat).is_none(), "beat {beat} should be in a gap");
-        let map = e.tier_map(beat, &gapped, &key);
-        assert_eq!(map[0], Some(Tier::ChordTone), "in-key at beat {beat}");
-        assert_eq!(map[1], Some(Tier::Dissonance), "out-of-key at beat {beat}");
+    for tick in [-8 * BEAT, -BEAT / 2, 0, 4 * BEAT - 1, 6 * BEAT, 9 * BEAT, 12 * BEAT, 1_000 * BEAT] {
+        assert!(gapped.chord_at(tick).is_none(), "tick {tick} should be in a gap");
+        let map = e.tier_map(tick, &gapped, &key);
+        assert_eq!(map[0], Some(Tier::ChordTone), "in-key at tick {tick}");
+        assert_eq!(map[1], Some(Tier::Dissonance), "out-of-key at tick {tick}");
         assert!(map.iter().all(Option::is_some));
     }
     // No chord and no key is the neutral state: no guidance at all, still no panic.
-    for beat in [-1.0, 0.0, 7.0] {
-        assert_eq!(e.tier_map(beat, &ChordTrack::default(), &KeyState::NONE), [None; 12]);
-        assert_eq!(e.tier_map(beat, &gapped, &KeyState::NONE), [None; 12]);
+    for tick in [-BEAT, 0, 7 * BEAT] {
+        assert_eq!(e.tier_map(tick, &ChordTrack::default(), &KeyState::NONE), [None; 12]);
+        assert_eq!(e.tier_map(tick, &gapped, &KeyState::NONE), [None; 12]);
     }
-    // A zero-length chord occupies no beat at all, so it never becomes the context.
-    let degenerate = ChordTrack::new(vec![ChordEvent::new(0.0, 0.0, vec![0, 4, 7], Some("C".into()))]);
-    assert!(degenerate.chord_at(0.0).is_none());
-    assert_eq!(e.tier_map(0.0, &degenerate, &KeyState::NONE), [None; 12]);
+    // A zero-length chord occupies no tick at all, so it never becomes the context.
+    let degenerate = ChordTrack::new(vec![ChordEvent::new(0, 0, vec![0, 4, 7], Some("C".into()))]);
+    assert!(degenerate.chord_at(0).is_none());
+    assert_eq!(e.tier_map(0, &degenerate, &KeyState::NONE), [None; 12]);
 }
 
 #[test]
@@ -399,14 +399,14 @@ fn where_chords_overlap_the_later_starting_one_wins() {
     let e = HighlightEngine::default();
     // Built in the "wrong" order on purpose: the track must not depend on insertion order.
     let track = ChordTrack::new(vec![
-        ChordEvent::new(4.0, 4.0, vec![5, 9, 0], Some("F".into())),
-        ChordEvent::new(0.0, 8.0, vec![0, 4, 7], Some("C".into())),
+        ChordEvent::new(4 * BEAT, 4 * BEAT, vec![5, 9, 0], Some("F".into())),
+        ChordEvent::new(0, 8 * BEAT, vec![0, 4, 7], Some("C".into())),
     ]);
-    assert_eq!(track.chord_at(1.0).unwrap().name.as_deref(), Some("C"));
-    assert_eq!(track.chord_at(5.0).unwrap().name.as_deref(), Some("F"));
+    assert_eq!(track.chord_at(BEAT).unwrap().name.as_deref(), Some("C"));
+    assert_eq!(track.chord_at(5 * BEAT).unwrap().name.as_deref(), Some("F"));
     // F is a chord tone of the freshly dropped F chord, an avoid note under the C it overlaps.
-    assert_eq!(e.tier(65, 5.0, &track, &KeyState::NONE), Some(Tier::ChordTone));
-    assert_eq!(e.tier(65, 1.0, &track, &KeyState::NONE), Some(Tier::Dissonance));
+    assert_eq!(e.tier(65, 5 * BEAT, &track, &KeyState::NONE), Some(Tier::ChordTone));
+    assert_eq!(e.tier(65, BEAT, &track, &KeyState::NONE), Some(Tier::Dissonance));
 }
 
 // ─── Rust ↔ TypeScript parity ──────────────────────────────────────────────────────────────
@@ -494,23 +494,23 @@ mod parity {
             ]
         );
 
-        let described = |degrees: &[i32], root: i32, scale: ScaleType, total: f64| -> Vec<String> {
-            harmony::progression(degrees, root, scale, total, 4.0)
+        let described = |degrees: &[i32], root: i32, scale: ScaleType, total: i64| -> Vec<String> {
+            harmony::progression(degrees, root, scale, total, 4 * BEAT)
                 .iter()
-                .map(|c| format!("{}:{}:{:?}:{}", c.start_beat, c.length_beats, c.pitch_classes, c.name.clone().unwrap_or_default()))
+                .map(|c| format!("{}:{}:{:?}:{}", c.start_tick, c.length_ticks, c.pitch_classes, c.name.clone().unwrap_or_default()))
                 .collect()
         };
         assert_eq!(
-            described(&[0, 3, 4, 5], 0, ScaleType::Major, 16.0),
-            ["0:4:[0, 4, 7]:C", "4:4:[5, 9, 0]:F", "8:4:[7, 11, 2]:G", "12:4:[9, 0, 4]:Am"]
+            described(&[0, 3, 4, 5], 0, ScaleType::Major, 16 * BEAT),
+            ["0:3840:[0, 4, 7]:C", "3840:3840:[5, 9, 0]:F", "7680:3840:[7, 11, 2]:G", "11520:3840:[9, 0, 4]:Am"]
         );
         assert_eq!(
-            described(&[0, 5, 2, 6], 9, ScaleType::Minor, 16.0),
-            ["0:4:[9, 0, 4]:Am", "4:4:[5, 9, 0]:F", "8:4:[0, 4, 7]:C", "12:4:[7, 11, 2]:G"]
+            described(&[0, 5, 2, 6], 9, ScaleType::Minor, 16 * BEAT),
+            ["0:3840:[9, 0, 4]:Am", "3840:3840:[5, 9, 0]:F", "7680:3840:[0, 4, 7]:C", "11520:3840:[7, 11, 2]:G"]
         );
         assert_eq!(
-            described(&[1, 4, 0, 0], 2, ScaleType::Major, 16.0),
-            ["0:4:[4, 7, 11]:Em", "4:4:[9, 1, 4]:A", "8:4:[2, 6, 9]:D", "12:4:[2, 6, 9]:D"]
+            described(&[1, 4, 0, 0], 2, ScaleType::Major, 16 * BEAT),
+            ["0:3840:[4, 7, 11]:Em", "3840:3840:[9, 1, 4]:A", "7680:3840:[2, 6, 9]:D", "11520:3840:[2, 6, 9]:D"]
         );
     }
 }

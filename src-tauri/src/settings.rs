@@ -1,8 +1,8 @@
 //! User settings: one `settings.json` in the app-data dir, loaded at startup and edited through
 //! the Settings window. Every field has a default, so an older or hand-edited file still loads.
 
-use dissonant_core::TimeSignature;
-use serde::{Deserialize, Serialize};
+use dissonant_core::{beats_to_ticks, TimeSignature, TICKS_PER_BEAT};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -50,6 +50,10 @@ pub struct AudioSettings {
     pub sample_rate: Option<u32>,
     /// Frames per callback; `None` lets the host choose.
     pub buffer_size: Option<u32>,
+    /// Capture device name; `None` follows the system default.
+    pub input_device: Option<String>,
+    /// Which of the input device's channels the guitar is plugged into.
+    pub input_channel: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -126,9 +130,11 @@ pub enum AltKey {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EditingSettings {
-    /// Grid / snap in beats (0.25 = a sixteenth).
-    pub default_grid: f64,
-    pub default_note_length: f64,
+    /// Grid / snap in ticks (240 = a sixteenth).
+    #[serde(deserialize_with = "de_grid_ticks")]
+    pub default_grid: i64,
+    #[serde(deserialize_with = "de_grid_ticks")]
+    pub default_note_length: i64,
     pub default_velocity: u8,
     pub default_pattern_bars: u32,
     pub default_tempo: f64,
@@ -142,11 +148,26 @@ pub struct EditingSettings {
     pub snap_to_chords: bool,
 }
 
+/// The smallest grid that can be ticks rather than beats. `MIN_NOTE_TICKS` is 60, so a real
+/// tick grid is never below that; the old beat grids never reached 32 beats.
+const SMALLEST_TICK_GRID: f64 = 32.0;
+
+/// Grids were written in beats before the tick migration, so a settings file from an older
+/// build carries values like 0.25. Read as a number and fold the beat ones up to ticks; a
+/// non-positive or non-finite value is left at 0 for [`Settings::sanitized`] to replace.
+fn de_grid_ticks<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let value = f64::deserialize(d)?;
+    if !value.is_finite() || value <= 0.0 {
+        return Ok(0);
+    }
+    Ok(if value < SMALLEST_TICK_GRID { beats_to_ticks(value) } else { value.round() as i64 })
+}
+
 impl Default for EditingSettings {
     fn default() -> Self {
         EditingSettings {
-            default_grid: 0.25,
-            default_note_length: 0.25,
+            default_grid: TICKS_PER_BEAT / 4,
+            default_note_length: TICKS_PER_BEAT / 4,
             default_velocity: 100,
             default_pattern_bars: 4,
             default_tempo: 120.0,
@@ -247,10 +268,10 @@ impl Settings {
     /// Clamp everything into the ranges the rest of the app assumes.
     pub fn sanitized(mut self) -> Settings {
         let e = &mut self.editing;
-        if !e.default_grid.is_finite() || e.default_grid <= 0.0 {
-            e.default_grid = 0.25;
+        if e.default_grid <= 0 {
+            e.default_grid = TICKS_PER_BEAT / 4;
         }
-        if !e.default_note_length.is_finite() || e.default_note_length <= 0.0 {
+        if e.default_note_length <= 0 {
             e.default_note_length = e.default_grid;
         }
         e.default_velocity = e.default_velocity.clamp(1, 127);
@@ -288,6 +309,9 @@ impl Settings {
                 a.sample_rate = None;
             }
         }
+        // No interface exposes more than this, and a wild value would silently fall back to
+        // the last channel rather than telling the user anything.
+        a.input_channel = a.input_channel.min(63);
         let m = &mut self.midi;
         if let Some(c) = m.channel {
             if !(1..=16).contains(&c) {
@@ -337,7 +361,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
         let partial: Settings = serde_json::from_str(r#"{"editing":{"defaultVelocity":90},"audio":{"bufferSize":256}}"#).unwrap();
         assert_eq!(partial.editing.default_velocity, 90);
-        assert_eq!(partial.editing.default_grid, 0.25);
+        assert_eq!(partial.editing.default_grid, TICKS_PER_BEAT / 4);
         assert_eq!(partial.audio.buffer_size, Some(256));
         assert!(partial.midi.auto_reconnect);
     }
@@ -356,6 +380,26 @@ mod tests {
         assert_eq!(s.export.bit_depth, 16);
         assert_eq!(s.audio.buffer_size, None);
         assert_eq!(s.appearance.tier_colors.tension, "#ff9d2a");
+    }
+
+    /// Settings written before the tick migration stored grids in beats. They have to come
+    /// back as the same musical grid, not as 0 or as a tick count of 0.25.
+    #[test]
+    fn grids_written_in_beats_migrate_to_ticks() {
+        let old: Settings =
+            serde_json::from_str(r#"{"editing":{"defaultGrid":0.25,"defaultNoteLength":0.5}}"#).unwrap();
+        assert_eq!(old.editing.default_grid, 240);
+        assert_eq!(old.editing.default_note_length, 480);
+
+        // A file already written in ticks is left exactly as it is.
+        let new: Settings =
+            serde_json::from_str(r#"{"editing":{"defaultGrid":120,"defaultNoteLength":3840}}"#).unwrap();
+        assert_eq!(new.editing.default_grid, 120);
+        assert_eq!(new.editing.default_note_length, 3840);
+
+        // Junk falls back to the default rather than to a zero grid.
+        let bad: Settings = serde_json::from_str(r#"{"editing":{"defaultGrid":-1}}"#).unwrap();
+        assert_eq!(bad.sanitized().editing.default_grid, TICKS_PER_BEAT / 4);
     }
 
     #[test]

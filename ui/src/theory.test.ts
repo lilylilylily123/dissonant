@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { tempoMap } from "./types";
+import { TICKS_PER_BEAT, tempoMap } from "./types";
 
 describe("tempo map", () => {
   it("steps, ramps and integrates seconds like the Rust map", () => {
     const flat = tempoMap(120, []);
     expect(flat.isConstant).toBe(true);
-    expect(flat.secondsAt(4)).toBeCloseTo(2, 9);
-    const step = tempoMap(120, [{ id: "a", beat: 4, bpm: 60, ramp: false }]);
-    expect(step.bpmAt(3.9)).toBe(120);
-    expect(step.bpmAt(4)).toBe(60);
-    expect(step.secondsAt(8)).toBeCloseTo(6, 9);
-    const ramp = tempoMap(120, [{ id: "a", beat: 4, bpm: 60, ramp: true }]);
-    expect(ramp.bpmAt(2)).toBeCloseTo(90, 9);
-    expect(ramp.secondsAt(4)).toBeCloseTo(4 * Math.LN2, 9);
-    expect(ramp.secondsAt(6)).toBeCloseTo(4 * Math.LN2 + 2, 9);
+    expect(flat.secondsAt(4 * TICKS_PER_BEAT)).toBeCloseTo(2, 9);
+    const step = tempoMap(120, [{ id: "a", tick: 4 * TICKS_PER_BEAT, bpm: 60, ramp: false }]);
+    expect(step.bpmAt(3.9 * TICKS_PER_BEAT)).toBe(120);
+    expect(step.bpmAt(4 * TICKS_PER_BEAT)).toBe(60);
+    expect(step.secondsAt(8 * TICKS_PER_BEAT)).toBeCloseTo(6, 9);
+    const ramp = tempoMap(120, [{ id: "a", tick: 4 * TICKS_PER_BEAT, bpm: 60, ramp: true }]);
+    expect(ramp.bpmAt(2 * TICKS_PER_BEAT)).toBeCloseTo(90, 9);
+    expect(ramp.secondsAt(4 * TICKS_PER_BEAT)).toBeCloseTo(4 * Math.LN2, 9);
+    expect(ramp.secondsAt(6 * TICKS_PER_BEAT)).toBeCloseTo(4 * Math.LN2 + 2, 9);
   });
 });
 import { chordAt, chordName, detectKey, diatonicChords, midiName, progression, tier, tierMap } from "./theory";
@@ -32,14 +32,14 @@ describe("tiers (must agree with dissonant-core)", () => {
   });
 
   it("degrades through three states", () => {
-    const chords = progression([0, 3], 0, "major", 8, 4);
-    expect(tierMap(1, chords, NO_KEY).every((t) => t !== null)).toBe(true);
-    expect(tierMap(1, [], NO_KEY).every((t) => t === null)).toBe(true);
-    const scaleOnly = tierMap(1, [], { rootPitchClass: 0, scale: "major", isLocked: true });
+    const chords = progression([0, 3], 0, "major", 8 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT);
+    expect(tierMap(TICKS_PER_BEAT, chords, NO_KEY).every((t) => t !== null)).toBe(true);
+    expect(tierMap(TICKS_PER_BEAT, [], NO_KEY).every((t) => t === null)).toBe(true);
+    const scaleOnly = tierMap(TICKS_PER_BEAT, [], { rootPitchClass: 0, scale: "major", isLocked: true });
     expect(scaleOnly[0]).toBe("chordTone");
     expect(scaleOnly[1]).toBe("dissonance");
-    expect(chordAt(chords, 4)?.name).toBe("F");
-    expect(chordAt(chords, 8)).toBeNull();
+    expect(chordAt(chords, 4 * TICKS_PER_BEAT)?.name).toBe("F");
+    expect(chordAt(chords, 8 * TICKS_PER_BEAT)).toBeNull();
   });
 });
 
@@ -47,8 +47,8 @@ describe("harmony", () => {
   it("names diatonic chords and progressions in the key", () => {
     expect(diatonicChords(0, "major").map((c) => c.name)).toEqual(["C", "Dm", "Em", "F", "G", "Am", "Bdim"]);
     expect(diatonicChords(9, "minor").map((c) => c.romanNumeral)).toEqual(["i", "ii°", "III", "iv", "v", "VI", "VII"]);
-    expect(progression([0, 3, 4, 5], 7, "major", 16).map((c) => c.name)).toEqual(["G", "C", "D", "Em"]);
-    expect(progression([0, 3, 4, 5], 0, "major", 32)).toHaveLength(8);
+    expect(progression([0, 3, 4, 5], 7, "major", 16 * TICKS_PER_BEAT).map((c) => c.name)).toEqual(["G", "C", "D", "Em"]);
+    expect(progression([0, 3, 4, 5], 0, "major", 32 * TICKS_PER_BEAT)).toHaveLength(8);
   });
 
   it("names arbitrary chords", () => {
@@ -147,32 +147,32 @@ describe("parity with dissonant-core", () => {
       ["i–VI–III–VII", [0, 5, 2, 6]],
     ]);
 
-    const described = (degrees: number[], root: number, scale: ScaleType, total: number) =>
-      progression(degrees, root, scale, total, 4).map((c) => `${c.startBeat}:${c.lengthBeats}:[${c.pitchClasses.join(", ")}]:${c.name ?? ""}`);
-    expect(described([0, 3, 4, 5], 0, "major", 16)).toEqual(["0:4:[0, 4, 7]:C", "4:4:[5, 9, 0]:F", "8:4:[7, 11, 2]:G", "12:4:[9, 0, 4]:Am"]);
-    expect(described([0, 5, 2, 6], 9, "minor", 16)).toEqual(["0:4:[9, 0, 4]:Am", "4:4:[5, 9, 0]:F", "8:4:[0, 4, 7]:C", "12:4:[7, 11, 2]:G"]);
-    expect(described([1, 4, 0, 0], 2, "major", 16)).toEqual(["0:4:[4, 7, 11]:Em", "4:4:[9, 1, 4]:A", "8:4:[2, 6, 9]:D", "12:4:[2, 6, 9]:D"]);
+    const described = (degrees: number[], root: number, scale: ScaleType, totalTicks: number) =>
+      progression(degrees, root, scale, totalTicks, 4 * TICKS_PER_BEAT).map((c) => `${c.startTick}:${c.lengthTicks}:[${c.pitchClasses.join(", ")}]:${c.name ?? ""}`);
+    expect(described([0, 3, 4, 5], 0, "major", 16 * TICKS_PER_BEAT)).toEqual(["0:3840:[0, 4, 7]:C", "3840:3840:[5, 9, 0]:F", "7680:3840:[7, 11, 2]:G", "11520:3840:[9, 0, 4]:Am"]);
+    expect(described([0, 5, 2, 6], 9, "minor", 16 * TICKS_PER_BEAT)).toEqual(["0:3840:[9, 0, 4]:Am", "3840:3840:[5, 9, 0]:F", "7680:3840:[0, 4, 7]:C", "11520:3840:[7, 11, 2]:G"]);
+    expect(described([1, 4, 0, 0], 2, "major", 16 * TICKS_PER_BEAT)).toEqual(["0:3840:[4, 7, 11]:Em", "3840:3840:[9, 1, 4]:A", "7680:3840:[2, 6, 9]:D", "11520:3840:[2, 6, 9]:D"]);
     // A pattern too short for one chord per degree divides the length instead of overflowing,
     // matching harmony::progression — a 1-bar pattern gets four 1-beat chords that fit.
-    expect(described([0, 3, 4, 5], 0, "major", 4)).toEqual(["0:1:[0, 4, 7]:C", "1:1:[5, 9, 0]:F", "2:1:[7, 11, 2]:G", "3:1:[9, 0, 4]:Am"]);
+    expect(described([0, 3, 4, 5], 0, "major", 4 * TICKS_PER_BEAT)).toEqual(["0:960:[0, 4, 7]:C", "960:960:[5, 9, 0]:F", "1920:960:[7, 11, 2]:G", "2880:960:[9, 0, 4]:Am"]);
     // A ragged length is still covered to the end: the last chord absorbs the remainder.
-    expect(described([0, 3], 0, "major", 18).at(-1)).toBe("12:6:[5, 9, 0]:F");
-    expect(progression([0], 0, "major", -8, 4)).toEqual([]);
+    expect(described([0, 3], 0, "major", 18 * TICKS_PER_BEAT).at(-1)).toBe("11520:5760:[5, 9, 0]:F");
+    expect(progression([0], 0, "major", -8 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT)).toEqual([]);
   });
 
   it("resolves overlapping chords to the later-starting one whatever the array order", () => {
     // dissonant-core's ChordTrack keeps its chords sorted and documents "the later-starting one
     // wins"; this array arrives in the opposite order, and must still agree.
     const chords = [
-      { id: "f", startBeat: 4, lengthBeats: 4, pitchClasses: [5, 9, 0], name: "F" },
-      { id: "c", startBeat: 0, lengthBeats: 8, pitchClasses: [0, 4, 7], name: "C" },
+      { id: "f", startTick: 4 * TICKS_PER_BEAT, lengthTicks: 4 * TICKS_PER_BEAT, pitchClasses: [5, 9, 0], name: "F" },
+      { id: "c", startTick: 0, lengthTicks: 8 * TICKS_PER_BEAT, pitchClasses: [0, 4, 7], name: "C" },
     ];
-    expect(chordAt(chords, 1)?.name).toBe("C");
-    expect(chordAt(chords, 5)?.name).toBe("F");
-    expect(tierMap(5, chords, NO_KEY)[5]).toBe("chordTone"); // F over the F chord
-    expect(tierMap(1, chords, NO_KEY)[5]).toBe("dissonance"); // F over the C chord: avoid note
-    expect(chordAt(chords, 8)).toBeNull();
-    expect(chordAt(chords, -1)).toBeNull();
+    expect(chordAt(chords, TICKS_PER_BEAT)?.name).toBe("C");
+    expect(chordAt(chords, 5 * TICKS_PER_BEAT)?.name).toBe("F");
+    expect(tierMap(5 * TICKS_PER_BEAT, chords, NO_KEY)[5]).toBe("chordTone"); // F over the F chord
+    expect(tierMap(TICKS_PER_BEAT, chords, NO_KEY)[5]).toBe("dissonance"); // F over the C chord: avoid note
+    expect(chordAt(chords, 8 * TICKS_PER_BEAT)).toBeNull();
+    expect(chordAt(chords, -TICKS_PER_BEAT)).toBeNull();
   });
 
   it("gates key confidence on distinct pitch classes, not note count", () => {

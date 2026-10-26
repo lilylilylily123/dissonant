@@ -1,7 +1,8 @@
 //! Behavioural audit of plugin discovery and hosting.
 //!
-//! Every test here loads and runs a *real* CLAP plugin. Two of them are built from this crate's own
-//! fixtures (`tests/fixture/`) and compiled as `cdylib` examples, so the scanner has genuine
+//! Every test here loads and runs a *real* CLAP plugin. All of them are built from this crate's
+//! own fixtures (`tests/fixture/`) — an instrument, an effect in three port layouts, and a plugin
+//! with no extensions at all — and compiled as `cdylib` examples, so the scanner has genuine
 //! binaries to walk and the host has genuine plugin code to talk to. Nothing is mocked and nothing
 //! is skipped: if the fixture is missing, that is a failure, not a reason to pass quietly.
 //!
@@ -24,6 +25,14 @@ mod fixture {
     #![allow(dead_code)]
 
     include!("fixture/sine_plugin.rs");
+}
+
+/// The effect fixture, included the same way and for the same reason: its parameter ids, its
+/// defaults and the identity of each of its three port layouts.
+mod effect {
+    #![allow(dead_code)]
+
+    include!("fixture/filter_plugin.rs");
 }
 
 const SR: f64 = 48_000.0;
@@ -58,6 +67,19 @@ fn example_dylib(stem: &str) -> PathBuf {
 
 fn sine_dylib() -> PathBuf {
     example_dylib("dissonant_sine_fixture")
+}
+
+/// The effect fixture in its three layouts: stereo, mono in, mono out.
+fn filter_dylib() -> PathBuf {
+    example_dylib("dissonant_filter_fixture")
+}
+
+fn mono_in_filter_dylib() -> PathBuf {
+    example_dylib("dissonant_mono_in_filter_fixture")
+}
+
+fn mono_out_filter_dylib() -> PathBuf {
+    example_dylib("dissonant_mono_out_filter_fixture")
 }
 
 /// Installs the fixture as a plain `.clap` file, the layout Windows and Linux use.
@@ -140,6 +162,31 @@ fn tone_amplitude(x: &[f32], freq: f64) -> f64 {
 
 fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0.0f32, |a, v| a.max(v.abs()))
+}
+
+/// The effect fixture's arithmetic, written out independently so a test knows what should have
+/// come back instead of asking the plugin that produced it.
+fn filtered(input: &[f32], gain: f32, damping: f32) -> Vec<f32> {
+    let coeff = 1.0 - damping;
+    let mut state = 0.0f32;
+    input
+        .iter()
+        .map(|x| {
+            state = coeff * x + (1.0 - coeff) * state;
+            state * gain
+        })
+        .collect()
+}
+
+/// Asserts two signals match sample for sample, with only the slack an `f32` round trip needs.
+fn assert_matches(actual: &[f32], expected: &[f32], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: length");
+    for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (got - want).abs() <= 1e-6,
+            "{what}: sample {index} is {got}, expected {want}"
+        );
+    }
 }
 
 fn midi_hz(pitch: u8) -> f64 {
@@ -800,4 +847,233 @@ fn the_audio_unit_can_be_moved_to_another_thread() {
     .expect("audio thread finished");
 
     assert!(peak_seen.0 > 0.1);
+}
+
+// ─── effect inserts ──────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn an_audio_effect_is_scanned_as_an_effect_and_hosted_without_note_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Filter", &filter_dylib());
+    let desc = only_descriptor(dir.path());
+
+    assert_eq!(desc.kind, PluginKind::Effect);
+    assert_eq!(desc.plugin_id, effect::FilterPlugin::<2, 2>::ID);
+    assert_eq!(desc.name, effect::FilterPlugin::<2, 2>::NAME);
+
+    // The fixture declares no note ports, because an effect has nothing to say about notes.
+    // Opening it must not depend on them.
+    let (mut plugin, _unit) = open(&desc);
+    let params = plugin.params();
+    assert_eq!(param(params, effect::PARAM_GAIN).value, effect::GAIN_DEFAULT);
+    assert_eq!(
+        param(params, effect::PARAM_DAMPING).value,
+        effect::DAMPING_DEFAULT
+    );
+}
+
+#[test]
+fn an_effect_replaces_the_signal_reaching_it_rather_than_adding_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Filter", &filter_dylib());
+    let (_plugin, mut unit) = open(&only_descriptor(dir.path()));
+
+    let input_l: Vec<f32> = (0..256).map(|i| i as f32 / 256.0 - 0.5).collect();
+    let input_r: Vec<f32> = input_l.iter().map(|v| -v).collect();
+    let mut l = input_l.clone();
+    let mut r = input_r.clone();
+    unit.process_replace(&mut l, &mut r);
+
+    // At the default gain and no damping the fixture is a half-gain wire, so the answer is
+    // arithmetic: half the input if the host replaced, one and a half times it if the host added.
+    let gain = effect::GAIN_DEFAULT as f32;
+    assert_matches(&l, &filtered(&input_l, gain, 0.0), "left out");
+    assert_matches(&r, &filtered(&input_r, gain, 0.0), "right out");
+    assert!(
+        l.iter().zip(&input_l).any(|(out, had)| (out - had).abs() > 0.1),
+        "the effect must have changed something, or the test proves nothing"
+    );
+}
+
+#[test]
+fn changing_an_effect_parameter_changes_what_leaves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Filter", &filter_dylib());
+    let desc = only_descriptor(dir.path());
+
+    let input: Vec<f32> = (0..512)
+        .map(|i| (f64::from(i) / SR * 440.0 * std::f64::consts::TAU).sin() as f32)
+        .collect();
+
+    let level_at = |gain: f64| {
+        let (_plugin, mut unit) = open(&desc);
+        unit.set_param(effect::PARAM_GAIN, gain);
+        let mut l = input.clone();
+        let mut r = input.clone();
+        unit.process_replace(&mut l, &mut r);
+        peak(&l)
+    };
+
+    let quiet = level_at(0.25);
+    let loud = level_at(1.0);
+
+    assert!(quiet > 0.1 && loud > 0.1, "{quiet} / {loud}");
+    assert!(
+        (loud / quiet - 4.0).abs() < 0.01,
+        "gain is linear, so four times the value is four times the output: {loud} / {quiet}"
+    );
+}
+
+#[test]
+fn an_effect_block_longer_than_the_configured_maximum_is_chunked_without_a_seam() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Filter", &filter_dylib());
+    let desc = only_descriptor(dir.path());
+
+    // Deliberately tiny: 1000 frames is sixteen process calls, and the fixture's filter carries
+    // state across every one of them, so a dropped or repeated chunk cannot hide.
+    let (_plugin, mut unit) = HostedPlugin::open(&desc, SR, 64).expect("fixture opens");
+    unit.set_param(effect::PARAM_GAIN, 1.0);
+    unit.set_param(effect::PARAM_DAMPING, 0.5);
+
+    let input: Vec<f32> = (0..1000).map(|i| (f64::from(i) * 0.05).sin() as f32).collect();
+    let mut l = input.clone();
+    let mut r = input.clone();
+    unit.process_replace(&mut l, &mut r);
+
+    let expected = filtered(&input, 1.0, 0.5);
+    assert_matches(&l, &expected, "chunked left");
+    assert_matches(&r, &expected, "chunked right");
+}
+
+#[test]
+fn an_effect_with_a_tail_is_not_reported_silent_until_the_tail_has_decayed() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Filter", &filter_dylib());
+    let (_plugin, mut unit) = open(&only_descriptor(dir.path()));
+
+    unit.set_param(effect::PARAM_GAIN, 1.0);
+    unit.set_param(effect::PARAM_DAMPING, 0.9);
+
+    let mut l = vec![1.0f32; 64];
+    let mut r = vec![1.0f32; 64];
+    unit.process_replace(&mut l, &mut r);
+    assert!(!unit.is_silent(), "the effect is sounding");
+
+    // Nothing is arriving any more, but the filter is still charged. An insert that is skipped
+    // here loses its tail, which is exactly the bug `is_silent` must not invite.
+    l.fill(0.0);
+    r.fill(0.0);
+    unit.process_replace(&mut l, &mut r);
+    assert!(peak(&l) > 1e-3, "the tail is audible: peak {}", peak(&l));
+    assert!(!unit.is_silent(), "an effect with a tail is not a slot to skip");
+
+    let mut blocks = 0;
+    while !unit.is_silent() {
+        l.fill(0.0);
+        r.fill(0.0);
+        unit.process_replace(&mut l, &mut r);
+        blocks += 1;
+        assert!(blocks < 100, "the tail never ended");
+    }
+    assert!(
+        peak(&l) < 1e-5,
+        "once the plugin asks to sleep there is nothing left to hear: peak {}",
+        peak(&l)
+    );
+}
+
+#[test]
+fn an_effects_saved_state_round_trips_and_is_heard_in_the_next_block() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Filter", &filter_dylib());
+    let desc = only_descriptor(dir.path());
+
+    let blob = {
+        let (mut plugin, mut unit) = open(&desc);
+        unit.set_param(effect::PARAM_GAIN, 1.75);
+        unit.set_param(effect::PARAM_DAMPING, 0.25);
+        let mut l = vec![0.0f32; 64];
+        let mut r = vec![0.0f32; 64];
+        unit.process_replace(&mut l, &mut r); // deliver the changes
+        drop(unit);
+        plugin.save_state().expect("state saves")
+    };
+    assert!(!blob.is_empty());
+
+    let (mut restored, mut unit) = open(&desc);
+    restored.load_state(&blob).expect("state loads");
+
+    let params = restored.params();
+    assert_eq!(param(params, effect::PARAM_GAIN).value, 1.75);
+    assert_eq!(param(params, effect::PARAM_DAMPING).value, 0.25);
+
+    // The values are not just reported back: the audio unit opened alongside now runs with them.
+    let input: Vec<f32> = (0..256).map(|i| i as f32 / 256.0 - 0.5).collect();
+    let mut l = input.clone();
+    let mut r = input.clone();
+    unit.process_replace(&mut l, &mut r);
+    assert_matches(&l, &filtered(&input, 1.75, 0.25), "restored settings");
+}
+
+#[test]
+fn a_mono_input_effect_hears_the_centre_of_the_stereo_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "MonoIn", &mono_in_filter_dylib());
+    let desc = only_descriptor(dir.path());
+    assert_eq!(desc.plugin_id, effect::FilterPlugin::<1, 2>::ID);
+
+    let (_plugin, mut unit) = open(&desc);
+    unit.set_param(effect::PARAM_GAIN, 1.0);
+
+    let mut l = vec![1.0f32; 128];
+    let mut r = vec![0.0f32; 128];
+    unit.process_replace(&mut l, &mut r);
+
+    // One channel in, two out: the plugin can only have been handed the mean of the pair, and it
+    // writes that single signal to both of its outputs.
+    assert_matches(&l, &vec![0.5; 128], "mean of the pair");
+    assert_eq!(l, r, "both sides come from the one channel the plugin wrote");
+}
+
+#[test]
+fn a_mono_output_effect_is_written_to_both_sides() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "MonoOut", &mono_out_filter_dylib());
+    let desc = only_descriptor(dir.path());
+    assert_eq!(desc.plugin_id, effect::FilterPlugin::<2, 1>::ID);
+
+    let (_plugin, mut unit) = open(&desc);
+    unit.set_param(effect::PARAM_GAIN, 1.0);
+
+    let mut l = vec![1.0f32; 128];
+    let mut r = vec![0.0f32; 128];
+    unit.process_replace(&mut l, &mut r);
+
+    // Two channels in, one out: the plugin folded the pair itself, and the host spread its single
+    // output across both sides rather than leaving one of them stale.
+    assert_matches(&l, &vec![0.5; 128], "folded pair");
+    assert_matches(&r, &vec![0.5; 128], "mono output on the right too");
+}
+
+#[test]
+fn an_effect_with_no_audio_ports_extension_is_fed_the_stereo_pair_it_is_assumed_to_have() {
+    let dir = tempfile::tempdir().unwrap();
+    install_flat(dir.path(), "Bare", &example_dylib("dissonant_bare_fixture"));
+    let desc = only_descriptor(dir.path());
+    assert_eq!(desc.kind, PluginKind::Effect);
+
+    let (_plugin, mut unit) = open(&desc);
+    let input_l: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
+    let input_r: Vec<f32> = input_l.iter().map(|v| -v).collect();
+    let mut l = input_l.clone();
+    let mut r = input_r.clone();
+    unit.process_replace(&mut l, &mut r);
+
+    // The fixture declares no ports at all and copies whatever it is given straight through, so
+    // getting the signal back unchanged is proof the host assumed a stereo input as well as a
+    // stereo output. Had it assumed an instrument's layout, the plugin would have had nothing to
+    // copy and the pair would have come back silent.
+    assert_eq!(l, input_l, "left passed through the port the host assumed");
+    assert_eq!(r, input_r, "right passed through the port the host assumed");
 }

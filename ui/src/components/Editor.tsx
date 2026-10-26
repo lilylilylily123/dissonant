@@ -1,5 +1,5 @@
 import { GRID_OPTIONS, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { trackColor } from "../types";
+import { ticksToBeats, trackColor } from "../types";
 import { BASE_BEAT_W, GUTTER, ChordLane } from "./ChordLane";
 import { DrumGrid } from "./DrumGrid";
 import { PianoRoll } from "./PianoRoll";
@@ -27,7 +27,7 @@ export function Editor() {
         <div className="vdiv" />
         <div className="opt">
           <span className="k">snap</span>
-          <select value={s.noteLength} onChange={(e) => s.setNoteLength(parseFloat(e.target.value))}>
+          <select value={s.noteLength} onChange={(e) => s.setNoteLength(parseInt(e.target.value, 10))}>
             {GRID_OPTIONS.map(([l, v]) => (
               <option key={l} value={v}>{l}</option>
             ))}
@@ -65,7 +65,7 @@ export function Editor() {
             title="zoom to fit the whole pattern"
             onClick={() => {
               const w = document.querySelector<HTMLElement>(".rollscroll, .drumgrid")?.clientWidth ?? 1000;
-              s.setZoom((w - GUTTER - 16) / (pattern.lengthBeats * BASE_BEAT_W));
+              s.setZoom((w - GUTTER - 16) / (ticksToBeats(pattern.lengthTicks) * BASE_BEAT_W));
             }}
           >
             fit

@@ -12,6 +12,7 @@ import { SettingsWindow } from "./components/Settings";
 import { PluginBrowserWindow } from "./components/PluginBrowser";
 import { ExportDialog, ExportProgressBar } from "./components/ExportDialog";
 import { TemplatePicker } from "./components/TemplatePicker";
+import { GuitarTab } from "./components/GuitarTab";
 import { useStore } from "./store";
 import { useLiveKeyboard } from "./liveKeyboard";
 
@@ -23,7 +24,7 @@ function isTyping(target: EventTarget | null): boolean {
 export default function App() {
   const init = useStore((s) => s.init);
   const snapshot = useStore((s) => s.snapshot);
-  const mode = useStore((s) => s.mode);
+  const screen = useStore((s) => s.screen);
   const toast = useStore((s) => s.toast);
 
   useEffect(() => {
@@ -83,7 +84,8 @@ export default function App() {
         void s.requestClose();
       } else if (!mod && e.key === "Tab") {
         e.preventDefault();
-        s.setMode(s.mode === "pattern" ? "song" : "pattern");
+        // Tab cycles the three screens in the order the transport lists them.
+        s.setScreen(s.screen === "pattern" ? "song" : s.screen === "song" ? "guitar" : "pattern");
       } else if (!mod && s.liveKeyboard === "off" && k === "l") {
         s.toggleLooping();
       } else if (!mod && s.liveKeyboard === "off" && k === "r") {
@@ -109,7 +111,9 @@ export default function App() {
       <MenuBar />
       <Transport />
       <div className="content">
-        {mode === "song" ? (
+        {screen === "guitar" ? (
+          <GuitarTab />
+        ) : screen === "song" ? (
           <>
             <PatternsPanel />
             <div className="center">

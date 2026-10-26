@@ -1424,6 +1424,45 @@ select {
   justify-content: flex-start;
   gap: 2px;
 }
+/* An insert chain's rows. The controls sit in the row itself — a chain is at most eight long,
+   so there is room for them, and they are the whole point of the card. They stay quiet until
+   the pointer is on them so the effect's name is what the row reads as. */
+.chain .lrow .ctl {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-5);
+  padding: 0 2px;
+  cursor: pointer;
+}
+.chain .lrow .ctl:hover {
+  color: var(--text-1);
+}
+/* The end of the chain: there is nowhere further to move. */
+.chain .lrow .ctl.dim {
+  opacity: 0.25;
+  pointer-events: none;
+}
+.chain .lrow .ctl.byp {
+  color: var(--rec-text);
+}
+.chain .insertparams {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--line-2);
+  padding-top: 6px;
+  min-height: 0;
+}
+/* The way to add one reads as the empty slot at the end of the chain, the way the pedal
+   board's does, rather than as one more control. */
+.chain .addeffect {
+  border-style: dashed;
+  color: var(--text-5);
+}
+.chain .addeffect:hover {
+  border-color: var(--accent-border);
+  color: var(--text-3);
+}
 .browser {
   flex: 1;
   display: flex;
@@ -1639,6 +1678,23 @@ select {
 .vellane canvas {
   display: block;
 }
+/* Property-lane picker: which per-note property the lane under the roll edits. */
+.lanepick {
+  appearance: none;
+  background: var(--bg-control);
+  color: var(--text-1);
+  border: 1px solid var(--line-1);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.lanepick:focus-visible {
+  outline: 1px solid var(--accent);
+}
 
 /* Chord lane (in the editor, above the grid) */
 .chordlane {
@@ -1840,6 +1896,40 @@ select {
 .step.now {
   outline: 1px solid var(--text-1);
   outline-offset: -1px;
+}
+/* A step carrying a non-neutral shift leans the way it plays. */
+.step .lean {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: inherit;
+}
+.steptools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line-1);
+  background: var(--bg-transport);
+}
+.steptools .lbl {
+  font-weight: 600;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-4b);
+  margin-right: 2px;
+}
+.drumgraph {
+  height: 96px;
+  flex: none;
+  overflow: hidden;
+  position: relative;
+  background: #0c0c0f;
+}
+.drumgraph canvas {
+  display: block;
 }
 .help {
   font-family: var(--font-mono);
@@ -2250,4 +2340,209 @@ select {
 }
 .prow:hover .pval {
   color: var(--text-2);
+}
+
+/* ─── Guitar screen ─────────────────────────────────────────────────────────────────────── */
+
+.side.guitar {
+  width: 300px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.side.guitar .shead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+.side.guitar .shead .act {
+  margin-left: auto;
+  cursor: pointer;
+  color: var(--text-4b);
+  font-size: 12px;
+}
+.side.guitar .shead .act:hover {
+  color: var(--text-1);
+}
+.side.guitar .shead .meta {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-4b);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.side.guitar .empty {
+  font-size: 10px;
+  color: var(--text-5);
+}
+.side.guitar .tiny {
+  font-size: 9.5px;
+  color: var(--text-4b);
+}
+.side.guitar .row .name,
+.takerow .name {
+  flex: 1;
+  font-weight: 600;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side.guitar .row .meta,
+.takerow .meta {
+  font-size: 9px;
+  color: var(--text-4b);
+}
+/* The armed track's light uses the record palette, not the accent: arming is the one thing
+   here that commits audio to disk. */
+.led.rec {
+  background: var(--rec-text);
+  box-shadow: 0 0 6px var(--rec-text);
+}
+.takerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.takerow:hover {
+  background: var(--bg-3);
+}
+.takerow.sel {
+  background: var(--accent-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.armbtn {
+  height: 22px;
+  padding: 0 12px;
+  border: 1px solid var(--line-3);
+  border-radius: 2px;
+  background: var(--bg-3);
+  color: var(--text-3);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.armbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.armbtn.on {
+  background: var(--rec-bg);
+  border-color: var(--rec-border);
+  color: var(--rec-text);
+}
+
+.wavescroll {
+  flex: 1;
+  min-height: 140px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-0);
+}
+
+/* The rack scrolls sideways like the device strip it is built from, and wraps nothing: a
+   signal chain reads left to right. */
+.devices.amprack {
+  flex: none;
+  align-items: stretch;
+  padding: 10px;
+  gap: 8px;
+}
+.devices.amprack.bypassed {
+  opacity: 0.45;
+}
+.device.pedal {
+  background: var(--bg-3);
+}
+.device.pedal.off .pad {
+  opacity: 0.45;
+}
+.device.pedal .title .meta {
+  cursor: pointer;
+  font-size: 12px;
+}
+.device.amp .seg {
+  margin-bottom: 2px;
+}
+/* The model menu sits above the rack because it drives every device in it: one click is a whole
+   amp, and the devices below are where that choice gets taken apart. */
+.ampmodels {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 0;
+}
+.ampmodels.bypassed {
+  opacity: 0.45;
+}
+/* A labelled selector inside a device: the cap says which choice, the seg makes it. */
+.device .segline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* A direct feed has no speaker to mic, so its mic controls stay visible but plainly out of reach. */
+.device .segline.off,
+.device .knobrow.off {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.ampslot {
+  flex: none;
+  min-width: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+}
+.ampslot.empty {
+  border: 1px dashed var(--line-3);
+  color: var(--text-5);
+  font-size: 16px;
+  cursor: pointer;
+}
+.ampslot.empty:hover {
+  border-color: var(--accent-border);
+  color: var(--text-3);
+}
+.pedalmenu {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+}
+.pedalmenu > div {
+  padding: 2px 8px;
+  border-radius: 2px;
+  font-size: 10px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.pedalmenu > div:hover {
+  background: var(--accent-bg);
+  color: var(--text-1);
+}
+
+/* An audio clip on the song timeline: visible, named, but not editable there. */
+.clip.audio {
+  background: var(--bg-3);
+  border-style: solid;
+  cursor: default;
+}
+.clip.audio.muted {
+  opacity: 0.45;
 }

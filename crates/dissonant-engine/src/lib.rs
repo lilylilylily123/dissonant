@@ -12,15 +12,21 @@
 //! * The engine never sees the project model: it plays a [`dissonant_core::Sequence`], which
 //!   the application layer rebuilds whenever the model changes.
 
+pub mod audio;
 pub mod channel;
 pub mod device;
 pub mod drums;
 pub mod dsp;
 pub mod engine;
+pub mod input;
 pub mod render;
+pub mod rig;
 pub mod synth;
 
-pub use channel::Instrument;
-pub use device::{default_output_name, list_output_devices, AudioConfig, AudioDevice, DeviceError, OutputDeviceInfo};
-pub use engine::{Engine, EngineCommand, Shared, MAX_TRACKS};
+pub use audio::{AudioBuffer, AudioLane, AudioPool, BlockContext};
+pub use channel::{InsertSlot, Instrument};
+pub use device::{default_output_name, list_output_devices, AudioConfig, AudioDevice, DeviceError, EngineIo, OutputDeviceInfo};
+pub use engine::{Engine, EngineCommand, NoteShape, Shared, MAX_TRACKS};
+pub use input::{default_input_name, list_input_devices, AudioInput, InputDeviceInfo};
 pub use render::{normalize, render_to_buffer, render_wav, write_wav, RenderError, RenderOptions};
+pub use rig::Rig;

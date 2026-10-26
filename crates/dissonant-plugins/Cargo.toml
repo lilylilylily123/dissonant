@@ -41,3 +41,21 @@ crate-type = ["cdylib"]
 name = "dissonant_bare_fixture"
 path = "tests/fixture/bare_entry.rs"
 crate-type = ["cdylib"]
+
+# The effect fixture, one build per port layout: the host folds stereo down to a mono input and
+# spreads a mono output back across both sides, and only a real plugin declaring those ports can
+# prove it.
+[[example]]
+name = "dissonant_filter_fixture"
+path = "tests/fixture/filter_entry.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "dissonant_mono_in_filter_fixture"
+path = "tests/fixture/mono_in_filter_entry.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "dissonant_mono_out_filter_fixture"
+path = "tests/fixture/mono_out_filter_entry.rs"
+crate-type = ["cdylib"]

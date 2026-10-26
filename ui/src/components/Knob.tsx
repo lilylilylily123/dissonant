@@ -12,6 +12,7 @@ export function Knob({
   color = "#b48cff",
   size = 34,
   defaultValue,
+  hint,
   onChange,
   onCommit,
 }: {
@@ -21,6 +22,8 @@ export function Knob({
   color?: string;
   size?: 34 | 30;
   defaultValue?: number;
+  /** Appended to the tooltip when the label alone does not say what the knob does. */
+  hint?: string;
   onChange: (v: number) => void;
   onCommit?: () => void;
 }) {
@@ -60,7 +63,7 @@ export function Knob({
         onChange(Math.min(1, Math.max(0, p + (e.deltaY < 0 ? 0.02 : -0.02))));
         onCommit?.();
       }}
-      title={`${label} ${display}`}
+      title={hint ? `${label} ${display} — ${hint}` : `${label} ${display}`}
     >
       <svg width={size} height={size} viewBox="0 0 34 34">
         <circle cx="17" cy="17" r="13" fill="none" stroke="#2a2a31" strokeWidth="3" strokeDasharray="61.26 200" transform="rotate(135 17 17)" />

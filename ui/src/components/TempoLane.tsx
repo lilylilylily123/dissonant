@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useStore } from "../store";
-import { tempoMap, type TempoPoint } from "../types";
+import { tempoMap, ticksToBeats, TICKS_PER_BEAT, type TempoPoint } from "../types";
 
 const H = 40;
 
@@ -26,12 +26,16 @@ export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number;
   const hi = Math.min(300, Math.max(...all) + 10);
   const yFor = (bpm: number) => 4 + (H - 8) * (1 - (bpm - lo) / Math.max(1, hi - lo));
   const bpmForY = (y: number) => lo + (1 - (y - 4) / (H - 8)) * (hi - lo);
-  const beats = Math.ceil(timelineW / pxPerBeat);
+  const pxPerTick = pxPerBeat / TICKS_PER_BEAT;
+  const barStepTicks = bpb * TICKS_PER_BEAT;
+  /** One polyline sample per beat of the visible width. */
+  const samples = Math.ceil(timelineW / pxPerBeat);
 
-  // Polyline sampled per beat (ramps are straight in bpm, so beat-wise sampling is exact).
-  const path = Array.from({ length: beats + 1 }, (_, b) => {
-    const prevBpm = b > 0 ? map.bpmAt(b - 1e-6) : map.bpmAt(0);
-    const here = map.bpmAt(b);
+  // Sampled per beat (ramps are straight in bpm, so beat-wise sampling is exact).
+  const path = Array.from({ length: samples + 1 }, (_, b) => {
+    const tick = b * TICKS_PER_BEAT;
+    const prevBpm = b > 0 ? map.bpmAt(tick - 1e-6) : map.bpmAt(0);
+    const here = map.bpmAt(tick);
     // A step shows as a vertical edge: emit the pre-jump value first.
     return (Math.abs(prevBpm - here) > 1e-9 ? `L${b * pxPerBeat},${yFor(prevBpm)} ` : "") + `${b === 0 ? "M" : "L"}${b * pxPerBeat},${yFor(here)}`;
   }).join(" ");
@@ -58,8 +62,8 @@ export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number;
     d.moved = true;
     const step = e.shiftKey ? 0.1 : 1;
     const bpm = Math.min(300, Math.max(20, Math.round((bpmForY(yFor(d.point.bpm) + dy) / step)) * step));
-    const beat = Math.max(0, Math.round(d.point.beat + dx / pxPerBeat));
-    const next = { ...d.point, bpm, beat };
+    const tick = Math.max(0, Math.round((d.point.tick + dx / pxPerTick) / TICKS_PER_BEAT) * TICKS_PER_BEAT);
+    const next = { ...d.point, bpm, tick };
     setPreview(next);
     void dispatch({ type: "updateTempoPoint", point: next }, true, "move tempo change");
   };
@@ -83,36 +87,36 @@ export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number;
         height={H}
         onDoubleClick={(e) => {
           const rect = e.currentTarget.getBoundingClientRect();
-          const beat = Math.max(0, Math.round((e.clientX - rect.left) / pxPerBeat));
-          void dispatch({ type: "addTempoPoint", beat, bpm: Math.round(map.bpmAt(beat)), ramp: false });
+          const tick = Math.max(0, Math.round((e.clientX - rect.left) / pxPerBeat)) * TICKS_PER_BEAT;
+          void dispatch({ type: "addTempoPoint", tick, bpm: Math.round(map.bpmAt(tick)), ramp: false });
         }}
         onPointerMove={(e) => {
           onMove(e);
           const rect = e.currentTarget.getBoundingClientRect();
-          setHover((e.clientX - rect.left) / pxPerBeat);
+          setHover((e.clientX - rect.left) / pxPerTick);
         }}
         onPointerLeave={() => setHover(null)}
         onPointerUp={onUp}
         onPointerCancel={onUp}
         onContextMenu={(e) => e.preventDefault()}
       >
-        {Array.from({ length: Math.ceil(beats / bpb) + 1 }, (_, i) => (
-          <line key={i} x1={i * bpb * pxPerBeat} x2={i * bpb * pxPerBeat} y1={0} y2={H} stroke={i % 4 === 0 ? "#2a2a32" : "#1a1a1f"} />
+        {Array.from({ length: Math.ceil(samples / bpb) + 1 }, (_, i) => (
+          <line key={i} x1={i * barStepTicks * pxPerTick} x2={i * barStepTicks * pxPerTick} y1={0} y2={H} stroke={i % 4 === 0 ? "#2a2a32" : "#1a1a1f"} />
         ))}
         <path d={path} fill="none" stroke="var(--accent)" strokeWidth={1.5} opacity={map.isConstant ? 0.35 : 0.9} />
         {shown.map((p) => (
           <g key={p.id} onPointerDown={(e) => onDown(e, p)} style={{ cursor: "ns-resize" }}>
-            <circle cx={p.beat * pxPerBeat} cy={yFor(p.bpm)} r={8} fill="transparent" />
-            <circle cx={p.beat * pxPerBeat} cy={yFor(p.bpm)} r={3.5} fill={p.ramp ? "var(--bg-0)" : "var(--accent)"} stroke="var(--accent)" strokeWidth={1.5} />
-            <title>{`${p.bpm.toFixed(1)} bpm at beat ${p.beat}${p.ramp ? " · ramp" : " · step"} · drag: move (⇧ fine) · ⌥-click: ${p.ramp ? "step" : "ramp"} · right-click: remove`}</title>
+            <circle cx={p.tick * pxPerTick} cy={yFor(p.bpm)} r={8} fill="transparent" />
+            <circle cx={p.tick * pxPerTick} cy={yFor(p.bpm)} r={3.5} fill={p.ramp ? "var(--bg-0)" : "var(--accent)"} stroke="var(--accent)" strokeWidth={1.5} />
+            <title>{`${p.bpm.toFixed(1)} bpm at beat ${ticksToBeats(p.tick)}${p.ramp ? " · ramp" : " · step"} · drag: move (⇧ fine) · ⌥-click: ${p.ramp ? "step" : "ramp"} · right-click: remove`}</title>
           </g>
         ))}
         {hover !== null && !drag.current && (
-          <text x={hover * pxPerBeat + 6} y={10} fill="var(--text-4)" fontFamily="JetBrains Mono, monospace" fontSize={9}>
+          <text x={hover * pxPerTick + 6} y={10} fill="var(--text-4)" fontFamily="JetBrains Mono, monospace" fontSize={9}>
             {map.bpmAt(hover).toFixed(1)}
           </text>
         )}
-        <line x1={playhead * pxPerBeat} x2={playhead * pxPerBeat} y1={0} y2={H} stroke="rgba(255,255,255,.5)" />
+        <line x1={playhead * pxPerTick} x2={playhead * pxPerTick} y1={0} y2={H} stroke="rgba(255,255,255,.5)" />
       </svg>
     </div>
   );

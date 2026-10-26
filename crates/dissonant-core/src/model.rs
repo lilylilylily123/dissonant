@@ -1,15 +1,25 @@
-//! The serializable project. Schema v7 adds an optional plugin per track, on top of v6's
-//! per-track and per-chord-track loop lengths inside a pattern and v5's velocity and
-//! persisted master settings.
+//! The serializable project. Schema v9 moves every musical time from f64 beats to integer
+//! ticks at [`crate::ticks::TICKS_PER_BEAT`] PPQ and adds ordered effect [`Insert`] chains per
+//! track and on the master, on top of v8's audio tracks — audio sources, audio clips and a
+//! guitar rig per track — v7's optional plugin per track, v6's per-track and per-chord-track
+//! loop lengths inside a pattern, and v5's velocity and persisted master settings.
+//!
+//! Insert chains needed no version of their own: `inserts` and `masterInserts` default to
+//! empty, so a v9 file written before them opens unchanged and a project without effects is
+//! written without the keys.
 //!
 //! Decoding is tolerant: every field has a `serde(default)` so a file missing a later-added
-//! field still opens. JSON keys are camelCase to match the previous app's files.
+//! field still opens. JSON keys are camelCase to match the previous app's files. Files written
+//! before v9 carry the old `…Beat`/`…Beats` keys; each of those decodes into a `legacy_*` twin
+//! that [`ProjectModel::normalized`] converts to ticks and clears, so nothing downstream ever
+//! sees beats and nothing is ever written back out in them.
 
+use crate::ticks::{beats_to_ticks, TICKS_PER_BEAT};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// A diatonic scale family. Expanded later (modes, harmonic minor, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -60,30 +70,56 @@ impl KeyState {
 pub struct ChordEvent {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
-    pub start_beat: f64,
-    pub length_beats: f64,
+    #[serde(default)]
+    pub start_tick: i64,
+    #[serde(default)]
+    pub length_ticks: i64,
     pub pitch_classes: Vec<i32>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Schema ≤ 8 only; folded into `start_tick` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "startBeat", skip_serializing)]
+    pub legacy_start_beat: Option<f64>,
+    /// Schema ≤ 8 only; folded into `length_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "lengthBeats", skip_serializing)]
+    pub legacy_length_beats: Option<f64>,
 }
 
 impl ChordEvent {
-    pub fn new(start_beat: f64, length_beats: f64, pitch_classes: Vec<i32>, name: Option<String>) -> Self {
+    pub fn new(start_tick: i64, length_ticks: i64, pitch_classes: Vec<i32>, name: Option<String>) -> Self {
         ChordEvent {
             id: Uuid::new_v4(),
-            start_beat,
-            length_beats,
+            start_tick,
+            length_ticks,
             pitch_classes,
             name,
+            legacy_start_beat: None,
+            legacy_length_beats: None,
         }
     }
 
-    pub fn end_beat(&self) -> f64 {
-        self.start_beat + self.length_beats
+    pub fn end_tick(&self) -> i64 {
+        self.start_tick + self.length_ticks
     }
 
-    pub fn contains(&self, beat: f64) -> bool {
-        beat >= self.start_beat && beat < self.end_beat()
+    pub fn contains(&self, tick: i64) -> bool {
+        tick >= self.start_tick && tick < self.end_tick()
+    }
+
+    /// Beat fields from an older file folded into the tick fields.
+    pub(crate) fn migrated(&mut self) {
+        migrate_tick(&mut self.start_tick, &mut self.legacy_start_beat);
+        migrate_tick(&mut self.length_ticks, &mut self.legacy_length_beats);
+    }
+}
+
+/// The schema ≤ 8 fold: a stored beat value wins only where the tick field says nothing, so a
+/// hand-merged file carrying both keys keeps the newer one.
+fn migrate_tick(tick: &mut i64, legacy: &mut Option<f64>) {
+    if let Some(beats) = legacy.take() {
+        if *tick == 0 {
+            *tick = beats_to_ticks(beats);
+        }
     }
 }
 
@@ -91,17 +127,52 @@ fn default_velocity() -> i32 {
     100
 }
 
-/// The shortest note the engine will schedule; trimming never produces less than this.
-pub const MIN_NOTE_BEATS: f64 = 1.0 / 64.0;
+/// The neutral value of a bipolar per-note property: centred pan, the instrument's own
+/// release, no filter offset.
+fn half() -> f32 {
+    0.5
+}
+
+fn is_half(v: &f32) -> bool {
+    *v == 0.5
+}
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+/// Widest detune the fine-pitch property may ask for, in cents (one octave each way).
+pub const MAX_FINE_CENTS: i32 = 1200;
+/// Most retriggers a single note may fire, matching FL Studio's repeat range.
+pub const MAX_REPEATS: u8 = 14;
+/// Furthest a note may be nudged off its grid position, in ticks (four beats each way).
+pub const MAX_SHIFT_TICKS: i64 = 4 * TICKS_PER_BEAT;
+
+/// The shortest note the engine will schedule (a 1/64 note); trimming never produces less
+/// than this.
+pub const MIN_NOTE_TICKS: i64 = TICKS_PER_BEAT / 16;
 
 /// One note in the piano roll. `pitch` is a MIDI note number (0–127), `velocity` 1–127.
+///
+/// The properties below the first five are per-note performance controls modelled on FL
+/// Studio's note record (`number/time/length/pan/velocity/release/color/fcut/fres/pitchofs/
+/// repeats`, observed in the `flpianoroll` script reference shipped with FL Studio 2026).
+/// A step in the drum grid is the same record, which is what lets one graph editor drive
+/// both editors. Every one of them is read by the scheduler or a voice; none is decorative.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteEvent {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
-    pub start_beat: f64,
-    pub length_beats: f64,
+    #[serde(default)]
+    pub start_tick: i64,
+    #[serde(default)]
+    pub length_ticks: i64,
     pub pitch: i32,
     #[serde(default = "default_velocity")]
     pub velocity: i32,
@@ -112,18 +183,64 @@ pub struct NoteEvent {
     /// Kept in the pattern but skipped by the scheduler (drawn hollow).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// Stereo position of this note alone: 0 hard left, 0.5 centre, 1 hard right.
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub pan: f32,
+    /// Scales the voice's release: 0.5 leaves the instrument's own tail, 0 cuts it short,
+    /// 1 stretches it.
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub release: f32,
+    /// Detune in cents, ±[`MAX_FINE_CENTS`]. Drives the drum grid's step pitch as well.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub fine: i32,
+    /// Filter cutoff for this note: 0.5 is the track's tone, below closes, above opens.
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub mod_x: f32,
+    /// Filter resonance for this note: 0.5 is flat, above rings.
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub mod_y: f32,
+    /// Start offset in ticks, applied when scheduling. The grid position stays the note's
+    /// identity, so a step keeps its cell while playing early or late.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub shift_ticks: i64,
+    /// Retriggers spread across the note's own length; 0 plays it once.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub repeats: u8,
+    /// Colour group 0–15. Groups the roll by colour and becomes the MIDI channel on export.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub color: u8,
+    /// Schema ≤ 8 only; folded into `start_tick` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "startBeat", skip_serializing)]
+    pub legacy_start_beat: Option<f64>,
+    /// Schema ≤ 8 only; folded into `length_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "lengthBeats", skip_serializing)]
+    pub legacy_length_beats: Option<f64>,
+    /// Schema ≤ 8 only; folded into `shift_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "shift", skip_serializing)]
+    pub legacy_shift: Option<f64>,
 }
 
 impl NoteEvent {
-    pub fn new(start_beat: f64, length_beats: f64, pitch: i32) -> Self {
+    pub fn new(start_tick: i64, length_ticks: i64, pitch: i32) -> Self {
         NoteEvent {
             id: Uuid::new_v4(),
-            start_beat,
-            length_beats,
+            start_tick,
+            length_ticks,
             pitch,
             velocity: default_velocity(),
             intentional: false,
             muted: false,
+            pan: 0.5,
+            release: 0.5,
+            fine: 0,
+            mod_x: 0.5,
+            mod_y: 0.5,
+            shift_ticks: 0,
+            repeats: 0,
+            color: 0,
+            legacy_start_beat: None,
+            legacy_length_beats: None,
+            legacy_shift: None,
         }
     }
 
@@ -132,21 +249,46 @@ impl NoteEvent {
         self
     }
 
-    pub fn end_beat(&self) -> f64 {
-        self.start_beat + self.length_beats
+    pub fn end_tick(&self) -> i64 {
+        self.start_tick + self.length_ticks
+    }
+
+    /// Where the note actually sounds once its shift is taken into account. Never negative.
+    pub fn shifted_start(&self) -> i64 {
+        (self.start_tick + self.shift_ticks).max(0)
     }
 
     /// Clamp into the ranges the engine accepts. Used when applying edits from the UI.
     pub fn sanitized(mut self) -> Self {
         self.pitch = self.pitch.clamp(0, 127);
         self.velocity = self.velocity.clamp(1, 127);
-        if !self.start_beat.is_finite() || self.start_beat < 0.0 {
-            self.start_beat = 0.0;
-        }
-        if !self.length_beats.is_finite() || self.length_beats < MIN_NOTE_BEATS {
-            self.length_beats = MIN_NOTE_BEATS;
-        }
+        self.start_tick = self.start_tick.max(0);
+        self.length_ticks = self.length_ticks.max(MIN_NOTE_TICKS);
+        self.pan = unit(self.pan);
+        self.release = unit(self.release);
+        self.mod_x = unit(self.mod_x);
+        self.mod_y = unit(self.mod_y);
+        self.fine = self.fine.clamp(-MAX_FINE_CENTS, MAX_FINE_CENTS);
+        self.shift_ticks = self.shift_ticks.clamp(-MAX_SHIFT_TICKS, MAX_SHIFT_TICKS);
+        self.repeats = self.repeats.min(MAX_REPEATS);
+        self.color = self.color.min(15);
         self
+    }
+
+    /// Beat fields from an older file folded into the tick fields.
+    fn migrated(&mut self) {
+        migrate_tick(&mut self.start_tick, &mut self.legacy_start_beat);
+        migrate_tick(&mut self.length_ticks, &mut self.legacy_length_beats);
+        migrate_tick(&mut self.shift_ticks, &mut self.legacy_shift);
+    }
+}
+
+/// A 0–1 property, with anything non-finite falling back to the neutral centre.
+fn unit(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.5
     }
 }
 
@@ -179,6 +321,53 @@ pub struct TrackPlugin {
     pub state: Option<String>,
 }
 
+/// Most inserts a chain will hold. Eight is deeper than any realistic chain and bounds the
+/// per-block cost and the UI height.
+pub const MAX_INSERTS: usize = 8;
+
+/// One effect slot in a chain, on a track or on the master.
+///
+/// `uid` is opaque to core, exactly like [`TrackPlugin::uid`]: minted and resolved by the
+/// plugin layer. `id` is this slot's identity — it survives reordering, and the plugin layer
+/// keys the hosted instance by it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Insert {
+    pub id: Uuid,
+    /// The plugin layer's identifier for one plugin inside one bundle.
+    pub uid: String,
+    /// Cached display name, so a project opened where the plugin is gone still says which one.
+    pub name: String,
+    /// A bypassed insert stays in the chain, in order, and costs nothing to process.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Base64 of the plugin's own opaque state blob. `None` means "whatever the plugin loads
+    /// with".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+impl Insert {
+    /// A freshly chosen effect: enabled, with no state of its own yet.
+    pub fn new(uid: impl Into<String>, name: impl Into<String>) -> Self {
+        Insert { id: Uuid::new_v4(), uid: uid.into(), name: name.into(), enabled: true, state: None }
+    }
+}
+
+/// Drop slots that name nothing, keep one slot per id, and cap the chain. Reachable by hand-
+/// editing a file, so it is resolved once on load instead of guarded at every read.
+fn sanitize_inserts(inserts: &mut Vec<Insert>) {
+    let mut seen: Vec<Uuid> = Vec::with_capacity(inserts.len());
+    inserts.retain(|i| {
+        if i.uid.trim().is_empty() || seen.contains(&i.id) {
+            return false;
+        }
+        seen.push(i.id);
+        true
+    });
+    inserts.truncate(MAX_INSERTS);
+}
+
 /// One instrument track: name, voice, mute/solo and its own bus settings. Notes live in
 /// patterns keyed by track id, so a track is reused across every pattern.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +386,9 @@ pub struct Track {
     /// A drum track uses the procedural kit and a step grid instead of a synth + piano roll.
     #[serde(default)]
     pub is_drum: bool,
+    /// An audio track holds recorded or imported audio and a guitar rig instead of notes.
+    #[serde(default)]
+    pub is_audio: bool,
     /// Bus gain (0–1.5).
     #[serde(default = "one")]
     pub volume: f64,
@@ -216,6 +408,21 @@ pub struct Track {
     /// drum kit named by `voice`.
     #[serde(default)]
     pub plugin: Option<TrackPlugin>,
+    /// The guitar rig on an audio track. `None` on note tracks.
+    #[serde(default)]
+    pub amp: Option<AmpRig>,
+    /// This track's effect chain, in order, applied pre-fader. Empty on a new track.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inserts: Vec<Insert>,
+}
+
+/// What a track plays. Derived from the booleans rather than replacing them: `isDrum` is in
+/// every file ever written and pinned by the IPC contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    Midi,
+    Drum,
+    Audio,
 }
 
 impl Track {
@@ -227,12 +434,15 @@ impl Track {
             muted: false,
             soloed: false,
             is_drum: false,
+            is_audio: false,
             volume: 1.0,
             reverb_send: 0.0,
             tone: default_tone(),
             pan: 0.0,
             color: None,
             plugin: None,
+            amp: None,
+            inserts: vec![],
         }
     }
 
@@ -241,20 +451,491 @@ impl Track {
         t.is_drum = true;
         t
     }
+
+    /// A new audio track: no voice, a default rig.
+    pub fn audio(name: impl Into<String>) -> Self {
+        let mut t = Track::new(name);
+        t.is_audio = true;
+        t.amp = Some(AmpRig::default());
+        t
+    }
+
+    /// Audio wins over drum; [`ProjectModel::normalized`] guarantees they are never both set.
+    pub fn kind(&self) -> TrackKind {
+        if self.is_audio {
+            TrackKind::Audio
+        } else if self.is_drum {
+            TrackKind::Drum
+        } else {
+            TrackKind::Midi
+        }
+    }
 }
 
-fn default_pattern_length() -> f64 {
-    16.0
+/// An audio file the project uses. The samples live in the app's audio store as
+/// `<app data>/audio/<id>.wav`; the project only carries the description, so core stays free
+/// of file paths and decoding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioSource {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    /// What the UI calls it: the imported file's name, or "take 3".
+    pub name: String,
+    pub frames: u64,
+    pub sample_rate: u32,
+    pub channels: u8,
+}
+
+impl AudioSource {
+    /// Length at the source's own rate. 0 for a degenerate source.
+    pub fn duration_seconds(&self) -> f64 {
+        if self.sample_rate == 0 {
+            0.0
+        } else {
+            self.frames as f64 / self.sample_rate as f64
+        }
+    }
+}
+
+/// Longest fade a clip may carry, in seconds. Past this it is an automation curve, not a fade.
+pub const MAX_FADE_SECONDS: f64 = 5.0;
+/// Loudest a clip may be boosted, linear.
+pub const MAX_CLIP_GAIN: f64 = 4.0;
+
+/// A piece of an [`AudioSource`] on an audio track's timeline. Audio never warps: it is
+/// anchored at a beat and then plays for a length in seconds, so a tempo change moves where
+/// it starts but never what it sounds like.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioClip {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    pub track_id: Uuid,
+    pub source_id: Uuid,
+    #[serde(default)]
+    pub start_tick: i64,
+    pub length_seconds: f64,
+    /// How far into the source playback begins.
+    #[serde(default)]
+    pub offset_seconds: f64,
+    /// Linear, 0…[`MAX_CLIP_GAIN`].
+    #[serde(default = "one")]
+    pub gain: f64,
+    #[serde(default)]
+    pub fade_in_seconds: f64,
+    #[serde(default)]
+    pub fade_out_seconds: f64,
+    #[serde(default)]
+    pub muted: bool,
+    /// Schema ≤ 8 only; folded into `start_tick` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "startBeat", skip_serializing)]
+    pub legacy_start_beat: Option<f64>,
+}
+
+impl AudioClip {
+    pub fn new(track_id: Uuid, source_id: Uuid, start_tick: i64, length_seconds: f64) -> Self {
+        AudioClip {
+            id: Uuid::new_v4(),
+            track_id,
+            source_id,
+            start_tick,
+            length_seconds,
+            offset_seconds: 0.0,
+            gain: 1.0,
+            fade_in_seconds: 0.0,
+            fade_out_seconds: 0.0,
+            muted: false,
+            legacy_start_beat: None,
+        }
+    }
+
+    /// Every number in range and finite, or `None` if the clip is nonsense.
+    pub fn sanitized(mut self) -> Option<Self> {
+        if !self.length_seconds.is_finite() {
+            return None;
+        }
+        if self.start_tick < 0 || self.length_seconds <= 0.0 {
+            return None;
+        }
+        self.offset_seconds = if self.offset_seconds.is_finite() { self.offset_seconds.max(0.0) } else { 0.0 };
+        self.gain = if self.gain.is_finite() { self.gain.clamp(0.0, MAX_CLIP_GAIN) } else { 1.0 };
+        let half = self.length_seconds * 0.5;
+        self.fade_in_seconds = clamp_fade(self.fade_in_seconds, half);
+        self.fade_out_seconds = clamp_fade(self.fade_out_seconds, half);
+        Some(self)
+    }
+
+    /// Beat fields from an older file folded into the tick fields.
+    fn migrated(&mut self) {
+        migrate_tick(&mut self.start_tick, &mut self.legacy_start_beat);
+    }
+}
+
+/// Fades may not overlap, so each is capped at half the clip.
+fn clamp_fade(v: f64, half: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, MAX_FADE_SECONDS.min(half))
+    } else {
+        0.0
+    }
+}
+
+/// Most pedals a rig will hold. Four fills the screen and bounds the per-sample cost.
+pub const MAX_PEDALS: usize = 4;
+
+/// A guitar rig on an audio track: input strip → pedals → amp head → cabinet → rack.
+///
+/// Plain numbers in real units; `dissonant-engine` turns them into DSP. Core never interprets
+/// them beyond clamping, the same deal as [`TrackPlugin`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmpRig {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Input trim, -24…+24 dB.
+    #[serde(default)]
+    pub input_db: f64,
+    #[serde(default)]
+    pub gate: Gate,
+    /// In signal order, at most [`MAX_PEDALS`].
+    #[serde(default)]
+    pub pedals: Vec<Pedal>,
+    #[serde(default)]
+    pub amp: AmpHead,
+    /// The tone stack the Bass/Mid/Treble knobs drive. A separate choice from the amp: the same
+    /// preamp through a British stack and an American one are two different amps, which is why
+    /// Amp Designer makes you pick them independently.
+    #[serde(default)]
+    pub eq: EqModel,
+    #[serde(default)]
+    pub cab: Cabinet,
+    #[serde(default)]
+    pub rack: Rack,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The noise gate on the input strip — single-coils into a high-gain amp are unusable without
+/// one, so it is on by default.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Gate {
+    pub on: bool,
+    /// -80…0 dBFS.
+    pub threshold_db: f64,
+    /// 5…500 ms.
+    pub release_ms: f64,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Gate { on: true, threshold_db: -55.0, release_ms: 120.0 }
+    }
+}
+
+/// One stompbox. Every knob is 0…10 like the real thing, except times and rates, which are in
+/// their own units so the UI can print them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Pedal {
+    Comp { on: bool, sustain: f64, level: f64 },
+    Drive { on: bool, drive: f64, tone: f64, level: f64 },
+    Wah { on: bool, sensitivity: f64, range: f64 },
+    Chorus { on: bool, rate_hz: f64, depth: f64, mix: f64 },
+    Phaser { on: bool, rate_hz: f64, depth: f64, feedback: f64 },
+    Tremolo { on: bool, rate_hz: f64, depth: f64 },
+    Delay { on: bool, time_ms: f64, feedback: f64, mix: f64 },
+}
+
+/// Which stompbox, without its settings. The UI builds its "add pedal" menu from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PedalKind {
+    Comp,
+    Drive,
+    Wah,
+    Chorus,
+    Phaser,
+    Tremolo,
+    Delay,
+}
+
+impl Pedal {
+    pub const KINDS: [PedalKind; 7] = [
+        PedalKind::Comp,
+        PedalKind::Drive,
+        PedalKind::Wah,
+        PedalKind::Chorus,
+        PedalKind::Phaser,
+        PedalKind::Tremolo,
+        PedalKind::Delay,
+    ];
+
+    pub fn kind(&self) -> PedalKind {
+        match self {
+            Pedal::Comp { .. } => PedalKind::Comp,
+            Pedal::Drive { .. } => PedalKind::Drive,
+            Pedal::Wah { .. } => PedalKind::Wah,
+            Pedal::Chorus { .. } => PedalKind::Chorus,
+            Pedal::Phaser { .. } => PedalKind::Phaser,
+            Pedal::Tremolo { .. } => PedalKind::Tremolo,
+            Pedal::Delay { .. } => PedalKind::Delay,
+        }
+    }
+
+    pub fn on(&self) -> bool {
+        match self {
+            Pedal::Comp { on, .. }
+            | Pedal::Drive { on, .. }
+            | Pedal::Wah { on, .. }
+            | Pedal::Chorus { on, .. }
+            | Pedal::Phaser { on, .. }
+            | Pedal::Tremolo { on, .. }
+            | Pedal::Delay { on, .. } => *on,
+        }
+    }
+
+    /// A fresh pedal of `kind`, switched on, every knob at noon.
+    pub fn of(kind: PedalKind) -> Pedal {
+        match kind {
+            PedalKind::Comp => Pedal::Comp { on: true, sustain: 5.0, level: 5.0 },
+            PedalKind::Drive => Pedal::Drive { on: true, drive: 5.0, tone: 5.0, level: 5.0 },
+            PedalKind::Wah => Pedal::Wah { on: true, sensitivity: 5.0, range: 5.0 },
+            PedalKind::Chorus => Pedal::Chorus { on: true, rate_hz: 1.2, depth: 5.0, mix: 5.0 },
+            PedalKind::Phaser => Pedal::Phaser { on: true, rate_hz: 0.8, depth: 5.0, feedback: 4.0 },
+            PedalKind::Tremolo => Pedal::Tremolo { on: true, rate_hz: 5.0, depth: 5.0 },
+            PedalKind::Delay => Pedal::Delay { on: true, time_ms: 350.0, feedback: 3.0, mix: 3.0 },
+        }
+    }
+
+    /// Every knob finite and in range, or `None` if any was NaN.
+    pub fn sanitized(self) -> Option<Pedal> {
+        let p = match self {
+            Pedal::Comp { on, sustain, level } => Pedal::Comp { on, sustain: knob(sustain)?, level: knob(level)? },
+            Pedal::Drive { on, drive, tone, level } => {
+                Pedal::Drive { on, drive: knob(drive)?, tone: knob(tone)?, level: knob(level)? }
+            }
+            Pedal::Wah { on, sensitivity, range } => {
+                Pedal::Wah { on, sensitivity: knob(sensitivity)?, range: knob(range)? }
+            }
+            Pedal::Chorus { on, rate_hz, depth, mix } => {
+                Pedal::Chorus { on, rate_hz: ranged(rate_hz, 0.1, 8.0)?, depth: knob(depth)?, mix: knob(mix)? }
+            }
+            Pedal::Phaser { on, rate_hz, depth, feedback } => {
+                Pedal::Phaser { on, rate_hz: ranged(rate_hz, 0.1, 8.0)?, depth: knob(depth)?, feedback: knob(feedback)? }
+            }
+            Pedal::Tremolo { on, rate_hz, depth } => {
+                Pedal::Tremolo { on, rate_hz: ranged(rate_hz, 0.1, 14.0)?, depth: knob(depth)? }
+            }
+            Pedal::Delay { on, time_ms, feedback, mix } => Pedal::Delay {
+                on,
+                time_ms: ranged(time_ms, 20.0, 1200.0)?,
+                feedback: knob(feedback)?,
+                mix: knob(mix)?,
+            },
+        };
+        Some(p)
+    }
+}
+
+fn knob(v: f64) -> Option<f64> {
+    ranged(v, 0.0, 10.0)
+}
+
+fn ranged(v: f64, lo: f64, hi: f64) -> Option<f64> {
+    v.is_finite().then(|| v.clamp(lo, hi))
+}
+
+/// The amp head: which voicing, and the knob row across its face. All 0…10.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AmpHead {
+    pub model: AmpModel,
+    pub gain: f64,
+    pub bass: f64,
+    pub mid: f64,
+    pub treble: f64,
+    pub presence: f64,
+    pub master: f64,
+}
+
+impl Default for AmpHead {
+    fn default() -> Self {
+        AmpHead {
+            model: AmpModel::Crunch,
+            gain: 5.0,
+            bass: 5.0,
+            mid: 5.0,
+            treble: 6.0,
+            presence: 5.0,
+            master: 5.0,
+        }
+    }
+}
+
+/// How hard the preamp bites, in four steps from a pedal platform to a wall of fuzz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AmpModel {
+    Clean,
+    #[default]
+    Crunch,
+    Lead,
+    Fuzz,
+}
+
+impl AmpModel {
+    pub const ALL: [AmpModel; 4] = [AmpModel::Clean, AmpModel::Crunch, AmpModel::Lead, AmpModel::Fuzz];
+}
+
+/// Which passive tone-stack topology sits between the preamp and the power amp. These are
+/// circuits, not three independent EQ bands: the knobs load each other, so turning the mid down
+/// on a British stack also moves the bass and treble. That interaction is most of what people
+/// mean by an amp's "voice".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum EqModel {
+    /// The American tone stack: scooped mids, slopes gently.
+    #[default]
+    UsClassic,
+    /// The British stack: the same network with a bigger treble cap, so it is browner and the
+    /// mid control bites harder.
+    British,
+    /// British with the bright cap across the volume pot — glassy, cuts through.
+    BritishBright,
+    /// A modern boutique voicing: flatter, far less scoop, usable everywhere.
+    Boutique,
+}
+
+impl EqModel {
+    pub const ALL: [EqModel; 4] =
+        [EqModel::UsClassic, EqModel::British, EqModel::BritishBright, EqModel::Boutique];
+}
+
+/// The speaker cabinet, which microphone is in front of it, and where that microphone sits.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cabinet {
+    pub model: CabModel,
+    pub mic_model: MicModel,
+    /// Across the cone: 0 = out at the edge, dark and mellow; 10 = on the dust cap, bright and
+    /// aggressive. The axis every engineer actually uses to dial a guitar tone.
+    pub pos_x: f64,
+    /// Away from the grille: 0 = touching it, with the proximity bass bump and a tight transient;
+    /// 10 = backed off, rounder and softer.
+    pub pos_z: f64,
+}
+
+impl Default for Cabinet {
+    fn default() -> Self {
+        Cabinet { model: CabModel::FourByTwelve, mic_model: MicModel::Dynamic, pos_x: 5.0, pos_z: 2.0 }
+    }
+}
+
+/// Which microphone is on the grille. Three archetypes, the ones every studio owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum MicModel {
+    /// Moving coil: presence peak around 5 kHz, rolled off on top, strong proximity effect.
+    #[default]
+    Dynamic,
+    /// Large-diaphragm condenser: flat and extended, hears the fizz.
+    Condenser,
+    /// Ribbon: figure-of-eight, dark above 6 kHz, the softest of the three.
+    Ribbon,
+}
+
+impl MicModel {
+    pub const ALL: [MicModel; 3] = [MicModel::Dynamic, MicModel::Condenser, MicModel::Ribbon];
+}
+
+/// Cabinet size. `Direct` bypasses the speaker entirely — a DI sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum CabModel {
+    #[default]
+    FourByTwelve,
+    TwoByTwelve,
+    OneByTwelve,
+    Direct,
+}
+
+impl CabModel {
+    pub const ALL: [CabModel; 4] = [CabModel::FourByTwelve, CabModel::TwoByTwelve, CabModel::OneByTwelve, CabModel::Direct];
+}
+
+/// What sits after the cabinet: room and output level.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Rack {
+    /// Reverb mix, 0…10.
+    pub reverb: f64,
+    /// Reverb decay, 0…10.
+    pub decay: f64,
+    /// -24…+12 dB.
+    pub output_db: f64,
+}
+
+impl Default for Rack {
+    fn default() -> Self {
+        Rack { reverb: 2.0, decay: 5.0, output_db: 0.0 }
+    }
+}
+
+impl Default for AmpRig {
+    fn default() -> Self {
+        AmpRig {
+            enabled: true,
+            input_db: 0.0,
+            gate: Gate::default(),
+            pedals: vec![Pedal::Drive { on: false, drive: 5.0, tone: 5.0, level: 5.0 }],
+            amp: AmpHead::default(),
+            eq: EqModel::default(),
+            cab: Cabinet::default(),
+            rack: Rack::default(),
+        }
+    }
+}
+
+impl AmpRig {
+    /// Every number finite and in range, pedals truncated to [`MAX_PEDALS`]. `None` when a
+    /// value was NaN or infinite — a rig that cannot be made sane is rejected, not guessed at.
+    pub fn sanitized(mut self) -> Option<AmpRig> {
+        self.input_db = ranged(self.input_db, -24.0, 24.0)?;
+        self.gate.threshold_db = ranged(self.gate.threshold_db, -80.0, 0.0)?;
+        self.gate.release_ms = ranged(self.gate.release_ms, 5.0, 500.0)?;
+        self.pedals.truncate(MAX_PEDALS);
+        self.pedals = self.pedals.into_iter().map(Pedal::sanitized).collect::<Option<Vec<_>>>()?;
+        self.amp.gain = knob(self.amp.gain)?;
+        self.amp.bass = knob(self.amp.bass)?;
+        self.amp.mid = knob(self.amp.mid)?;
+        self.amp.treble = knob(self.amp.treble)?;
+        self.amp.presence = knob(self.amp.presence)?;
+        self.amp.master = knob(self.amp.master)?;
+        self.cab.pos_x = knob(self.cab.pos_x)?;
+        self.cab.pos_z = knob(self.cab.pos_z)?;
+        self.rack.reverb = knob(self.rack.reverb)?;
+        self.rack.decay = knob(self.rack.decay)?;
+        self.rack.output_db = ranged(self.rack.output_db, -24.0, 12.0)?;
+        Some(self)
+    }
+}
+
+fn default_pattern_length() -> i64 {
+    16 * TICKS_PER_BEAT
 }
 
 /// Shortest loop a pattern will subdivide into. Anything finer is a note, not a loop, and a
-/// hand-edited file carrying 0.001 would otherwise tile thousands of copies.
-pub const MIN_LOOP_BEATS: f64 = 1.0;
+/// hand-edited file carrying a tick or two would otherwise tile thousands of copies.
+pub const MIN_LOOP_TICKS: i64 = TICKS_PER_BEAT;
 
 /// A loop — a named section like "verse" or "chorus". Holds its own chord progression (so
 /// guidance is per-section) and the notes for each track, keyed by track id.
 ///
-/// `length_beats` is the merged length: tracks and the chord track may each loop shorter than
+/// `length_ticks` is the merged length: tracks and the chord track may each loop shorter than
 /// it and repeat to fill it, so a 2-bar drum loop plays twice under a 4-bar progression.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,19 +943,30 @@ pub struct SongPattern {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     pub name: String,
-    #[serde(default = "default_pattern_length")]
-    pub length_beats: f64,
+    /// Zero only in a file that predates ticks or names no length at all; `normalized` fills
+    /// it in from the legacy beats or the default.
+    #[serde(default)]
+    pub length_ticks: i64,
     #[serde(default)]
     pub chords: crate::chord_track::ChordTrack,
     #[serde(default, deserialize_with = "de_notes_by_track")]
     pub notes_by_track: HashMap<Uuid, Vec<NoteEvent>>,
-    /// Loop length in beats of one track inside this pattern. A track that is absent (or
+    /// Loop length in ticks of one track inside this pattern. A track that is absent (or
     /// carries a value past the pattern) fills the pattern.
     #[serde(default)]
-    pub track_loop_beats: HashMap<Uuid, f64>,
-    /// Loop length in beats of the chord track. `None` fills the pattern.
+    pub track_loop_ticks: HashMap<Uuid, i64>,
+    /// Loop length in ticks of the chord track. `None` fills the pattern.
     #[serde(default)]
-    pub chord_loop_beats: Option<f64>,
+    pub chord_loop_ticks: Option<i64>,
+    /// Schema ≤ 8 only; folded into `length_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "lengthBeats", skip_serializing)]
+    pub legacy_length_beats: Option<f64>,
+    /// Schema ≤ 8 only; folded into `track_loop_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "trackLoopBeats", skip_serializing)]
+    pub legacy_track_loop_beats: Option<HashMap<Uuid, f64>>,
+    /// Schema ≤ 8 only; folded into `chord_loop_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "chordLoopBeats", skip_serializing)]
+    pub legacy_chord_loop_beats: Option<f64>,
 }
 
 /// `notesByTrack` is a JSON object keyed by track id — except in files written by the
@@ -309,11 +1001,14 @@ impl SongPattern {
         SongPattern {
             id: Uuid::new_v4(),
             name: name.into(),
-            length_beats: default_pattern_length(),
+            length_ticks: default_pattern_length(),
             chords: Default::default(),
             notes_by_track: HashMap::new(),
-            track_loop_beats: HashMap::new(),
-            chord_loop_beats: None,
+            track_loop_ticks: HashMap::new(),
+            chord_loop_ticks: None,
+            legacy_length_beats: None,
+            legacy_track_loop_beats: None,
+            legacy_chord_loop_beats: None,
         }
     }
 
@@ -321,24 +1016,24 @@ impl SongPattern {
         self.notes_by_track.get(track_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// A stored loop length made usable: clamped into `[MIN_LOOP_BEATS, length_beats]`, with
+    /// A stored loop length made usable: clamped into `[MIN_LOOP_TICKS, length_ticks]`, with
     /// anything missing or nonsensical meaning "fills the pattern".
-    fn usable_loop(&self, beats: Option<f64>) -> f64 {
-        let len = self.length_beats.max(1.0);
-        match beats {
-            Some(b) if b.is_finite() && b > 0.0 => b.clamp(MIN_LOOP_BEATS.min(len), len),
+    fn usable_loop(&self, ticks: Option<i64>) -> i64 {
+        let len = self.length_ticks.max(1);
+        match ticks {
+            Some(t) if t > 0 => t.clamp(MIN_LOOP_TICKS.min(len), len),
             _ => len,
         }
     }
 
     /// How long one turn of `track_id` is inside this pattern.
-    pub fn track_loop(&self, track_id: &Uuid) -> f64 {
-        self.usable_loop(self.track_loop_beats.get(track_id).copied())
+    pub fn track_loop(&self, track_id: &Uuid) -> i64 {
+        self.usable_loop(self.track_loop_ticks.get(track_id).copied())
     }
 
     /// How long one turn of the chord track is inside this pattern.
-    pub fn chord_loop(&self) -> f64 {
-        self.usable_loop(self.chord_loop_beats)
+    pub fn chord_loop(&self) -> i64 {
+        self.usable_loop(self.chord_loop_ticks)
     }
 
     /// The track's notes laid out across the whole pattern: the stored notes, then one copy
@@ -346,35 +1041,35 @@ impl SongPattern {
     /// [`SongPattern::notes`] when the track fills the pattern.
     pub fn looped_notes(&self, track_id: &Uuid) -> Vec<NoteEvent> {
         let src = self.notes(track_id);
-        let total = self.length_beats.max(1.0);
+        let total = self.length_ticks.max(1);
         let turn = self.track_loop(track_id);
         if turn >= total || src.is_empty() {
             return src.to_vec();
         }
-        let mut out = Vec::with_capacity(src.len() * (total / turn).ceil() as usize);
+        let mut out = Vec::with_capacity(src.len() * ((total + turn - 1) / turn) as usize);
         for (rep, base) in turns(turn, total) {
             let end = (base + turn).min(total);
             for note in src {
-                let start = base + note.start_beat;
+                let start = base + note.start_tick;
                 if start >= end {
                     continue;
                 }
                 out.push(NoteEvent {
                     id: repeat_id(&note.id, rep),
-                    start_beat: start,
-                    length_beats: ((start + note.length_beats).min(end) - start).max(MIN_NOTE_BEATS),
+                    start_tick: start,
+                    length_ticks: ((start + note.length_ticks).min(end) - start).max(MIN_NOTE_TICKS),
                     ..note.clone()
                 });
             }
         }
-        out.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        out.sort_by_key(|n| n.start_tick);
         out
     }
 
     /// The chord track laid out across the whole pattern, the same way as
     /// [`SongPattern::looped_notes`].
     pub fn looped_chords(&self) -> crate::chord_track::ChordTrack {
-        let total = self.length_beats.max(1.0);
+        let total = self.length_ticks.max(1);
         let turn = self.chord_loop();
         if turn >= total || self.chords.is_empty() {
             return self.chords.clone();
@@ -383,27 +1078,54 @@ impl SongPattern {
         for (rep, base) in turns(turn, total) {
             let end = (base + turn).min(total);
             for chord in self.chords.chords() {
-                let start = base + chord.start_beat;
-                let cut = (start + chord.length_beats).min(end);
+                let start = base + chord.start_tick;
+                let cut = (start + chord.length_ticks).min(end);
                 if cut <= start {
                     continue;
                 }
                 out.push(ChordEvent {
                     id: repeat_id(&chord.id, rep),
-                    start_beat: start,
-                    length_beats: cut - start,
+                    start_tick: start,
+                    length_ticks: cut - start,
                     pitch_classes: chord.pitch_classes.clone(),
                     name: chord.name.clone(),
+                    legacy_start_beat: None,
+                    legacy_length_beats: None,
                 });
             }
         }
         crate::chord_track::ChordTrack::new(out)
     }
+
+    /// Beat fields from an older file folded into the tick fields, this pattern's own and
+    /// those of everything it holds.
+    fn migrated(&mut self) {
+        migrate_tick(&mut self.length_ticks, &mut self.legacy_length_beats);
+        if self.length_ticks <= 0 {
+            self.length_ticks = default_pattern_length();
+        }
+        if let Some(legacy) = self.legacy_track_loop_beats.take() {
+            if self.track_loop_ticks.is_empty() {
+                self.track_loop_ticks = legacy.into_iter().map(|(id, b)| (id, beats_to_ticks(b))).collect();
+            }
+        }
+        if let Some(beats) = self.legacy_chord_loop_beats.take() {
+            if self.chord_loop_ticks.is_none() {
+                self.chord_loop_ticks = Some(beats_to_ticks(beats));
+            }
+        }
+        for notes in self.notes_by_track.values_mut() {
+            for n in notes.iter_mut() {
+                n.migrated();
+            }
+        }
+        self.chords.migrated();
+    }
 }
 
-/// `(repetition, start beat)` for every turn of a `turn`-long loop inside `total` beats.
-fn turns(turn: f64, total: f64) -> impl Iterator<Item = (u64, f64)> {
-    (0u64..).map(move |rep| (rep, rep as f64 * turn)).take_while(move |&(_, base)| base < total)
+/// `(repetition, start tick)` for every turn of a `turn`-long loop inside `total` ticks.
+fn turns(turn: i64, total: i64) -> impl Iterator<Item = (u64, i64)> {
+    (0u64..).map(move |rep| (rep, rep as i64 * turn)).take_while(move |&(_, base)| base < total)
 }
 
 /// Repetition 0 keeps the source id so an unlooped pattern is byte-identical to its notes;
@@ -447,36 +1169,57 @@ impl Default for MasterSettings {
     }
 }
 
-/// A pattern placed on the song timeline. The pattern loops from `offset_beats` for
-/// `length_beats`, so a clip can be trimmed, extended or started mid-pattern.
+/// A pattern placed on the song timeline. The pattern loops from `offset_ticks` for
+/// `length_ticks`, so a clip can be trimmed, extended or started mid-pattern.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     pub pattern_id: Uuid,
-    pub start_beat: f64,
-    pub length_beats: f64,
     #[serde(default)]
-    pub offset_beats: f64,
+    pub start_tick: i64,
+    #[serde(default)]
+    pub length_ticks: i64,
+    #[serde(default)]
+    pub offset_ticks: i64,
     #[serde(default)]
     pub muted: bool,
+    /// Schema ≤ 8 only; folded into `start_tick` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "startBeat", skip_serializing)]
+    pub legacy_start_beat: Option<f64>,
+    /// Schema ≤ 8 only; folded into `length_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "lengthBeats", skip_serializing)]
+    pub legacy_length_beats: Option<f64>,
+    /// Schema ≤ 8 only; folded into `offset_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "offsetBeats", skip_serializing)]
+    pub legacy_offset_beats: Option<f64>,
 }
 
 impl Clip {
-    pub fn new(pattern_id: Uuid, start_beat: f64, length_beats: f64) -> Self {
+    pub fn new(pattern_id: Uuid, start_tick: i64, length_ticks: i64) -> Self {
         Clip {
             id: Uuid::new_v4(),
             pattern_id,
-            start_beat,
-            length_beats,
-            offset_beats: 0.0,
+            start_tick,
+            length_ticks,
+            offset_ticks: 0,
             muted: false,
+            legacy_start_beat: None,
+            legacy_length_beats: None,
+            legacy_offset_beats: None,
         }
     }
 
-    pub fn end_beat(&self) -> f64 {
-        self.start_beat + self.length_beats
+    pub fn end_tick(&self) -> i64 {
+        self.start_tick + self.length_ticks
+    }
+
+    /// Beat fields from an older file folded into the tick fields.
+    fn migrated(&mut self) {
+        migrate_tick(&mut self.start_tick, &mut self.legacy_start_beat);
+        migrate_tick(&mut self.length_ticks, &mut self.legacy_length_beats);
+        migrate_tick(&mut self.offset_ticks, &mut self.legacy_offset_beats);
     }
 }
 
@@ -488,22 +1231,32 @@ pub struct Section {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     pub name: String,
-    pub start_beat: f64,
+    #[serde(default)]
+    pub start_tick: i64,
     #[serde(default)]
     pub key: Option<KeyState>,
     #[serde(default)]
     pub color: Option<String>,
+    /// Schema ≤ 8 only; folded into `start_tick` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "startBeat", skip_serializing)]
+    pub legacy_start_beat: Option<f64>,
 }
 
 impl Section {
-    pub fn new(name: impl Into<String>, start_beat: f64) -> Self {
+    pub fn new(name: impl Into<String>, start_tick: i64) -> Self {
         Section {
             id: Uuid::new_v4(),
             name: name.into(),
-            start_beat,
+            start_tick,
             key: None,
             color: None,
+            legacy_start_beat: None,
         }
+    }
+
+    /// Beat fields from an older file folded into the tick fields.
+    fn migrated(&mut self) {
+        migrate_tick(&mut self.start_tick, &mut self.legacy_start_beat);
     }
 }
 
@@ -560,6 +1313,13 @@ pub struct ProjectModel {
     /// pattern holds every track's notes).
     #[serde(default)]
     pub clips: Vec<Clip>,
+    /// Every audio file the project refers to. Kept even when nothing points at one, so an
+    /// undone take can be redone without decoding it again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_sources: Vec<AudioSource>,
+    /// Audio placed on the song timeline, each in its own track's lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_clips: Vec<AudioClip>,
     /// Song markers, optionally with their own key.
     #[serde(default)]
     pub sections: Vec<Section>,
@@ -572,23 +1332,29 @@ pub struct ProjectModel {
     #[serde(default)]
     pub time_signature: TimeSignature,
     /// Global swing: 50 = straight, 66.7 = triplet feel, 75 = hard shuffle. See
-    /// [`crate::tempo::swing_warp`].
+    /// [`crate::tempo::swing_warp_ticks`].
     #[serde(default = "default_swing")]
     pub swing: f64,
-    /// The subdivision swing acts on, in beats (0.5 = eighths, 0.25 = sixteenths).
-    #[serde(default = "default_swing_grid")]
-    pub swing_grid: f64,
+    /// The subdivision swing acts on, in ticks (480 = eighths, 240 = sixteenths).
+    #[serde(default)]
+    pub swing_grid_ticks: i64,
     /// Tempo changes along the song (empty = `tempo` throughout). Pattern mode plays at the
     /// base tempo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tempo_points: Vec<crate::tempo::TempoPoint>,
+    /// The master effect chain, in order, ahead of the master bus processing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub master_inserts: Vec<Insert>,
+    /// Schema ≤ 8 only; folded into `swing_grid_ticks` by [`ProjectModel::normalized`].
+    #[serde(default, rename = "swingGrid", skip_serializing)]
+    pub legacy_swing_grid: Option<f64>,
 }
 
 fn default_swing() -> f64 {
     50.0
 }
-fn default_swing_grid() -> f64 {
-    0.5
+fn default_swing_grid() -> i64 {
+    TICKS_PER_BEAT / 2
 }
 
 impl Default for ProjectModel {
@@ -607,13 +1373,17 @@ impl ProjectModel {
             tracks: default_tracks(),
             patterns: default_patterns(),
             clips: vec![],
+            audio_sources: vec![],
+            audio_clips: vec![],
             sections: vec![],
             arrangement: vec![],
             master: MasterSettings::default(),
             time_signature: TimeSignature::default(),
             swing: default_swing(),
-            swing_grid: default_swing_grid(),
+            swing_grid_ticks: default_swing_grid(),
             tempo_points: vec![],
+            master_inserts: vec![],
+            legacy_swing_grid: None,
         }
     }
 
@@ -626,11 +1396,12 @@ impl ProjectModel {
     /// plus a drum track, so the first loop is seconds away.
     pub fn starter() -> Self {
         let mut model = ProjectModel::empty();
-        let chords = crate::theory::harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 16.0, 4.0);
+        let chords =
+            crate::theory::harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 16 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT);
         model.patterns[0].chords = crate::chord_track::ChordTrack::new(chords);
         model.tracks.push(Track::drums("drums"));
         let p = &model.patterns[0];
-        model.clips = vec![Clip::new(p.id, 0.0, p.length_beats)];
+        model.clips = vec![Clip::new(p.id, 0, p.length_ticks)];
         model
     }
 
@@ -643,21 +1414,18 @@ impl ProjectModel {
     }
 
     /// End of the last clip (0 for an empty song).
-    pub fn song_length(&self) -> f64 {
-        self.clips.iter().map(Clip::end_beat).fold(0.0, f64::max)
+    pub fn song_length(&self) -> i64 {
+        self.clips.iter().map(Clip::end_tick).max().unwrap_or(0)
     }
 
-    /// The section containing `beat` (the last one starting at or before it).
-    pub fn section_at(&self, beat: f64) -> Option<&Section> {
-        self.sections
-            .iter()
-            .filter(|s| s.start_beat <= beat)
-            .max_by(|a, b| a.start_beat.total_cmp(&b.start_beat))
+    /// The section containing `tick` (the last one starting at or before it).
+    pub fn section_at(&self, tick: i64) -> Option<&Section> {
+        self.sections.iter().filter(|s| s.start_tick <= tick).max_by_key(|s| s.start_tick)
     }
 
-    /// The key in force at `beat`: the section's key if it has one, else the project key.
-    pub fn key_at(&self, beat: f64) -> KeyState {
-        self.section_at(beat).and_then(|s| s.key).unwrap_or(self.key)
+    /// The key in force at `tick`: the section's key if it has one, else the project key.
+    pub fn key_at(&self, tick: i64) -> KeyState {
+        self.section_at(tick).and_then(|s| s.key).unwrap_or(self.key)
     }
 
     pub fn track(&self, id: &Uuid) -> Option<&Track> {
@@ -676,10 +1444,24 @@ impl ProjectModel {
         self.patterns.iter_mut().find(|p| &p.id == id)
     }
 
-    /// Normalize after decoding a foreign/older file: bump the schema, make sure there is at
-    /// least one track and one pattern, clamp every note, and drop references to things that
-    /// aren't in the project any more.
+    pub fn audio_clip(&self, id: &Uuid) -> Option<&AudioClip> {
+        self.audio_clips.iter().find(|c| &c.id == id)
+    }
+
+    pub fn audio_source(&self, id: &Uuid) -> Option<&AudioSource> {
+        self.audio_sources.iter().find(|s| &s.id == id)
+    }
+
+    /// Every audio clip on one track, in timeline order.
+    pub fn audio_clips_on(&self, track_id: Uuid) -> impl Iterator<Item = &AudioClip> {
+        self.audio_clips.iter().filter(move |c| c.track_id == track_id)
+    }
+
+    /// Normalize after decoding a foreign/older file: fold schema ≤ 8 beat fields into ticks,
+    /// bump the schema, make sure there is at least one track and one pattern, clamp every
+    /// note, and drop references to things that aren't in the project any more.
     pub fn normalized(mut self) -> Self {
+        self.migrate_beats();
         // Only ever bump forward: relabelling a newer file as ours would make the next save
         // overwrite it with fields this version dropped.
         self.schema_version = self.schema_version.max(SCHEMA_VERSION);
@@ -694,9 +1476,9 @@ impl ProjectModel {
             // Notes keyed by a track that no longer exists are invisible and never played, but
             // survive every save; drop them instead of growing the file forever.
             pattern.notes_by_track.retain(|tid, _| track_ids.contains(tid));
-            pattern.track_loop_beats.retain(|tid, b| track_ids.contains(tid) && b.is_finite() && *b > 0.0);
-            if !pattern.chord_loop_beats.is_some_and(|b| b.is_finite() && b > 0.0) {
-                pattern.chord_loop_beats = None;
+            pattern.track_loop_ticks.retain(|tid, t| track_ids.contains(tid) && *t > 0);
+            if pattern.chord_loop_ticks.is_none_or(|t| t <= 0) {
+                pattern.chord_loop_ticks = None;
             }
             for notes in pattern.notes_by_track.values_mut() {
                 for n in notes.iter_mut() {
@@ -707,11 +1489,11 @@ impl ProjectModel {
         let pattern_ids: Vec<Uuid> = self.patterns.iter().map(|p| p.id).collect();
         // Legacy flat arrangement → clips, back to back.
         if self.clips.is_empty() && !self.arrangement.is_empty() {
-            let mut at = 0.0;
+            let mut at = 0;
             for pid in &self.arrangement {
                 if let Some(p) = self.patterns.iter().find(|p| &p.id == pid) {
-                    self.clips.push(Clip::new(p.id, at, p.length_beats));
-                    at += p.length_beats;
+                    self.clips.push(Clip::new(p.id, at, p.length_ticks));
+                    at += p.length_ticks;
                 }
             }
         }
@@ -720,18 +1502,63 @@ impl ProjectModel {
             self.swing = default_swing();
         }
         self.swing = self.swing.clamp(50.0, 75.0);
-        if !(self.swing_grid == 0.5 || self.swing_grid == 0.25) {
-            self.swing_grid = default_swing_grid();
+        if !(self.swing_grid_ticks == TICKS_PER_BEAT / 2 || self.swing_grid_ticks == TICKS_PER_BEAT / 4) {
+            self.swing_grid_ticks = default_swing_grid();
         }
-        self.tempo_points.retain(|p| p.beat.is_finite() && p.beat >= 0.0 && p.bpm.is_finite());
+        self.tempo_points.retain(|p| p.tick >= 0 && p.bpm.is_finite());
         for p in &mut self.tempo_points {
             p.bpm = p.bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM);
         }
-        self.tempo_points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
-        self.clips.retain(|c| pattern_ids.contains(&c.pattern_id) && c.length_beats > 0.0 && c.start_beat >= 0.0);
-        self.clips.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
-        self.sections.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        self.tempo_points.sort_by_key(|p| p.tick);
+        self.clips.retain(|c| pattern_ids.contains(&c.pattern_id) && c.length_ticks > 0 && c.start_tick >= 0);
+        self.clips.sort_by_key(|c| c.start_tick);
+        // An audio track is never also a drum track, and always carries a rig; a note track
+        // never does. The combinations the UI cannot produce are still reachable by hand-editing
+        // a file, so they are resolved here rather than guarded at every read.
+        for t in &mut self.tracks {
+            if t.is_audio {
+                t.is_drum = false;
+                let rig = t.amp.take().unwrap_or_default();
+                t.amp = Some(rig.sanitized().unwrap_or_default());
+            } else {
+                t.amp = None;
+            }
+            sanitize_inserts(&mut t.inserts);
+        }
+        sanitize_inserts(&mut self.master_inserts);
+        let audio_track_ids: Vec<Uuid> = self.tracks.iter().filter(|t| t.is_audio).map(|t| t.id).collect();
+        let source_ids: Vec<Uuid> = self.audio_sources.iter().map(|s| s.id).collect();
+        // Unreferenced sources stay: undoing the clip that used one must not force a re-decode.
+        self.audio_clips = std::mem::take(&mut self.audio_clips)
+            .into_iter()
+            .filter(|c| audio_track_ids.contains(&c.track_id) && source_ids.contains(&c.source_id))
+            .filter_map(AudioClip::sanitized)
+            .collect();
+        self.audio_clips.sort_by_key(|c| c.start_tick);
+        self.sections.sort_by_key(|s| s.start_tick);
         self
+    }
+
+    /// Fold every schema ≤ 8 beat field into its tick field, then forget the beats. Runs
+    /// before the other fixups so they only ever see ticks — a legacy loop length has to be
+    /// in ticks before it can be clamped against a pattern length that is also in ticks.
+    fn migrate_beats(&mut self) {
+        migrate_tick(&mut self.swing_grid_ticks, &mut self.legacy_swing_grid);
+        for pattern in &mut self.patterns {
+            pattern.migrated();
+        }
+        for clip in &mut self.clips {
+            clip.migrated();
+        }
+        for clip in &mut self.audio_clips {
+            clip.migrated();
+        }
+        for section in &mut self.sections {
+            section.migrated();
+        }
+        for point in &mut self.tempo_points {
+            point.migrated();
+        }
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {

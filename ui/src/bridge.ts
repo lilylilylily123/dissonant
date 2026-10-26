@@ -3,6 +3,9 @@
 // exercised without audio. Keep the mock's command semantics aligned with dissonant-core.
 
 import type {
+  AmpRig,
+  AudioClip,
+  AudioImportProgress,
   AudioStatus,
   AudioStatusEvent,
   CatalogEntry,
@@ -11,10 +14,14 @@ import type {
   ExportRequest,
   ExportResult,
   Command,
+  InputDevice,
+  Insert,
+  InsertTarget,
   InstallProgress,
   MasterSettings,
   MidiStatus,
   NoteEvent,
+  Pedal,
   OutputDevice,
   ParamInfo,
   PluginDescriptor,
@@ -30,14 +37,36 @@ import type {
   TrackParam,
   TemplateInfo,
 } from "./types";
-import { chordLoop, hostPlatforms, MIN_LOOP_BEATS, trackLoop, uuid, withDefaults } from "./types";
+import {
+  beatsToTicks,
+  chordLoop,
+  defaultAmpRig,
+  DEFAULT_SWING_GRID_TICKS,
+  EQ_MODELS,
+  hostPlatforms,
+  MAX_CLIP_GAIN,
+  MAX_FADE_SECONDS,
+  MAX_INSERTS,
+  MAX_PEDALS,
+  MIC_MODELS,
+  MIN_LOOP_TICKS,
+  MIN_NOTE_TICKS,
+  TICKS_PER_BEAT,
+  trackLoop,
+  uuid,
+  withDefaults,
+} from "./types";
 import { normalize, progression, STARTERS } from "./theory";
 
 export interface Bridge {
   readonly isTauri: boolean;
   getState(): Promise<Snapshot>;
   /** `label` names the edit for the Edit menu ("move notes"); the command's own name otherwise. */
-  apply(command: Command, transient?: boolean, label?: string): Promise<Snapshot>;
+  apply(
+    command: Command,
+    transient?: boolean,
+    label?: string,
+  ): Promise<Snapshot>;
   commitGesture(): Promise<Snapshot>;
   undo(): Promise<Snapshot>;
   redo(): Promise<Snapshot>;
@@ -49,10 +78,15 @@ export interface Bridge {
   play(countInBars?: number): Promise<void>;
   stop(): Promise<void>;
   setMetronome(on: boolean, volume?: number): Promise<void>;
-  seek(beat: number): Promise<void>;
+  seek(tick: number): Promise<void>;
   setHearChords(on: boolean): Promise<void>;
   /** `seconds` is how long the note is held before its automatic release. */
-  audition(trackId: string, pitch: number, velocity?: number, seconds?: number): Promise<void>;
+  audition(
+    trackId: string,
+    pitch: number,
+    velocity?: number,
+    seconds?: number,
+  ): Promise<void>;
   auditionOff(trackId: string, pitch: number): Promise<void>;
   audioStatus(): Promise<AudioStatus>;
   restartAudio(): Promise<AudioStatus>;
@@ -72,9 +106,11 @@ export interface Bridge {
   openMidiInput(name?: string): Promise<MidiStatus>;
   closeMidiInput(): Promise<MidiStatus>;
   setLiveTrack(trackId: string | null): Promise<void>;
+  /** `quantize` is the recording grid in ticks; 0 leaves the take unquantized. */
   setRecord(armed: boolean, quantize?: number): Promise<MidiStatus>;
   noteOn(pitch: number, velocity?: number): Promise<void>;
   noteOff(pitch: number): Promise<void>;
+  /** Loop bounds in ticks. */
   setLoop(start: number, end: number): Promise<void>;
   clearLoop(): Promise<void>;
   setLooping(on: boolean): Promise<void>;
@@ -118,7 +154,12 @@ export interface Bridge {
    * one undo step. There is no transient document command to close, so `commitGesture` plays
    * no part here.
    */
-  setPluginParam(trackId: string, paramId: number, value: number, commit?: boolean): Promise<void>;
+  setPluginParam(
+    trackId: string,
+    paramId: number,
+    value: number,
+    commit?: boolean,
+  ): Promise<void>;
   /** The curated free-plugin list. */
   pluginCatalog(): Promise<CatalogEntry[]>;
   /** Download, verify and unpack one catalog entry; progress arrives on `onPluginInstall`. */
@@ -129,9 +170,75 @@ export interface Bridge {
   openUrl(url: string): Promise<void>;
   /** Open (or raise) the separate window holding one track's plugin controls. */
   openPluginWindow(trackId: string): Promise<void>;
+
+  // ── Effect inserts ──────────────────────────────────────────────────────────────────────
+  // Each of these is a document edit plus the hosting work that has to go with it (opening or
+  // closing the effect, moving it in the engine's chain), which is why they are commands of
+  // their own rather than an `apply` from the UI. `label` is the undo label the user will see
+  // in the Edit menu; omitted, the core names the edit itself.
+  /** Put a scanned effect in a chain, at `index` or appended. */
+  addInsert(
+    target: InsertTarget,
+    uid: string,
+    index?: number | null,
+    label?: string,
+  ): Promise<Snapshot>;
+  removeInsert(
+    target: InsertTarget,
+    insertId: string,
+    label?: string,
+  ): Promise<Snapshot>;
+  /** Move an insert within its chain; `toIndex` is clamped to the chain. */
+  moveInsert(
+    target: InsertTarget,
+    insertId: string,
+    toIndex: number,
+    label?: string,
+  ): Promise<Snapshot>;
+  /** Bypass (`on: false`) or re-enable one insert, leaving it where it is. */
+  setInsertEnabled(
+    target: InsertTarget,
+    insertId: string,
+    on: boolean,
+    label?: string,
+  ): Promise<Snapshot>;
+  /** One insert's parameters, with the values its effect currently holds. Empty for an insert
+   *  that is gone or whose plugin is not installed, so a fetch racing a removal is harmless. */
+  insertParams(insertId: string): Promise<ParamInfo[]>;
+  /** Write one insert parameter. Like `setPluginParam`: dragging (`commit` false) only reaches
+   *  the effect and answers null; committing folds its state into one undo step. */
+  setInsertParam(
+    insertId: string,
+    paramId: number,
+    value: number,
+    commit?: boolean,
+  ): Promise<Snapshot | null>;
+
+  // ── Guitar ──────────────────────────────────────────────────────────────────────────────
+  /** Capture devices this computer offers. */
+  inputDevices(): Promise<InputDevice[]>;
+  /** Point the live input at one audio track, and whether it is monitored through the rig. */
+  setAudioArm(trackId: string | null, monitor: boolean): Promise<AudioStatus>;
+  /** Arm the recorder. Does not start the transport — call `play` next, so a count-in is
+   *  excluded from the take without anyone having to subtract it. */
+  startAudioRecord(): Promise<void>;
+  /** Finish the take; the new clip arrives in the returned snapshot as one undo step. */
+  stopAudioRecord(): Promise<Snapshot>;
+  /** Decode a file into the audio store and place it. With no track, one is added first. */
+  importAudio(
+    path: string,
+    trackId: string | null,
+    startTick?: number,
+  ): Promise<Snapshot>;
+  /** `buckets` min/max pairs over one source, for the waveform lane. */
+  audioPeaks(sourceId: string, buckets: number): Promise<[number, number][]>;
+  onAudioImport(cb: (p: AudioImportProgress) => void): () => void;
+  /** An audio file was dropped onto the window. */
+  onAudioDropped(cb: (path: string) => void): () => void;
 }
 
-const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const isTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 // ─── Tauri implementation ──────────────────────────────────────────────────────────────────
 
@@ -141,7 +248,10 @@ async function tauriBridge(): Promise<Bridge> {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   const dialog = await import("@tauri-apps/plugin-dialog");
 
-  const subscribe = <T,>(name: string, cb: (payload: T) => void): (() => void) => {
+  const subscribe = <T>(
+    name: string,
+    cb: (payload: T) => void,
+  ): (() => void) => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     listen<T>(name, (e) => cb(e.payload)).then((u) => {
@@ -157,27 +267,35 @@ async function tauriBridge(): Promise<Bridge> {
   return {
     isTauri: true,
     getState: () => invoke<Snapshot>("get_state"),
-    apply: (command, transient = false, label) => invoke<Snapshot>("apply", { command, transient, label: label ?? null }),
+    apply: (command, transient = false, label) =>
+      invoke<Snapshot>("apply", { command, transient, label: label ?? null }),
     commitGesture: () => invoke<Snapshot>("commit_gesture"),
     undo: () => invoke<Snapshot>("undo"),
     redo: () => invoke<Snapshot>("redo"),
-    newProject: (starter = true) => invoke<Snapshot>("new_project", { starter }),
+    newProject: (starter = true) =>
+      invoke<Snapshot>("new_project", { starter }),
     openProject: (path) => invoke<Snapshot>("open_project", { path }),
-    saveProject: (path) => invoke<Snapshot>("save_project", { path: path ?? null }),
-    setPlaybackContext: (mode, patternId) => invoke("set_playback_context", { mode, patternId }),
-    play: (countInBars) => invoke("transport_play", { countInBars: countInBars ?? null }),
+    saveProject: (path) =>
+      invoke<Snapshot>("save_project", { path: path ?? null }),
+    setPlaybackContext: (mode, patternId) =>
+      invoke("set_playback_context", { mode, patternId }),
+    play: (countInBars) =>
+      invoke("transport_play", { countInBars: countInBars ?? null }),
     stop: () => invoke("transport_stop"),
-    setMetronome: (on, volume) => invoke("set_metronome", { on, volume: volume ?? null }),
-    seek: (beat) => invoke("transport_seek", { beat }),
+    setMetronome: (on, volume) =>
+      invoke("set_metronome", { on, volume: volume ?? null }),
+    seek: (tick) => invoke("transport_seek", { tick }),
     setHearChords: (on) => invoke("set_hear_chords", { on }),
-    audition: (trackId, pitch, velocity = 100, seconds) => invoke("audition", { trackId, pitch, velocity, seconds }),
+    audition: (trackId, pitch, velocity = 100, seconds) =>
+      invoke("audition", { trackId, pitch, velocity, seconds }),
     auditionOff: (trackId, pitch) => invoke("audition_off", { trackId, pitch }),
     audioStatus: () => invoke<AudioStatus>("audio_status"),
     restartAudio: () => invoke<AudioStatus>("restart_audio"),
     exportWav: (request) => invoke<ExportResult>("export_wav", { request }),
     onExportProgress: (cb) => subscribe<ExportProgress>("export-progress", cb),
     exportMidi: (path, scope) => invoke<string>("export_midi", { path, scope }),
-    importMidi: (path, patternId) => invoke<Snapshot>("import_midi", { path, patternId }),
+    importMidi: (path, patternId) =>
+      invoke<Snapshot>("import_midi", { path, patternId }),
     listTemplates: () => invoke<TemplateInfo[]>("list_templates"),
     saveTemplate: (name) => invoke<TemplateInfo>("save_template", { name }),
     deleteTemplate: (name) => invoke("delete_template", { name }),
@@ -186,16 +304,21 @@ async function tauriBridge(): Promise<Bridge> {
     onDocument: (cb) => subscribe<Snapshot>("document", cb),
     onMidiActivity: (cb) => subscribe<number>("midi-activity", cb),
     midiStatus: () => invoke<MidiStatus>("midi_status"),
-    openMidiInput: (name) => invoke<MidiStatus>("open_midi_input", { name: name ?? null }),
+    openMidiInput: (name) =>
+      invoke<MidiStatus>("open_midi_input", { name: name ?? null }),
     closeMidiInput: () => invoke<MidiStatus>("close_midi_input"),
     setLiveTrack: (trackId) => invoke("set_live_track", { trackId }),
-    setRecord: (armed, quantize) => invoke<MidiStatus>("set_record", { armed, quantize: quantize ?? null }),
+    setRecord: (armed, quantize) =>
+      invoke<MidiStatus>("set_record", { armed, quantize: quantize ?? null }),
     noteOn: (pitch, velocity = 100) => invoke("note_on", { pitch, velocity }),
     noteOff: (pitch) => invoke("note_off", { pitch }),
     setLoop: (start, end) => invoke("set_loop", { start, end }),
     clearLoop: () => invoke("clear_loop"),
     setLooping: (on) => invoke("set_looping", { on }),
-    pickOpenPath: async (extensions = ["dissonant", "json"], label = "dissonant project") => {
+    pickOpenPath: async (
+      extensions = ["dissonant", "json"],
+      label = "dissonant project",
+    ) => {
       const r = await dialog.open({
         multiple: false,
         directory: false,
@@ -217,24 +340,80 @@ async function tauriBridge(): Promise<Bridge> {
     onAudioStatus: (cb) => subscribe<AudioStatusEvent>("audio-status", cb),
     recentFiles: () => invoke<string[]>("recent_files"),
     clearRecent: () => invoke("clear_recent"),
-    recoveryCandidates: () => invoke<RecoveryCandidate[]>("recovery_candidates"),
-    restoreAutosave: (autosavePath) => invoke<Snapshot>("restore_autosave", { autosavePath }),
-    discardAutosave: (autosavePath) => invoke("discard_autosave", { autosavePath }),
+    recoveryCandidates: () =>
+      invoke<RecoveryCandidate[]>("recovery_candidates"),
+    restoreAutosave: (autosavePath) =>
+      invoke<Snapshot>("restore_autosave", { autosavePath }),
+    discardAutosave: (autosavePath) =>
+      invoke("discard_autosave", { autosavePath }),
     autosaveNow: () => invoke<string | null>("autosave_now"),
-    getSettings: async () => withDefaults(await invoke<Partial<Settings>>("get_settings")),
-    setSettings: (settings) => invoke<AudioStatus>("set_settings", { settings }),
+    getSettings: async () =>
+      withDefaults(await invoke<Partial<Settings>>("get_settings")),
+    setSettings: (settings) =>
+      invoke<AudioStatus>("set_settings", { settings }),
     outputDevices: () => invoke<OutputDevice[]>("output_devices"),
     testTone: () => invoke("test_tone"),
     onMidiStatus: (cb) => subscribe<MidiStatus>("midi-status", cb),
-    scanPlugins: (rescan = false) => invoke<PluginDescriptor[]>("scan_plugins", { rescan }),
-    setTrackPlugin: (trackId, uid) => invoke("set_track_plugin", { trackId, uid }),
-    pluginParams: (trackId) => invoke<ParamInfo[]>("plugin_params", { trackId }),
-    setPluginParam: (trackId, paramId, value, commit = false) => invoke("set_plugin_param", { trackId, paramId, value, commit }),
+    scanPlugins: (rescan = false) =>
+      invoke<PluginDescriptor[]>("scan_plugins", { rescan }),
+    setTrackPlugin: (trackId, uid) =>
+      invoke("set_track_plugin", { trackId, uid }),
+    pluginParams: (trackId) =>
+      invoke<ParamInfo[]>("plugin_params", { trackId }),
+    setPluginParam: (trackId, paramId, value, commit = false) =>
+      invoke("set_plugin_param", { trackId, paramId, value, commit }),
     pluginCatalog: () => invoke<CatalogEntry[]>("plugin_catalog"),
     installPlugin: (entryId) => invoke("install_plugin", { entryId }),
     onPluginInstall: (cb) => subscribe<InstallProgress>("plugin-install", cb),
     openUrl: (url) => invoke("open_url", { url }),
     openPluginWindow: (trackId) => invoke("open_plugin_window", { trackId }),
+    addInsert: (target, uid, index = null, label) =>
+      invoke<Snapshot>("add_insert", {
+        target,
+        uid,
+        index,
+        label: label ?? null,
+      }),
+    removeInsert: (target, insertId, label) =>
+      invoke<Snapshot>("remove_insert", {
+        target,
+        insertId,
+        label: label ?? null,
+      }),
+    moveInsert: (target, insertId, toIndex, label) =>
+      invoke<Snapshot>("move_insert", {
+        target,
+        insertId,
+        toIndex,
+        label: label ?? null,
+      }),
+    setInsertEnabled: (target, insertId, on, label) =>
+      invoke<Snapshot>("set_insert_enabled", {
+        target,
+        insertId,
+        on,
+        label: label ?? null,
+      }),
+    insertParams: (insertId) =>
+      invoke<ParamInfo[]>("insert_params", { insertId }),
+    setInsertParam: (insertId, paramId, value, commit = false) =>
+      invoke<Snapshot | null>("set_insert_param", {
+        insertId,
+        paramId,
+        value,
+        commit,
+      }),
+    inputDevices: () => invoke<InputDevice[]>("input_devices"),
+    setAudioArm: (trackId, monitor) =>
+      invoke<AudioStatus>("set_audio_arm", { trackId, monitor }),
+    startAudioRecord: () => invoke("start_audio_record"),
+    stopAudioRecord: () => invoke<Snapshot>("stop_audio_record"),
+    importAudio: (path, trackId, startTick = 0) =>
+      invoke<Snapshot>("import_audio", { path, trackId, startTick }),
+    audioPeaks: (sourceId, buckets) =>
+      invoke<[number, number][]>("audio_peaks", { sourceId, buckets }),
+    onAudioImport: (cb) => subscribe<AudioImportProgress>("audio-import", cb),
+    onAudioDropped: (cb) => subscribe<string>("audio-dropped", cb),
   };
 }
 
@@ -257,14 +436,64 @@ const NO_SUCH_PLUGIN = "no such plugin";
 const NO_SUCH_PARAM = "no such parameter";
 const NO_SUCH_ENTRY = "no such catalog entry";
 const NO_ASSET = "no download for this computer";
+const NO_SUCH_AUDIO_CLIP = "no such audio clip";
+const NO_SUCH_AUDIO_SOURCE = "no such audio source";
+const NOT_AN_AUDIO_TRACK = "not an audio track";
+const NO_SUCH_INSERT = "no such insert";
+const TOO_MANY_INSERTS = `an insert chain holds at most ${MAX_INSERTS} effects`;
 
 function fail(message: string): never {
   // A plain string, not an `Error`: that is what Tauri's `invoke` rejects with.
   throw message;
 }
 
-const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
+const clamp = (x: number, lo: number, hi: number) =>
+  Math.min(hi, Math.max(lo, x));
 const allFinite = (...xs: number[]) => xs.every((x) => Number.isFinite(x));
+
+/**
+ * `document.rs::chain_mut` — the chain a target names, created on demand so a project that has
+ * never held an effect carries no empty arrays. Throws `NO_SUCH_TRACK` like the Rust version.
+ */
+function chainMut(m: ProjectModel, target: InsertTarget): Insert[] {
+  if (target === "master") return (m.masterInserts ??= []);
+  const t = m.tracks.find((x) => x.id === target.track) ?? fail(NO_SUCH_TRACK);
+  return (t.inserts ??= []);
+}
+
+/** `document.rs::insert_mut`. */
+function insertMut(
+  m: ProjectModel,
+  target: InsertTarget,
+  insertId: string,
+): Insert {
+  return (
+    chainMut(m, target).find((i) => i.id === insertId) ?? fail(NO_SUCH_INSERT)
+  );
+}
+
+/** `document.rs::is_base64`: shape only — the standard alphabet, padded to a multiple of four
+ *  with at most two trailing `=`. Neither side ever decodes a plugin's blob. */
+function isBase64(s: string): boolean {
+  if (s.length % 4 !== 0) return false;
+  const body = s.replace(/=+$/, "");
+  if (s.length - body.length > 2) return false;
+  return /^[A-Za-z0-9+/]*$/.test(body);
+}
+
+/** `model.rs::sanitize_inserts`: a slot that names nothing can never load, a duplicate id makes
+ *  two slots indistinguishable, and a chain past the cap is more than the engine will run. */
+function sanitizeInserts(chain: Insert[]): Insert[] {
+  const seen = new Set<string>();
+  return chain
+    .filter((i) => {
+      if (!i.uid?.trim() || seen.has(i.id)) return false;
+      seen.add(i.id);
+      return true;
+    })
+    .slice(0, MAX_INSERTS)
+    .map((i) => ({ ...i, enabled: i.enabled ?? true }));
+}
 
 /** `TrackParam` ranges, from `apply_to`'s `SetTrackParam` arm. */
 const TRACK_PARAM_RANGE: Record<TrackParam, [number, number]> = {
@@ -282,17 +511,172 @@ function newTrack(isDrum: boolean, name: string): Track {
     muted: false,
     soloed: false,
     isDrum,
+    isAudio: false,
     volume: 1,
     reverbSend: 0,
     tone: 18000,
     pan: 0,
     color: null,
     plugin: null,
+    amp: null,
+  };
+}
+
+/** `Track::audio`: no voice, a default rig. */
+function newAudioTrack(name: string): Track {
+  return { ...newTrack(false, name), isAudio: true, amp: defaultAmpRig() };
+}
+
+/** `AudioClip::sanitized`: every number in range, or null when the clip is nonsense. */
+function sanitizeAudioClip(c: AudioClip): AudioClip | null {
+  if (!allFinite(c.startTick, c.lengthSeconds)) return null;
+  if (c.startTick < 0 || c.lengthSeconds <= 0) return null;
+  const half = c.lengthSeconds / 2;
+  const fade = (v: number) =>
+    Number.isFinite(v) ? clamp(v, 0, Math.min(MAX_FADE_SECONDS, half)) : 0;
+  return {
+    ...c,
+    // `start_tick` is an `i64` in Rust: a stored tick is always whole.
+    startTick: Math.round(c.startTick),
+    offsetSeconds: Number.isFinite(c.offsetSeconds)
+      ? Math.max(0, c.offsetSeconds)
+      : 0,
+    gain: Number.isFinite(c.gain) ? clamp(c.gain, 0, MAX_CLIP_GAIN) : 1,
+    fadeInSeconds: fade(c.fadeInSeconds),
+    fadeOutSeconds: fade(c.fadeOutSeconds),
+  };
+}
+
+const knob = (v: number) => (Number.isFinite(v) ? clamp(v, 0, 10) : null);
+const ranged = (v: number, lo: number, hi: number) =>
+  Number.isFinite(v) ? clamp(v, lo, hi) : null;
+
+/** `Pedal::sanitized`. Returns null when any knob was NaN, like the Rust version. */
+function sanitizePedal(p: Pedal): Pedal | null {
+  switch (p.kind) {
+    case "comp": {
+      const [sustain, level] = [knob(p.sustain), knob(p.level)];
+      return sustain === null || level === null
+        ? null
+        : { ...p, sustain, level };
+    }
+    case "drive": {
+      const [drive, tone, level] = [knob(p.drive), knob(p.tone), knob(p.level)];
+      return drive === null || tone === null || level === null
+        ? null
+        : { ...p, drive, tone, level };
+    }
+    case "wah": {
+      const [sensitivity, range] = [knob(p.sensitivity), knob(p.range)];
+      return sensitivity === null || range === null
+        ? null
+        : { ...p, sensitivity, range };
+    }
+    case "chorus": {
+      const [rateHz, depth, mix] = [
+        ranged(p.rateHz, 0.1, 8),
+        knob(p.depth),
+        knob(p.mix),
+      ];
+      return rateHz === null || depth === null || mix === null
+        ? null
+        : { ...p, rateHz, depth, mix };
+    }
+    case "phaser": {
+      const [rateHz, depth, feedback] = [
+        ranged(p.rateHz, 0.1, 8),
+        knob(p.depth),
+        knob(p.feedback),
+      ];
+      return rateHz === null || depth === null || feedback === null
+        ? null
+        : { ...p, rateHz, depth, feedback };
+    }
+    case "tremolo": {
+      const [rateHz, depth] = [ranged(p.rateHz, 0.1, 14), knob(p.depth)];
+      return rateHz === null || depth === null ? null : { ...p, rateHz, depth };
+    }
+    case "delay": {
+      const [timeMs, feedback, mix] = [
+        ranged(p.timeMs, 20, 1200),
+        knob(p.feedback),
+        knob(p.mix),
+      ];
+      return timeMs === null || feedback === null || mix === null
+        ? null
+        : { ...p, timeMs, feedback, mix };
+    }
+  }
+}
+
+/** `AmpRig::sanitized`. Null when a value was NaN — a rig that cannot be made sane is
+ *  rejected rather than guessed at. */
+function sanitizeRig(r: AmpRig): AmpRig | null {
+  const inputDb = ranged(r.inputDb, -24, 24);
+  const thresholdDb = ranged(r.gate.thresholdDb, -80, 0);
+  const releaseMs = ranged(r.gate.releaseMs, 5, 500);
+  if (inputDb === null || thresholdDb === null || releaseMs === null)
+    return null;
+  const pedals: Pedal[] = [];
+  for (const p of r.pedals.slice(0, MAX_PEDALS)) {
+    const clean = sanitizePedal(p);
+    if (clean === null) return null;
+    pedals.push(clean);
+  }
+  const a = [
+    r.amp.gain,
+    r.amp.bass,
+    r.amp.mid,
+    r.amp.treble,
+    r.amp.presence,
+    r.amp.master,
+  ].map(knob);
+  // A key the file never carried takes its default, the way `#[serde(default)]` does on the Rust
+  // side — a project saved before the mic moved is opened, not rejected.
+  const posX = knob(r.cab.posX ?? defaultAmpRig().cab.posX);
+  const posZ = knob(r.cab.posZ ?? defaultAmpRig().cab.posZ);
+  const reverb = knob(r.rack.reverb);
+  const decay = knob(r.rack.decay);
+  const outputDb = ranged(r.rack.outputDb, -24, 12);
+  if (
+    a.some((v) => v === null) ||
+    posX === null ||
+    posZ === null ||
+    reverb === null ||
+    decay === null ||
+    outputDb === null
+  )
+    return null;
+  const [gain, bass, mid, treble, presence, master] = a as number[];
+  return {
+    enabled: r.enabled,
+    inputDb,
+    gate: { on: r.gate.on, thresholdDb, releaseMs },
+    pedals,
+    amp: { model: r.amp.model, gain, bass, mid, treble, presence, master },
+    // An unrecognised component falls back to its default instead of sinking the rig: only a
+    // number that cannot be made sane is worth rejecting a command over.
+    eq: EQ_MODELS.includes(r.eq) ? r.eq : "usClassic",
+    cab: {
+      model: r.cab.model,
+      micModel: MIC_MODELS.includes(r.cab.micModel) ? r.cab.micModel : "dynamic",
+      posX,
+      posZ,
+    },
+    rack: { reverb, decay, outputDb },
   };
 }
 
 function newPattern(name: string): SongPattern {
-  return { id: uuid(), name, lengthBeats: 16, chords: { chords: [] }, notesByTrack: {}, trackLoopBeats: {}, chordLoopBeats: null };
+  return {
+    id: uuid(),
+    name,
+    lengthTicks: 16 * TICKS_PER_BEAT,
+    chords: { chords: [] },
+    notesByTrack: {},
+    trackLoopTicks: {},
+    chordLoopTicks: null,
+  };
 }
 
 /** `ProjectModel::empty()`: one melody track, one empty pattern, no key, nothing arranged. */
@@ -304,47 +688,129 @@ function emptyModel(): ProjectModel {
     tracks: [newTrack(false, "melody")],
     patterns: [newPattern("pattern 1")],
     clips: [],
+    audioSources: [],
+    audioClips: [],
     sections: [],
-    master: { gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 },
+    master: {
+      gain: 1,
+      reverbWet: 0,
+      lowCutHz: 20,
+      highCutHz: 18000,
+      lowEq: 1,
+      midEq: 1,
+      highEq: 1,
+    },
   };
 }
 
 /** `ProjectModel::starter()`: `empty()` plus a I–IV–V–vi progression, a drum track and a clip. */
 function starterModel(): ProjectModel {
   const m = emptyModel();
-  m.patterns[0].chords = { chords: progression([0, 3, 4, 5], 0, "major", 16) };
+  m.patterns[0].chords = {
+    chords: progression([0, 3, 4, 5], 0, "major", 16 * TICKS_PER_BEAT),
+  };
   m.tracks.push(newTrack(true, "drums"));
   const p = m.patterns[0];
-  m.clips = [{ id: uuid(), patternId: p.id, startBeat: 0, lengthBeats: p.lengthBeats, offsetBeats: 0, muted: false }];
+  m.clips = [
+    {
+      id: uuid(),
+      patternId: p.id,
+      startTick: 0,
+      lengthTicks: p.lengthTicks,
+      offsetTicks: 0,
+      muted: false,
+    },
+  ];
   return m;
 }
 
 /**
  * `NoteEvent::sanitized`. Pitch and velocity are `i32` in Rust and every number crosses the IPC
  * boundary as JSON, so a non-finite or fractional value is rejected outright rather than
- * silently stored — in the desktop app serde would refuse the whole payload.
+ * silently stored — in the desktop app serde would refuse the whole payload. The tick fields
+ * are `i64` there, so a fractional one is rounded to the tick it names.
  */
 function sanitizeNote(n: NoteEvent): NoteEvent {
-  if (!allFinite(n.startBeat, n.lengthBeats) || !Number.isInteger(n.pitch) || !Number.isInteger(n.velocity)) {
+  if (
+    !allFinite(n.startTick, n.lengthTicks) ||
+    !Number.isInteger(n.pitch) ||
+    !Number.isInteger(n.velocity)
+  ) {
     fail(INVALID_VALUE);
   }
   return {
     ...n,
     pitch: clamp(n.pitch, 0, 127),
     velocity: clamp(n.velocity, 1, 127),
-    startBeat: Math.max(0, n.startBeat),
-    lengthBeats: Math.max(1 / 64, n.lengthBeats),
+    // `start_tick` / `length_ticks` are `i64` in Rust: a stored tick is always whole.
+    startTick: Math.max(0, Math.round(n.startTick)),
+    lengthTicks: Math.max(MIN_NOTE_TICKS, Math.round(n.lengthTicks)),
   };
 }
 
 /** The schema this build writes; mirrors `SCHEMA_VERSION` in crates/dissonant-core/src/model.rs.
- *  7 added `Track::plugin`. */
-const SCHEMA_VERSION = 7;
+ *  7 added `Track::plugin`; 8 added audio tracks, sources and clips; 9 moved musical time from
+ *  beats to ticks. */
+const SCHEMA_VERSION = 9;
+
+/**
+ * `migrate_beats` in crates/dissonant-core/src/model.rs: a project written before schema 9 keeps
+ * its musical time in `f64` beats. The real backend folds those keys on load; the in-memory
+ * backend reads the same files out of local storage, so it has to fold them too.
+ */
+function migrateBeats(m: ProjectModel): ProjectModel {
+  // Legacy keys are gone from every model type, so the migration reads them through an
+  // index signature: a stored file is untyped JSON until it has been folded.
+  const loose = (o: object): Record<string, unknown> => o as Record<string, unknown>;
+  const beats = (o: object, key: string): number | null => {
+    const v = loose(o)[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const fold = (o: object, from: string, to: string) => {
+    const l = loose(o);
+    const was = beats(o, from);
+    if (l[to] == null && was !== null) l[to] = beatsToTicks(was);
+    delete l[from];
+  };
+  for (const p of m.patterns) {
+    fold(p, "lengthBeats", "lengthTicks");
+    fold(p, "chordLoopBeats", "chordLoopTicks");
+    const loops = loose(p).trackLoopBeats;
+    if (loops && typeof loops === "object" && !p.trackLoopTicks) {
+      p.trackLoopTicks = Object.fromEntries(
+        Object.entries(loops).map(([id, v]) => [id, beatsToTicks(Number(v))]),
+      );
+    }
+    delete loose(p).trackLoopBeats;
+    for (const notes of Object.values(p.notesByTrack ?? {})) {
+      for (const n of notes) {
+        fold(n, "startBeat", "startTick");
+        fold(n, "lengthBeats", "lengthTicks");
+        fold(n, "shift", "shiftTicks");
+      }
+    }
+    for (const ch of p.chords?.chords ?? []) {
+      fold(ch, "startBeat", "startTick");
+      fold(ch, "lengthBeats", "lengthTicks");
+    }
+  }
+  for (const c of m.clips ?? []) {
+    fold(c, "startBeat", "startTick");
+    fold(c, "lengthBeats", "lengthTicks");
+    fold(c, "offsetBeats", "offsetTicks");
+  }
+  for (const s of m.sections ?? []) fold(s, "startBeat", "startTick");
+  for (const c of m.audioClips ?? []) fold(c, "startBeat", "startTick");
+  for (const t of m.tempoPoints ?? []) fold(t, "beat", "tick");
+  fold(m, "swingGrid", "swingGridTicks");
+  return m;
+}
 
 /** `ProjectModel::normalized`, run on anything read back from storage. */
 function normalizedModel(m: ProjectModel): ProjectModel {
   // Only ever bump forward, like `normalized()`: relabelling a newer file as ours would make the
   // next save overwrite it with the fields this build dropped.
+  migrateBeats(m);
   m.schemaVersion = Math.max(m.schemaVersion ?? 0, SCHEMA_VERSION);
   if (m.tracks.length === 0) m.tracks = [newTrack(false, "melody")];
   if (m.patterns.length === 0) m.patterns = [newPattern("pattern 1")];
@@ -352,21 +818,51 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   for (const t of m.tracks) t.plugin ??= null;
   const trackIds = new Set(m.tracks.map((t) => t.id));
   for (const p of m.patterns) {
-    p.trackLoopBeats ??= {};
-    p.chordLoopBeats ??= null;
+    p.trackLoopTicks ??= {};
+    p.chordLoopTicks ??= null;
     // Notes keyed by a track that no longer exists are invisible and never played.
     for (const id of Object.keys(p.notesByTrack)) {
       if (!trackIds.has(id)) delete p.notesByTrack[id];
     }
-    for (const id of Object.keys(p.trackLoopBeats)) {
-      if (!trackIds.has(id) || !(p.trackLoopBeats[id] > 0)) delete p.trackLoopBeats[id];
+    for (const id of Object.keys(p.trackLoopTicks)) {
+      if (!trackIds.has(id) || !(p.trackLoopTicks[id] > 0))
+        delete p.trackLoopTicks[id];
     }
-    if (!(p.chordLoopBeats != null && p.chordLoopBeats > 0)) p.chordLoopBeats = null;
+    if (!(p.chordLoopTicks != null && p.chordLoopTicks > 0))
+      p.chordLoopTicks = null;
     for (const notes of Object.values(p.notesByTrack)) {
       for (let i = 0; i < notes.length; i++) notes[i] = sanitizeNote(notes[i]);
     }
   }
-  m.clips = (m.clips ?? []).filter((c) => m.patterns.some((p) => p.id === c.patternId));
+  // An audio track is never also a drum track, and always carries a rig; a note track never
+  // does. Hand-edited files can carry either combination.
+  for (const t of m.tracks) {
+    t.isAudio ??= false;
+    if (t.isAudio) {
+      t.isDrum = false;
+      t.amp = sanitizeRig(t.amp ?? defaultAmpRig()) ?? defaultAmpRig();
+    } else {
+      t.amp = null;
+    }
+  }
+  m.clips = (m.clips ?? []).filter((c) =>
+    m.patterns.some((p) => p.id === c.patternId),
+  );
+  // Unreferenced sources stay: undoing the clip that used one must not force a re-decode.
+  m.audioSources ??= [];
+  const audioTrackIds = new Set(
+    m.tracks.filter((t) => t.isAudio).map((t) => t.id),
+  );
+  const sourceIds = new Set(m.audioSources.map((s) => s.id));
+  m.audioClips = (m.audioClips ?? [])
+    .filter((c) => audioTrackIds.has(c.trackId) && sourceIds.has(c.sourceId))
+    .map(sanitizeAudioClip)
+    .filter((c): c is AudioClip => c !== null)
+    .sort((a, b) => a.startTick - b.startTick);
+  // Only when the key is there: an absent chain is how a project with no effects is written,
+  // and filling it in would put `"inserts": []` on every track of every saved file.
+  for (const t of m.tracks) if (t.inserts) t.inserts = sanitizeInserts(t.inserts);
+  if (m.masterInserts) m.masterInserts = sanitizeInserts(m.masterInserts);
   return m;
 }
 
@@ -380,8 +876,10 @@ function clone<T>(x: T): T {
  * exactly like the Rust version, which discards `next` on `Err`.
  */
 function reduce(m: ProjectModel, c: Command): void {
-  const track = (id: string) => m.tracks.find((t) => t.id === id) ?? fail(NO_SUCH_TRACK);
-  const pattern = (id: string) => m.patterns.find((p) => p.id === id) ?? fail(NO_SUCH_PATTERN);
+  const track = (id: string) =>
+    m.tracks.find((t) => t.id === id) ?? fail(NO_SUCH_TRACK);
+  const pattern = (id: string) =>
+    m.patterns.find((p) => p.id === id) ?? fail(NO_SUCH_PATTERN);
   switch (c.type) {
     case "setTempo":
       if (!allFinite(c.bpm)) fail(INVALID_VALUE);
@@ -391,10 +889,13 @@ function reduce(m: ProjectModel, c: Command): void {
       m.key = { ...c.key };
       break;
     case "addTrack":
-      m.tracks.push(newTrack(c.isDrum, c.isDrum ? "drums" : `track ${m.tracks.length + 1}`));
+      m.tracks.push(
+        newTrack(c.isDrum, c.isDrum ? "drums" : `track ${m.tracks.length + 1}`),
+      );
       break;
     case "setTrackColor":
-      if (c.color !== null && !/^#[0-9a-f]{6}$/i.test(c.color)) fail(INVALID_VALUE);
+      if (c.color !== null && !/^#[0-9a-f]{6}$/i.test(c.color))
+        fail(INVALID_VALUE);
       track(c.id).color = c.color === null ? null : c.color.toLowerCase();
       break;
     case "deleteTrack": {
@@ -404,8 +905,9 @@ function reduce(m: ProjectModel, c: Command): void {
       if (m.tracks.length === before) fail(NO_SUCH_TRACK);
       for (const p of m.patterns) {
         delete p.notesByTrack[c.id];
-        delete p.trackLoopBeats[c.id];
+        delete p.trackLoopTicks[c.id];
       }
+      m.audioClips = (m.audioClips ?? []).filter((a) => a.trackId !== c.id);
       break;
     }
     case "renameTrack":
@@ -421,7 +923,8 @@ function reduce(m: ProjectModel, c: Command): void {
       const i = m.tracks.findIndex((t) => t.id === c.id);
       if (i < 0) fail(NO_SUCH_TRACK);
       const j = c.up ? i - 1 : i + 1;
-      if (j >= 0 && j < m.tracks.length) [m.tracks[i], m.tracks[j]] = [m.tracks[j], m.tracks[i]];
+      if (j >= 0 && j < m.tracks.length)
+        [m.tracks[i], m.tracks[j]] = [m.tracks[j], m.tracks[i]];
       break;
     }
     case "setTrackVoice":
@@ -444,7 +947,11 @@ function reduce(m: ProjectModel, c: Command): void {
       // A state blob belongs to the plugin that wrote it, so it survives re-picking the same
       // plugin and is dropped the moment the uid changes.
       const kept = t.plugin?.uid === uid ? t.plugin.state : null;
-      t.plugin = { uid, name: c.plugin.name.trim() || uid, state: c.plugin.state ?? kept };
+      t.plugin = {
+        uid,
+        name: c.plugin.name.trim() || uid,
+        state: c.plugin.state ?? kept,
+      };
       break;
     }
     case "setPluginState": {
@@ -453,10 +960,56 @@ function reduce(m: ProjectModel, c: Command): void {
       t.plugin = { ...t.plugin, state: c.state };
       break;
     }
+    case "addInsert": {
+      // A blank uid names nothing: the chain would carry a slot that can never load.
+      if (!c.uid.trim()) fail(INVALID_VALUE);
+      const chain = chainMut(m, c.target);
+      if (chain.length >= MAX_INSERTS) fail(TOO_MANY_INSERTS);
+      const at = clamp(c.index ?? chain.length, 0, chain.length);
+      chain.splice(at, 0, {
+        id: uuid(),
+        uid: c.uid,
+        name: c.name,
+        enabled: true,
+      });
+      break;
+    }
+    case "removeInsert": {
+      const chain = chainMut(m, c.target);
+      const at = chain.findIndex((i) => i.id === c.insertId);
+      if (at < 0) fail(NO_SUCH_INSERT);
+      chain.splice(at, 1);
+      break;
+    }
+    case "moveInsert": {
+      const chain = chainMut(m, c.target);
+      const from = chain.findIndex((i) => i.id === c.insertId);
+      if (from < 0) fail(NO_SUCH_INSERT);
+      // Dragging past either end lands on that end rather than failing: the UI's drop targets
+      // and the chain's bounds do not have to agree.
+      const to = clamp(c.toIndex, 0, chain.length - 1);
+      chain.splice(to, 0, ...chain.splice(from, 1));
+      break;
+    }
+    case "setInsertEnabled":
+      insertMut(m, c.target, c.insertId).enabled = c.on;
+      break;
+    case "setInsertState": {
+      if (!isBase64(c.state)) fail(INVALID_VALUE);
+      insertMut(m, c.target, c.insertId).state = c.state;
+      break;
+    }
     case "addPattern": {
       const p = newPattern(`pattern ${m.patterns.length + 1}`);
       const root = m.key.rootPitchClass ?? 0;
-      p.chords = { chords: progression(STARTERS[0].degrees, root, m.key.scale, p.lengthBeats) };
+      p.chords = {
+        chords: progression(
+          STARTERS[0].degrees,
+          root,
+          m.key.scale,
+          p.lengthTicks,
+        ),
+      };
       m.patterns.push(p);
       break;
     }
@@ -466,7 +1019,8 @@ function reduce(m: ProjectModel, c: Command): void {
       const copy = clone(m.patterns[i]);
       copy.id = uuid();
       copy.name = `${copy.name} copy`;
-      for (const notes of Object.values(copy.notesByTrack)) for (const n of notes) n.id = uuid();
+      for (const notes of Object.values(copy.notesByTrack))
+        for (const n of notes) n.id = uuid();
       for (const ch of copy.chords.chords) ch.id = uuid();
       m.patterns.splice(i + 1, 0, copy);
       break;
@@ -484,33 +1038,44 @@ function reduce(m: ProjectModel, c: Command): void {
       pattern(c.id).name = c.name;
       break;
     case "setPatternLength":
-      if (!allFinite(c.beats) || c.beats < 1) fail(INVALID_VALUE);
-      pattern(c.id).lengthBeats = c.beats;
+      if (!allFinite(c.ticks) || c.ticks < TICKS_PER_BEAT) fail(INVALID_VALUE);
+      pattern(c.id).lengthTicks = c.ticks;
       break;
     case "setTrackLoop": {
       track(c.trackId); // Rust checks the track before the pattern.
-      if (c.beats !== null && (!allFinite(c.beats) || c.beats < MIN_LOOP_BEATS)) fail(INVALID_VALUE);
+      if (c.ticks !== null && (!allFinite(c.ticks) || c.ticks < MIN_LOOP_TICKS))
+        fail(INVALID_VALUE);
       const p = pattern(c.patternId);
-      if (c.beats === null) delete p.trackLoopBeats[c.trackId];
-      else p.trackLoopBeats[c.trackId] = c.beats;
+      if (c.ticks === null) delete p.trackLoopTicks[c.trackId];
+      else p.trackLoopTicks[c.trackId] = c.ticks;
       // The loop is the track's whole extent: cut what no longer fits inside it.
       const turn = trackLoop(p, c.trackId);
       const kept = (p.notesByTrack[c.trackId] ?? [])
-        .filter((n) => n.startBeat < turn)
-        .map((n) => ({ ...n, lengthBeats: Math.max(1 / 64, Math.min(n.lengthBeats, turn - n.startBeat)) }));
+        .filter((n) => n.startTick < turn)
+        .map((n) => ({
+          ...n,
+          lengthTicks: Math.max(
+            MIN_NOTE_TICKS,
+            Math.min(n.lengthTicks, turn - n.startTick),
+          ),
+        }));
       if (kept.length === 0) delete p.notesByTrack[c.trackId];
       else p.notesByTrack[c.trackId] = kept;
       break;
     }
     case "setChordLoop": {
-      if (c.beats !== null && (!allFinite(c.beats) || c.beats < MIN_LOOP_BEATS)) fail(INVALID_VALUE);
+      if (c.ticks !== null && (!allFinite(c.ticks) || c.ticks < MIN_LOOP_TICKS))
+        fail(INVALID_VALUE);
       const p = pattern(c.patternId);
-      p.chordLoopBeats = c.beats;
+      p.chordLoopTicks = c.ticks;
       const turn = chordLoop(p);
       p.chords = {
         chords: p.chords.chords
-          .filter((ch) => ch.startBeat < turn)
-          .map((ch) => ({ ...ch, lengthBeats: Math.min(ch.lengthBeats, turn - ch.startBeat) })),
+          .filter((ch) => ch.startTick < turn)
+          .map((ch) => ({
+            ...ch,
+            lengthTicks: Math.min(ch.lengthTicks, turn - ch.startTick),
+          })),
       };
       break;
     }
@@ -519,7 +1084,7 @@ function reduce(m: ProjectModel, c: Command): void {
       const p = pattern(c.patternId);
       const notes: NoteEvent[] = c.notes
         .map(sanitizeNote)
-        .sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
+        .sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch);
       if (notes.length === 0) delete p.notesByTrack[c.trackId];
       else p.notesByTrack[c.trackId] = notes;
       break;
@@ -527,28 +1092,47 @@ function reduce(m: ProjectModel, c: Command): void {
     case "setChords": {
       const p = pattern(c.patternId);
       const chords: ChordEvent[] = c.chords
-        .filter((ch) => ch.lengthBeats > 0 && ch.startBeat >= 0)
-        .map((ch) => ({ ...ch, pitchClasses: [...new Set(ch.pitchClasses.map(normalize))].sort((a, b) => a - b) }))
-        .sort((a, b) => a.startBeat - b.startBeat);
+        .filter((ch) => ch.lengthTicks > 0 && ch.startTick >= 0)
+        .map((ch) => ({
+          ...ch,
+          pitchClasses: [...new Set(ch.pitchClasses.map(normalize))].sort(
+            (a, b) => a - b,
+          ),
+        }))
+        .sort((a, b) => a.startTick - b.startTick);
       p.chords = { chords };
       break;
     }
     case "addClip": {
       const p = pattern(c.patternId);
-      const length = c.lengthBeats ?? p.lengthBeats;
-      if (!allFinite(c.startBeat, length) || c.startBeat < 0 || length <= 0) fail(INVALID_VALUE);
-      m.clips.push({ id: uuid(), patternId: p.id, startBeat: c.startBeat, lengthBeats: length, offsetBeats: 0, muted: false });
-      m.clips.sort((a, b) => a.startBeat - b.startBeat);
+      const length = c.lengthTicks ?? p.lengthTicks;
+      if (!allFinite(c.startTick, length) || c.startTick < 0 || length <= 0)
+        fail(INVALID_VALUE);
+      m.clips.push({
+        id: uuid(),
+        patternId: p.id,
+        startTick: c.startTick,
+        lengthTicks: length,
+        offsetTicks: 0,
+        muted: false,
+      });
+      m.clips.sort((a, b) => a.startTick - b.startTick);
       break;
     }
     case "updateClip": {
       pattern(c.clip.patternId); // Rust validates the pattern, then the values, then the clip id.
-      if (!allFinite(c.clip.startBeat, c.clip.lengthBeats, c.clip.offsetBeats)) fail(INVALID_VALUE);
-      if (c.clip.startBeat < 0 || c.clip.lengthBeats <= 0 || c.clip.offsetBeats < 0) fail(INVALID_VALUE);
+      if (!allFinite(c.clip.startTick, c.clip.lengthTicks, c.clip.offsetTicks))
+        fail(INVALID_VALUE);
+      if (
+        c.clip.startTick < 0 ||
+        c.clip.lengthTicks <= 0 ||
+        c.clip.offsetTicks < 0
+      )
+        fail(INVALID_VALUE);
       const i = m.clips.findIndex((cl) => cl.id === c.clip.id);
       if (i < 0) fail(NO_SUCH_CLIP);
       m.clips[i] = { ...c.clip };
-      m.clips.sort((a, b) => a.startBeat - b.startBeat);
+      m.clips.sort((a, b) => a.startTick - b.startTick);
       break;
     }
     case "removeClip": {
@@ -558,16 +1142,27 @@ function reduce(m: ProjectModel, c: Command): void {
       break;
     }
     case "addSection":
-      if (!allFinite(c.startBeat) || c.startBeat < 0) fail(INVALID_VALUE);
-      m.sections.push({ id: uuid(), name: c.name.trim() || `section ${m.sections.length + 1}`, startBeat: Math.max(0, c.startBeat), key: null, color: null });
-      m.sections.sort((a, b) => a.startBeat - b.startBeat);
+      if (!allFinite(c.startTick) || c.startTick < 0) fail(INVALID_VALUE);
+      m.sections.push({
+        id: uuid(),
+        name: c.name.trim() || `section ${m.sections.length + 1}`,
+        startTick: Math.max(0, c.startTick),
+        key: null,
+        color: null,
+      });
+      m.sections.sort((a, b) => a.startTick - b.startTick);
       break;
     case "updateSection": {
-      if (!allFinite(c.section.startBeat) || c.section.startBeat < 0 || !c.section.name.trim()) fail(INVALID_VALUE);
+      if (
+        !allFinite(c.section.startTick) ||
+        c.section.startTick < 0 ||
+        !c.section.name.trim()
+      )
+        fail(INVALID_VALUE);
       const i = m.sections.findIndex((x) => x.id === c.section.id);
       if (i < 0) fail(NO_SUCH_SECTION);
       m.sections[i] = { ...c.section };
-      m.sections.sort((a, b) => a.startBeat - b.startBeat);
+      m.sections.sort((a, b) => a.startTick - b.startTick);
       break;
     }
     case "removeSection": {
@@ -578,7 +1173,18 @@ function reduce(m: ProjectModel, c: Command): void {
     }
     case "setMaster": {
       const v = c.master;
-      if (!allFinite(v.gain, v.reverbWet, v.lowCutHz, v.highCutHz, v.lowEq, v.midEq, v.highEq)) fail(INVALID_VALUE);
+      if (
+        !allFinite(
+          v.gain,
+          v.reverbWet,
+          v.lowCutHz,
+          v.highCutHz,
+          v.lowEq,
+          v.midEq,
+          v.highEq,
+        )
+      )
+        fail(INVALID_VALUE);
       const master: MasterSettings = {
         gain: clamp(v.gain, 0, 1.5),
         reverbWet: clamp(v.reverbWet, 0, 1),
@@ -596,21 +1202,91 @@ function reduce(m: ProjectModel, c: Command): void {
       break;
     case "setSwing":
       m.swing = Math.min(75, Math.max(50, c.swing));
-      m.swingGrid = c.grid === 0.25 ? 0.25 : 0.5;
+      m.swingGridTicks =
+        c.gridTicks === TICKS_PER_BEAT / 4
+          ? TICKS_PER_BEAT / 4
+          : DEFAULT_SWING_GRID_TICKS;
       break;
     case "addTempoPoint":
-      if (c.beat < 0) break;
-      m.tempoPoints = [...(m.tempoPoints ?? []).filter((p) => Math.abs(p.beat - c.beat) > 1e-9), { id: uuid(), beat: c.beat, bpm: Math.min(300, Math.max(20, c.bpm)), ramp: c.ramp }].sort((a, b) => a.beat - b.beat);
+      if (c.tick < 0) break;
+      m.tempoPoints = [
+        ...(m.tempoPoints ?? []).filter((p) => p.tick !== c.tick),
+        {
+          id: uuid(),
+          tick: c.tick,
+          bpm: Math.min(300, Math.max(20, c.bpm)),
+          ramp: c.ramp,
+        },
+      ].sort((a, b) => a.tick - b.tick);
       break;
     case "updateTempoPoint": {
       const i = (m.tempoPoints ?? []).findIndex((p) => p.id === c.point.id);
-      if (i < 0 || c.point.beat < 0) break;
-      m.tempoPoints = (m.tempoPoints ?? []).filter((p) => p.id === c.point.id || Math.abs(p.beat - c.point.beat) > 1e-9).map((p) => (p.id === c.point.id ? { ...c.point, bpm: Math.min(300, Math.max(20, c.point.bpm)) } : p)).sort((a, b) => a.beat - b.beat);
+      if (i < 0 || c.point.tick < 0) break;
+      m.tempoPoints = (m.tempoPoints ?? [])
+        .filter((p) => p.id === c.point.id || p.tick !== c.point.tick)
+        .map((p) =>
+          p.id === c.point.id
+            ? { ...c.point, bpm: Math.min(300, Math.max(20, c.point.bpm)) }
+            : p,
+        )
+        .sort((a, b) => a.tick - b.tick);
       break;
     }
     case "removeTempoPoint":
       m.tempoPoints = (m.tempoPoints ?? []).filter((p) => p.id !== c.id);
       break;
+    case "addAudioTrack":
+      m.tracks.push(newAudioTrack(c.name.trim() === "" ? "audio" : c.name));
+      break;
+    case "setTrackAmp": {
+      const rig = sanitizeRig(c.amp);
+      if (rig === null) fail(INVALID_VALUE);
+      const t = track(c.id);
+      if (!t.isAudio) fail(NOT_AN_AUDIO_TRACK);
+      t.amp = rig;
+      break;
+    }
+    case "addAudioTake": {
+      // The clip must name the track and source it arrived with, or `normalized` would drop
+      // it and the take would silently vanish.
+      if (c.clip.trackId !== c.trackId || c.clip.sourceId !== c.source.id)
+        fail(INVALID_VALUE);
+      if (
+        c.source.sampleRate === 0 ||
+        c.source.channels === 0 ||
+        c.source.frames === 0
+      )
+        fail(INVALID_VALUE);
+      const t = track(c.trackId);
+      if (!t.isAudio) fail(NOT_AN_AUDIO_TRACK);
+      const clip = sanitizeAudioClip(c.clip) ?? fail(INVALID_VALUE);
+      m.audioSources ??= [];
+      const at = m.audioSources.findIndex((s) => s.id === c.source.id);
+      if (at >= 0) m.audioSources[at] = { ...c.source };
+      else m.audioSources.push({ ...c.source });
+      m.audioClips = [...(m.audioClips ?? []), clip].sort(
+        (a, b) => a.startTick - b.startTick,
+      );
+      break;
+    }
+    case "updateAudioClip": {
+      if (!(m.audioSources ?? []).some((s) => s.id === c.clip.sourceId))
+        fail(NO_SUCH_AUDIO_SOURCE);
+      const t = m.tracks.find((x) => x.id === c.clip.trackId);
+      if (!t?.isAudio) fail(NOT_AN_AUDIO_TRACK);
+      const clip = sanitizeAudioClip(c.clip) ?? fail(INVALID_VALUE);
+      const at = (m.audioClips ?? []).findIndex((x) => x.id === clip.id);
+      if (at < 0) fail(NO_SUCH_AUDIO_CLIP);
+      m.audioClips![at] = clip;
+      m.audioClips!.sort((a, b) => a.startTick - b.startTick);
+      break;
+    }
+    case "removeAudioClip": {
+      const before = (m.audioClips ?? []).length;
+      m.audioClips = (m.audioClips ?? []).filter((x) => x.id !== c.id);
+      if (m.audioClips.length === before) fail(NO_SUCH_AUDIO_CLIP);
+      break;
+    }
   }
 }
 
@@ -632,29 +1308,113 @@ const STORAGE_KEY = "dissonant.mock.project";
  * parameter list ended up unusable in a side column.
  */
 const MOCK_PARAMS_TIDY: Omit<ParamInfo, "value">[] = [
-  { id: 0, name: "cutoff", module: "filter", min: 20, max: 20_000, default: 8_000, isStepped: false },
-  { id: 1, name: "resonance", module: "filter", min: 0, max: 1, default: 0.2, isStepped: false },
-  { id: 2, name: "attack", module: "envelope", min: 0, max: 4, default: 0.01, isStepped: false },
-  { id: 3, name: "release", module: "envelope", min: 0, max: 8, default: 0.4, isStepped: false },
-  { id: 4, name: "drift", module: "voice", min: -1, max: 1, default: 0, isStepped: false },
-  { id: 5, name: "voices", module: "voice", min: 1, max: 16, default: 8, isStepped: true },
+  {
+    id: 0,
+    name: "cutoff",
+    module: "filter",
+    min: 20,
+    max: 20_000,
+    default: 8_000,
+    isStepped: false,
+  },
+  {
+    id: 1,
+    name: "resonance",
+    module: "filter",
+    min: 0,
+    max: 1,
+    default: 0.2,
+    isStepped: false,
+  },
+  {
+    id: 2,
+    name: "attack",
+    module: "envelope",
+    min: 0,
+    max: 4,
+    default: 0.01,
+    isStepped: false,
+  },
+  {
+    id: 3,
+    name: "release",
+    module: "envelope",
+    min: 0,
+    max: 8,
+    default: 0.4,
+    isStepped: false,
+  },
+  {
+    id: 4,
+    name: "drift",
+    module: "voice",
+    min: -1,
+    max: 1,
+    default: 0,
+    isStepped: false,
+  },
+  {
+    id: 5,
+    name: "voices",
+    module: "voice",
+    min: 1,
+    max: 16,
+    default: 8,
+    isStepped: true,
+  },
 ];
 
 /** An FM synth's shape: six operators of the same controls, a shared pitch envelope and an LFO,
  *  a handful of globals, and not one module string — copied from what Dexed actually reports. */
 const MOCK_PARAMS_BIG: Omit<ParamInfo, "value">[] = (() => {
   const unit = (id: number, name: string, def = 0.5) =>
-    ({ id, name, module: "", min: 0, max: 1, default: def, isStepped: false }) as Omit<ParamInfo, "value">;
-  const out = ["Cutoff", "Resonance", "Output", "MonoMode", "MASTER TUNE ADJ", "ALGORITHM", "FEEDBACK", "OSC KEY SYNC", "TRANSPOSE", "P MODE SENS."].map(
-    (n, i) => unit(i, n),
-  );
-  for (const n of ["SPEED", "DELAY", "PM DEPTH", "AM DEPTH", "KEY SYNC", "WAVE"]) out.push(unit(out.length, `LFO ${n}`));
+    ({
+      id,
+      name,
+      module: "",
+      min: 0,
+      max: 1,
+      default: def,
+      isStepped: false,
+    }) as Omit<ParamInfo, "value">;
+  const out = [
+    "Cutoff",
+    "Resonance",
+    "Output",
+    "MonoMode",
+    "MASTER TUNE ADJ",
+    "ALGORITHM",
+    "FEEDBACK",
+    "OSC KEY SYNC",
+    "TRANSPOSE",
+    "P MODE SENS.",
+  ].map((n, i) => unit(i, n));
+  for (const n of [
+    "SPEED",
+    "DELAY",
+    "PM DEPTH",
+    "AM DEPTH",
+    "KEY SYNC",
+    "WAVE",
+  ])
+    out.push(unit(out.length, `LFO ${n}`));
   for (let i = 1; i <= 4; i++) out.push(unit(out.length, `PITCH EG RATE ${i}`));
-  for (let i = 1; i <= 4; i++) out.push(unit(out.length, `PITCH EG LEVEL ${i}`));
+  for (let i = 1; i <= 4; i++)
+    out.push(unit(out.length, `PITCH EG LEVEL ${i}`));
   for (let op = 1; op <= 6; op++) {
-    for (let i = 1; i <= 4; i++) out.push(unit(out.length, `OP${op} EG RATE ${i}`));
-    for (let i = 1; i <= 4; i++) out.push(unit(out.length, `OP${op} EG LEVEL ${i}`));
-    for (const n of ["OUTPUT LEVEL", "MODE", "F COARSE", "F FINE", "OSC DETUNE", "BREAK POINT", "L SCALE DEPTH"]) {
+    for (let i = 1; i <= 4; i++)
+      out.push(unit(out.length, `OP${op} EG RATE ${i}`));
+    for (let i = 1; i <= 4; i++)
+      out.push(unit(out.length, `OP${op} EG LEVEL ${i}`));
+    for (const n of [
+      "OUTPUT LEVEL",
+      "MODE",
+      "F COARSE",
+      "F FINE",
+      "OSC DETUNE",
+      "BREAK POINT",
+      "L SCALE DEPTH",
+    ]) {
       out.push(unit(out.length, `OP${op} ${n}`));
     }
   }
@@ -675,7 +1435,9 @@ function decodeState(uid: string, state: string | null): Map<number, number> {
   const values = new Map(mockParamsFor(uid).map((p) => [p.id, p.default]));
   if (!state) return values;
   try {
-    for (const [id, v] of Object.entries(JSON.parse(atob(state)) as Record<string, number>)) {
+    for (const [id, v] of Object.entries(
+      JSON.parse(atob(state)) as Record<string, number>,
+    )) {
       if (Number.isFinite(v)) values.set(Number(id), v);
     }
   } catch {
@@ -721,6 +1483,19 @@ const MOCK_INSTALLED: PluginDescriptor[] = [
     kind: "effect",
     features: ["audio-effect", "saturation", "lo-fi"],
   },
+  // A second effect, so a chain in the browser mock can be built out of two distinguishable
+  // ones and the order in the card means something.
+  {
+    uid: "clap:/Library/Audio/Plug-Ins/CLAP/CHOWTapeModel.clap:com.chowdsp.CHOWTapeModel",
+    format: "clap",
+    path: "/Library/Audio/Plug-Ins/CLAP/CHOWTapeModel.clap",
+    pluginId: "com.chowdsp.CHOWTapeModel",
+    name: "CHOW Tape Model",
+    vendor: "chowdsp",
+    version: "2.11.0",
+    kind: "effect",
+    features: ["audio-effect", "distortion", "tape"],
+  },
 ];
 
 /**
@@ -733,77 +1508,201 @@ const MOCK_CATALOG: CatalogEntry[] = [
     id: "surge-xt",
     name: "Surge XT",
     vendor: "Surge Synth Team",
-    summary: "A big synth that covers almost any sound, with hundreds of ready-made presets.",
+    summary:
+      "A big synth that covers almost any sound, with hundreds of ready-made presets.",
     tags: ["pad", "bass", "lead", "presets"],
     kind: "instrument",
     license: "GPL-3.0",
     homepage: "https://surge-synthesizer.github.io",
     assets: [
-      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/surge-xt-mac.zip", sha256: "a1".repeat(32), bytes: 128_000_000 },
-      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/surge-xt-mac.zip", sha256: "a1".repeat(32), bytes: 128_000_000 },
-      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/surge-xt-win.zip", sha256: "a2".repeat(32), bytes: 120_000_000 },
-      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/surge-xt-linux.tar.gz", sha256: "a3".repeat(32), bytes: 110_000_000 },
+      {
+        platform: "macArm",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/surge-xt-mac.zip",
+        sha256: "a1".repeat(32),
+        bytes: 128_000_000,
+      },
+      {
+        platform: "macIntel",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/surge-xt-mac.zip",
+        sha256: "a1".repeat(32),
+        bytes: 128_000_000,
+      },
+      {
+        platform: "windows",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/surge-xt-win.zip",
+        sha256: "a2".repeat(32),
+        bytes: 120_000_000,
+      },
+      {
+        platform: "linux",
+        format: "clap",
+        kind: "tarGz",
+        url: "https://example.invalid/surge-xt-linux.tar.gz",
+        sha256: "a3".repeat(32),
+        bytes: 110_000_000,
+      },
     ],
   },
   {
     id: "dexed",
     name: "Dexed",
     vendor: "Digital Suburban",
-    summary: "Eighties FM sounds: glassy bells, electric pianos and brassy stabs.",
+    summary:
+      "Eighties FM sounds: glassy bells, electric pianos and brassy stabs.",
     tags: ["bell", "electric piano", "retro"],
     kind: "instrument",
     license: "GPL-3.0",
     homepage: "https://asb2m10.github.io/dexed",
     assets: [
-      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/dexed-mac.zip", sha256: "b1".repeat(32), bytes: 18_000_000 },
-      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/dexed-mac.zip", sha256: "b1".repeat(32), bytes: 18_000_000 },
-      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/dexed-win.zip", sha256: "b2".repeat(32), bytes: 17_000_000 },
-      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/dexed-linux.tar.gz", sha256: "b3".repeat(32), bytes: 16_000_000 },
+      {
+        platform: "macArm",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/dexed-mac.zip",
+        sha256: "b1".repeat(32),
+        bytes: 18_000_000,
+      },
+      {
+        platform: "macIntel",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/dexed-mac.zip",
+        sha256: "b1".repeat(32),
+        bytes: 18_000_000,
+      },
+      {
+        platform: "windows",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/dexed-win.zip",
+        sha256: "b2".repeat(32),
+        bytes: 17_000_000,
+      },
+      {
+        platform: "linux",
+        format: "clap",
+        kind: "tarGz",
+        url: "https://example.invalid/dexed-linux.tar.gz",
+        sha256: "b3".repeat(32),
+        bytes: 16_000_000,
+      },
     ],
   },
   {
     id: "vital",
     name: "Vital",
     vendor: "Matt Tytel",
-    summary: "Moving, modern sounds — good for wobbling basses and slow evolving pads.",
+    summary:
+      "Moving, modern sounds — good for wobbling basses and slow evolving pads.",
     tags: ["pad", "bass", "modern", "presets"],
     kind: "instrument",
     license: "freeware",
     homepage: "https://vital.audio",
     assets: [
-      { platform: "macArm", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c1".repeat(32), bytes: 1_100_000_000 },
-      { platform: "macIntel", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c1".repeat(32), bytes: 1_100_000_000 },
-      { platform: "windows", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c2".repeat(32), bytes: 1_000_000_000 },
-      { platform: "linux", format: "clap", kind: "installer", url: "https://vital.audio/#download", sha256: "c3".repeat(32), bytes: 900_000_000 },
+      {
+        platform: "macArm",
+        format: "clap",
+        kind: "installer",
+        url: "https://vital.audio/#download",
+        sha256: "c1".repeat(32),
+        bytes: 1_100_000_000,
+      },
+      {
+        platform: "macIntel",
+        format: "clap",
+        kind: "installer",
+        url: "https://vital.audio/#download",
+        sha256: "c1".repeat(32),
+        bytes: 1_100_000_000,
+      },
+      {
+        platform: "windows",
+        format: "clap",
+        kind: "installer",
+        url: "https://vital.audio/#download",
+        sha256: "c2".repeat(32),
+        bytes: 1_000_000_000,
+      },
+      {
+        platform: "linux",
+        format: "clap",
+        kind: "installer",
+        url: "https://vital.audio/#download",
+        sha256: "c3".repeat(32),
+        bytes: 900_000_000,
+      },
     ],
   },
   {
     id: "airwindows-consolidated",
     name: "Airwindows Consolidated",
     vendor: "Airwindows",
-    summary: "Hundreds of small effects in one: warmth, grit, tape wobble and tape hiss.",
+    summary:
+      "Hundreds of small effects in one: warmth, grit, tape wobble and tape hiss.",
     tags: ["fx", "lo-fi", "saturation"],
     kind: "effect",
     license: "MIT",
     homepage: "https://www.airwindows.com",
     assets: [
-      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/airwindows-mac.zip", sha256: "d1".repeat(32), bytes: 24_000_000 },
-      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/airwindows-mac.zip", sha256: "d1".repeat(32), bytes: 24_000_000 },
-      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/airwindows-win.zip", sha256: "d2".repeat(32), bytes: 23_000_000 },
-      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/airwindows-linux.tar.gz", sha256: "d3".repeat(32), bytes: 22_000_000 },
+      {
+        platform: "macArm",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/airwindows-mac.zip",
+        sha256: "d1".repeat(32),
+        bytes: 24_000_000,
+      },
+      {
+        platform: "macIntel",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/airwindows-mac.zip",
+        sha256: "d1".repeat(32),
+        bytes: 24_000_000,
+      },
+      {
+        platform: "windows",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/airwindows-win.zip",
+        sha256: "d2".repeat(32),
+        bytes: 23_000_000,
+      },
+      {
+        platform: "linux",
+        format: "clap",
+        kind: "tarGz",
+        url: "https://example.invalid/airwindows-linux.tar.gz",
+        sha256: "d3".repeat(32),
+        bytes: 22_000_000,
+      },
     ],
   },
   {
     id: "odin-2",
     name: "Odin 2",
     vendor: "TheWaveWarden",
-    summary: "Three oscillators and a lot of knobs — raw analogue-style bass and leads.",
+    summary:
+      "Three oscillators and a lot of knobs — raw analogue-style bass and leads.",
     tags: ["bass", "lead", "analogue"],
     kind: "instrument",
     license: "GPL-3.0",
     homepage: "https://www.thewavewarden.com/odin2",
     assets: [
-      { platform: "windows", format: "clap", kind: "zip", url: "https://example.invalid/odin2-win.zip", sha256: "e1".repeat(32), bytes: 60_000_000 },
+      {
+        platform: "windows",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/odin2-win.zip",
+        sha256: "e1".repeat(32),
+        bytes: 60_000_000,
+      },
     ],
   },
   {
@@ -816,9 +1715,30 @@ const MOCK_CATALOG: CatalogEntry[] = [
     license: "GPL-3.0",
     homepage: "https://www.bespokesynth.com",
     assets: [
-      { platform: "macArm", format: "clap", kind: "zip", url: "https://example.invalid/bespoke-mac.zip", sha256: "f1".repeat(32), bytes: 40_000_000 },
-      { platform: "macIntel", format: "clap", kind: "zip", url: "https://example.invalid/bespoke-mac.zip", sha256: "f1".repeat(32), bytes: 40_000_000 },
-      { platform: "linux", format: "clap", kind: "tarGz", url: "https://example.invalid/bespoke-linux.tar.gz", sha256: "f2".repeat(32), bytes: 38_000_000 },
+      {
+        platform: "macArm",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/bespoke-mac.zip",
+        sha256: "f1".repeat(32),
+        bytes: 40_000_000,
+      },
+      {
+        platform: "macIntel",
+        format: "clap",
+        kind: "zip",
+        url: "https://example.invalid/bespoke-mac.zip",
+        sha256: "f1".repeat(32),
+        bytes: 40_000_000,
+      },
+      {
+        platform: "linux",
+        format: "clap",
+        kind: "tarGz",
+        url: "https://example.invalid/bespoke-linux.tar.gz",
+        sha256: "f2".repeat(32),
+        bytes: 38_000_000,
+      },
     ],
   },
 ];
@@ -848,6 +1768,29 @@ function installedDescriptor(entry: CatalogEntry): PluginDescriptor {
  * `localStorage` reproduces the shared backend, and the `storage` event carries another window's
  * edits (including undo) back here, which is what the real `document` event does.
  */
+
+/**
+ * A deterministic waveform envelope seeded from a source id, so the guitar screen can be
+ * designed under `pnpm --dir ui dev` without any audio at all. Shaped like a strummed take:
+ * a pick attack decaying into a body, repeated.
+ */
+function syntheticPeaks(sourceId: string, buckets: number): [number, number][] {
+  let seed = 0;
+  for (let i = 0; i < sourceId.length; i++)
+    seed = (seed * 31 + sourceId.charCodeAt(i)) >>> 0;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0xffffffff;
+  };
+  const n = Math.max(1, Math.min(8192, Math.floor(buckets)));
+  const strums = 8;
+  return Array.from({ length: n }, (_, i) => {
+    const phase = ((i / n) * strums) % 1;
+    const envelope = Math.exp(-phase * 3.5) * (0.35 + rand() * 0.5);
+    const skew = 0.85 + rand() * 0.3;
+    return [-envelope * skew, envelope] as [number, number];
+  });
+}
 const LIVE_MODEL_KEY = "dissonant.mock.live";
 
 function mockBridge(): Bridge {
@@ -858,7 +1801,7 @@ function mockBridge(): Bridge {
     if (typeof window === "undefined") return null;
     try {
       const raw = localStorage.getItem(LIVE_MODEL_KEY);
-      return raw ? (JSON.parse(raw) as ProjectModel) : null;
+      return raw ? normalizedModel(JSON.parse(raw) as ProjectModel) : null;
     } catch {
       return null;
     }
@@ -875,12 +1818,12 @@ function mockBridge(): Bridge {
   let mode: PlayMode = "pattern";
   let patternId: string | null = null;
   let playing = false;
-  let beat = 0;
+  let playTick = 0;
   let last = performance.now();
   let loop: [number, number] | null = null;
   let looping = true;
   let armed = false;
-  let quantize = 0.25;
+  let quantize = TICKS_PER_BEAT / 4;
   let liveTrack: string | null = null;
   const held = new Map<number, { start: number; velocity: number }>();
   const listeners = new Set<(e: PlayheadEvent) => void>();
@@ -895,11 +1838,15 @@ function mockBridge(): Bridge {
   const snapshot = (): Snapshot => ({
     model: clone(model),
     // An open gesture sitting on its starting value is not undoable, matching `Document::can_undo`.
-    canUndo: undo.length > 0 || (pending !== null && JSON.stringify(pending) !== JSON.stringify(model)),
+    canUndo:
+      undo.length > 0 ||
+      (pending !== null && JSON.stringify(pending) !== JSON.stringify(model)),
     canRedo: redo.length > 0,
     dirty: isDirty(),
     path,
-    undoLabel: pending ? pendingLabel : (undoLabels[undoLabels.length - 1] ?? null),
+    undoLabel: pending
+      ? pendingLabel
+      : (undoLabels[undoLabels.length - 1] ?? null),
     redoLabel: redoLabels[redoLabels.length - 1] ?? null,
   });
 
@@ -931,7 +1878,25 @@ function mockBridge(): Bridge {
       for (const cb of docListeners) cb(snapshot());
     });
   }
-  const defaultLabel = (c: Command) => c.type.replace(/([A-Z])/g, " $1").toLowerCase().trim();
+  const defaultLabel = (c: Command) => {
+    // `document.rs::label_for` names the insert edits by hand; every other command's label
+    // falls out of its own name.
+    switch (c.type) {
+      case "addInsert":
+        return c.name.trim() ? `add ${c.name.trim()}` : "add insert";
+      case "moveInsert":
+        return "reorder insert";
+      case "setInsertEnabled":
+        return c.on ? "enable insert" : "bypass insert";
+      case "setInsertState":
+        return "insert settings";
+      default:
+        return c.type
+          .replace(/([A-Z])/g, " $1")
+          .toLowerCase()
+          .trim();
+    }
+  };
   const recentKey = "dissonant.mock.recent";
   const loadRecent = (): string[] => {
     try {
@@ -961,26 +1926,39 @@ function mockBridge(): Bridge {
 
   const loopLength = () => {
     if (mode === "song" && model.clips.length > 0) {
-      return model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
+      return model.clips.reduce(
+        (max, c) => Math.max(max, c.startTick + c.lengthTicks),
+        0,
+      );
     }
-    const p = model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
-    return p?.lengthBeats ?? 16;
+    const p =
+      model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
+    return p?.lengthTicks ?? 16 * TICKS_PER_BEAT;
   };
 
-  const tick = () => {
+  const frame = () => {
     const now = performance.now();
     if (playing) {
-      beat += ((now - last) / 1000) * (model.tempo / 60);
+      playTick += ((now - last) / 1000) * (model.tempo / 60) * TICKS_PER_BEAT;
       const len = loopLength();
-      const [ls, le] = loop && loop[1] > loop[0] ? [Math.min(loop[0], len), Math.min(loop[1], len)] : [0, len];
-      if (looping && beat >= le && le > ls) beat = ls + ((beat - le) % (le - ls));
+      const [ls, le] =
+        loop && loop[1] > loop[0]
+          ? [Math.min(loop[0], len), Math.min(loop[1], len)]
+          : [0, len];
+      if (looping && playTick >= le && le > ls)
+        playTick = ls + ((playTick - le) % (le - ls));
     }
     last = now;
-    const e: PlayheadEvent = { beat, playing, masterPeak: [0, 0], trackPeaks: [] };
+    const e: PlayheadEvent = {
+      tick: playTick,
+      playing,
+      masterPeak: [0, 0],
+      trackPeaks: [],
+    };
     for (const cb of listeners) cb(e);
-    requestAnimationFrame(tick);
+    requestAnimationFrame(frame);
   };
-  requestAnimationFrame(tick);
+  requestAnimationFrame(frame);
 
   // A tiny WebAudio blip so placing notes gives feedback in the browser mock.
   let ctx: AudioContext | null = null;
@@ -993,9 +1971,15 @@ function mockBridge(): Bridge {
       osc.type = "sawtooth";
       osc.frequency.value = 440 * Math.pow(2, (pitch - 69) / 12);
       gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.15 * (velocity / 127), ctx.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(
+        0.15 * (velocity / 127),
+        ctx.currentTime + 0.01,
+      );
       gain.gain.setValueAtTime(0.15 * (velocity / 127), ctx.currentTime + hold);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + hold + 0.08);
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        ctx.currentTime + hold + 0.08,
+      );
       osc.connect(gain).connect(ctx.destination);
       osc.start();
       osc.stop(ctx.currentTime + hold + 0.1);
@@ -1024,18 +2008,23 @@ function mockBridge(): Bridge {
     pending = null;
     path = to;
     saved = JSON.stringify(model);
-    beat = 0;
+    playTick = 0;
     notifyDoc();
   };
 
   const commitGesture = () => {
-    if (pending && JSON.stringify(pending) !== JSON.stringify(model)) pushUndo(pending, pendingLabel);
+    if (pending && JSON.stringify(pending) !== JSON.stringify(model))
+      pushUndo(pending, pendingLabel);
     pending = null;
   };
 
   /** Named so the plugin commands can reach it too: a committed param edit is an ordinary
    *  undoable document edit, it just does not originate from a UI dispatch. */
-  const applyCommand = async (command: Command, transient = false, label?: string): Promise<Snapshot> => {
+  const applyCommand = async (
+    command: Command,
+    transient = false,
+    label?: string,
+  ): Promise<Snapshot> => {
     const before = clone(model);
     const next = clone(model);
     reduce(next, command);
@@ -1066,7 +2055,10 @@ function mockBridge(): Bridge {
    * on the app thread. Keyed by uid and by the blob they were last reconciled with, so swapping
    * the plugin or undoing a committed edit reseeds them instead of showing stale knobs.
    */
-  const paramValues = new Map<string, { uid: string; state: string | null; values: Map<number, number> }>();
+  const paramValues = new Map<
+    string,
+    { uid: string; state: string | null; values: Map<number, number> }
+  >();
 
   const pluginFor = (uid: string): TrackPlugin => {
     const d = installed.find((x) => x.uid === uid) ?? fail(NO_SUCH_PLUGIN);
@@ -1077,9 +2069,44 @@ function mockBridge(): Bridge {
     const t = model.tracks.find((x) => x.id === trackId) ?? fail(NO_SUCH_TRACK);
     if (!t.plugin) return null;
     const held = paramValues.get(trackId);
-    if (held && held.uid === t.plugin.uid && held.state === t.plugin.state) return held;
-    const fresh = { uid: t.plugin.uid, state: t.plugin.state, values: decodeState(t.plugin.uid, t.plugin.state) };
+    if (held && held.uid === t.plugin.uid && held.state === t.plugin.state)
+      return held;
+    const fresh = {
+      uid: t.plugin.uid,
+      state: t.plugin.state,
+      values: decodeState(t.plugin.uid, t.plugin.state),
+    };
     paramValues.set(trackId, fresh);
+    return fresh;
+  };
+
+  /** The insert with this id and the chain it sits in, or null once it has been removed. */
+  const findInsert = (
+    insertId: string,
+  ): { target: InsertTarget; insert: Insert } | null => {
+    for (const t of model.tracks) {
+      const i = (t.inserts ?? []).find((x) => x.id === insertId);
+      if (i) return { target: { track: t.id }, insert: i };
+    }
+    const i = (model.masterInserts ?? []).find((x) => x.id === insertId);
+    return i ? { target: "master", insert: i } : null;
+  };
+
+  /** `liveParams` for an insert: the same live values a hosted effect would hold, reseeded
+   *  whenever the document's blob moves out from under them (a swap, an undo, a reopen). */
+  const liveInsert = (insertId: string) => {
+    const found = findInsert(insertId);
+    if (!found) return null;
+    const state = found.insert.state ?? null;
+    const held = paramValues.get(insertId);
+    if (held && held.uid === found.insert.uid && held.state === state)
+      return held;
+    const fresh = {
+      uid: found.insert.uid,
+      state,
+      values: decodeState(found.insert.uid, state),
+    };
+    paramValues.set(insertId, fresh);
     return fresh;
   };
 
@@ -1134,7 +2161,7 @@ function mockBridge(): Bridge {
       return snapshot();
     },
     setPlaybackContext: async (m, pid) => {
-      if (m !== mode || pid !== patternId) beat = 0;
+      if (m !== mode || pid !== patternId) playTick = 0;
       mode = m;
       patternId = pid;
     },
@@ -1146,16 +2173,27 @@ function mockBridge(): Bridge {
     stop: async () => {
       playing = false;
     },
-    seek: async (b) => {
-      beat = Math.max(0, b);
+    seek: async (t) => {
+      playTick = Math.max(0, t);
     },
     setHearChords: async () => {},
-    audition: async (_t, pitch, velocity = 100, seconds) => blip(pitch, velocity, seconds),
+    audition: async (_t, pitch, velocity = 100, seconds) =>
+      blip(pitch, velocity, seconds),
     auditionOff: async () => {},
-    audioStatus: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
-    restartAudio: async () => ({ running: false, sampleRate: null, error: "browser mock: no engine" }),
+    audioStatus: async () => ({
+      running: false,
+      sampleRate: null,
+      error: "browser mock: no engine",
+    }),
+    restartAudio: async () => ({
+      running: false,
+      sampleRate: null,
+      error: "browser mock: no engine",
+    }),
     exportWav: async () => {
-      throw new Error("export needs the desktop app — the browser mock renders nothing");
+      throw new Error(
+        "export needs the desktop app — the browser mock renders nothing",
+      );
     },
     onExportProgress: () => () => {},
     exportMidi: async () => {
@@ -1166,24 +2204,32 @@ function mockBridge(): Bridge {
     },
     listTemplates: async () => {
       try {
-        return Object.keys(JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}")).map((name) => ({ name, path: name }));
+        return Object.keys(
+          JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}"),
+        ).map((name) => ({ name, path: name }));
       } catch {
         return [];
       }
     },
     saveTemplate: async (name) => {
-      const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
+      const all = JSON.parse(
+        localStorage.getItem("dissonant.mock.templates") ?? "{}",
+      ) as Record<string, ProjectModel>;
       all[name] = clone(model);
       localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
       return { name, path: name };
     },
     deleteTemplate: async (name) => {
-      const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
+      const all = JSON.parse(
+        localStorage.getItem("dissonant.mock.templates") ?? "{}",
+      ) as Record<string, ProjectModel>;
       delete all[name];
       localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
     },
     newFromTemplate: async (name) => {
-      const all = JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}") as Record<string, ProjectModel>;
+      const all = JSON.parse(
+        localStorage.getItem("dissonant.mock.templates") ?? "{}",
+      ) as Record<string, ProjectModel>;
       if (all[name]) replace(clone(all[name]), null);
       return snapshot();
     },
@@ -1214,25 +2260,39 @@ function mockBridge(): Bridge {
     noteOn: async (pitch, velocity = 100) => {
       blip(pitch, velocity);
       for (const cb of midiListeners) cb(pitch);
-      if (armed && playing) held.set(pitch, { start: beat, velocity });
+      if (armed && playing) held.set(pitch, { start: playTick, velocity });
     },
     noteOff: async (pitch) => {
       const h = held.get(pitch);
       held.delete(pitch);
       if (!h) return;
       const track = liveTrack ?? model.tracks[0]?.id;
-      const p = model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
+      const p =
+        model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
       if (!track || !p) return;
-      const grid = quantize > 0 ? quantize : 1 / 32;
-      let len = beat - h.start;
-      if (len < 0) len += p.lengthBeats;
-      const start = Math.round((h.start % p.lengthBeats) / grid) * grid;
-      const notes = (p.notesByTrack[track] ?? []).filter((n) => !(n.pitch === pitch && Math.abs(n.startBeat - start) < grid / 2));
-      notes.push({ id: uuid(), startBeat: Math.min(start, p.lengthBeats - grid), lengthBeats: Math.max(grid, Math.round(len / grid) * grid), pitch, velocity: h.velocity });
+      const grid = quantize > 0 ? quantize : TICKS_PER_BEAT / 32;
+      let len = playTick - h.start;
+      if (len < 0) len += p.lengthTicks;
+      const start = Math.round((h.start % p.lengthTicks) / grid) * grid;
+      const notes = (p.notesByTrack[track] ?? []).filter(
+        (n) => !(n.pitch === pitch && Math.abs(n.startTick - start) < grid / 2),
+      );
+      notes.push({
+        id: uuid(),
+        startTick: Math.min(start, p.lengthTicks - grid),
+        lengthTicks: Math.max(grid, Math.round(len / grid) * grid),
+        pitch,
+        velocity: h.velocity,
+      });
       pushUndo(clone(model), "record notes");
       redo.length = 0;
       redoLabels.length = 0;
-      reduce(model, { type: "setNotes", patternId: p.id, trackId: track, notes });
+      reduce(model, {
+        type: "setNotes",
+        patternId: p.id,
+        trackId: track,
+        notes,
+      });
       notifyDoc();
     },
     setLoop: async (s, e) => {
@@ -1245,7 +2305,8 @@ function mockBridge(): Bridge {
       looping = on;
     },
     pickOpenPath: async () => null,
-    pickSavePath: async (name, ext) => (name.endsWith(`.${ext}`) ? name : `${name}.${ext}`),
+    pickSavePath: async (name, ext) =>
+      name.endsWith(`.${ext}`) ? name : `${name}.${ext}`,
     setTitle: async (title) => {
       document.title = title;
     },
@@ -1274,22 +2335,41 @@ function mockBridge(): Bridge {
     autosaveNow: async () => null,
     getSettings: async () => {
       try {
-        return withDefaults(JSON.parse(localStorage.getItem("dissonant.mock.settings") ?? "null"));
+        return withDefaults(
+          JSON.parse(localStorage.getItem("dissonant.mock.settings") ?? "null"),
+        );
       } catch {
         return withDefaults(null);
       }
     },
     setSettings: async (settings) => {
       try {
-        localStorage.setItem("dissonant.mock.settings", JSON.stringify(settings));
+        localStorage.setItem(
+          "dissonant.mock.settings",
+          JSON.stringify(settings),
+        );
       } catch {
         /* storage unavailable */
       }
-      return { running: false, sampleRate: null, error: "browser mock: no engine" };
+      return {
+        running: false,
+        sampleRate: null,
+        error: "browser mock: no engine",
+      };
     },
     outputDevices: async () => [
-      { name: "System default", isDefault: true, sampleRates: [44100, 48000, 96000], defaultSampleRate: 48000 },
-      { name: "Mock interface", isDefault: false, sampleRates: [44100, 48000, 88200, 96000, 192000], defaultSampleRate: 44100 },
+      {
+        name: "System default",
+        isDefault: true,
+        sampleRates: [44100, 48000, 96000],
+        defaultSampleRate: 48000,
+      },
+      {
+        name: "Mock interface",
+        isDefault: false,
+        sampleRates: [44100, 48000, 88200, 96000, 192000],
+        defaultSampleRate: 44100,
+      },
     ],
     testTone: async () => blip(69, 100),
     onMidiStatus: () => () => {},
@@ -1299,17 +2379,28 @@ function mockBridge(): Bridge {
       // mistake, an unknown uid is a stale list.
       model.tracks.find((t) => t.id === trackId) ?? fail(NO_SUCH_TRACK);
       const plugin = uid === null ? null : pluginFor(uid);
-      await applyCommand({ type: "setTrackPlugin", id: trackId, plugin }, false, "change plugin");
+      await applyCommand(
+        { type: "setTrackPlugin", id: trackId, plugin },
+        false,
+        "change plugin",
+      );
       paramValues.delete(trackId);
       notifyDoc();
     },
     pluginParams: async (trackId) => {
       const held = liveParams(trackId);
-      return held ? mockParamsFor(held.uid).map((p) => ({ ...p, value: held.values.get(p.id) ?? p.default })) : [];
+      return held
+        ? mockParamsFor(held.uid).map((p) => ({
+            ...p,
+            value: held.values.get(p.id) ?? p.default,
+          }))
+        : [];
     },
     setPluginParam: async (trackId, paramId, value, commit = false) => {
       const held = liveParams(trackId) ?? fail(NO_PLUGIN);
-      const info = mockParamsFor(held.uid).find((p) => p.id === paramId) ?? fail(NO_SUCH_PARAM);
+      const info =
+        mockParamsFor(held.uid).find((p) => p.id === paramId) ??
+        fail(NO_SUCH_PARAM);
       if (!allFinite(value)) fail(INVALID_VALUE);
       const v = clamp(value, info.min, info.max);
       held.values.set(paramId, info.isStepped ? Math.round(v) : v);
@@ -1317,19 +2408,32 @@ function mockBridge(): Bridge {
       // the plugin, which is what `commit: false` means on the Rust side.
       if (commit) {
         const state = encodeState(held.values);
-        await applyCommand({ type: "setPluginState", id: trackId, state }, false, "edit plugin");
+        await applyCommand(
+          { type: "setPluginState", id: trackId, state },
+          false,
+          "edit plugin",
+        );
         held.state = state;
         notifyDoc();
       }
     },
     pluginCatalog: async () => MOCK_CATALOG.map(clone),
     installPlugin: async (entryId) => {
-      const entry = MOCK_CATALOG.find((e) => e.id === entryId) ?? fail(NO_SUCH_ENTRY);
-      const emit = (phase: InstallProgress["phase"], done: number, total: number, message: string) => {
-        for (const cb of installListeners) cb({ entryId, phase, done, total, message });
+      const entry =
+        MOCK_CATALOG.find((e) => e.id === entryId) ?? fail(NO_SUCH_ENTRY);
+      const emit = (
+        phase: InstallProgress["phase"],
+        done: number,
+        total: number,
+        message: string,
+      ) => {
+        for (const cb of installListeners)
+          cb({ entryId, phase, done, total, message });
       };
       const platforms = hostPlatforms();
-      const asset = entry.assets.find((a) => platforms.includes(a.platform) && a.kind !== "installer");
+      const asset = entry.assets.find(
+        (a) => platforms.includes(a.platform) && a.kind !== "installer",
+      );
       if (!asset) {
         emit("failed", 0, 1, NO_ASSET);
         fail(NO_ASSET);
@@ -1340,7 +2444,12 @@ function mockBridge(): Bridge {
       const pause = () => new Promise((r) => setTimeout(r, 12));
       for (let i = 1; i <= 5; i++) {
         await pause();
-        emit("downloading", Math.round((asset.bytes * i) / 5), asset.bytes, `downloading ${entry.name}`);
+        emit(
+          "downloading",
+          Math.round((asset.bytes * i) / 5),
+          asset.bytes,
+          `downloading ${entry.name}`,
+        );
       }
       await pause();
       emit("verifying", 1, 2, "checking the download");
@@ -1360,8 +2469,95 @@ function mockBridge(): Bridge {
     },
     openPluginWindow: async (trackId) => {
       // No OS windows in a browser; a popup on the same origin runs the very same editor.
-      window.open(`${window.location.pathname}?plugin=${trackId}`, `plugin-${trackId}`, "width=900,height=620");
+      window.open(
+        `${window.location.pathname}?plugin=${trackId}`,
+        `plugin-${trackId}`,
+        "width=900,height=620",
+      );
     },
+
+    // ── Effect inserts ────────────────────────────────────────────────────────────────────
+    addInsert: async (target, uid, index = null, label) => {
+      // The chain is checked first, like the Rust command: an unknown track is the user's
+      // mistake, an unknown uid is a stale list.
+      if (target !== "master" && !model.tracks.some((t) => t.id === target.track))
+        fail(NO_SUCH_TRACK);
+      const d = installed.find((x) => x.uid === uid) ?? fail(NO_SUCH_PLUGIN);
+      return applyCommand(
+        { type: "addInsert", target, uid: d.uid, name: d.name, index },
+        false,
+        label,
+      );
+    },
+    removeInsert: async (target, insertId, label) => {
+      const s = await applyCommand(
+        { type: "removeInsert", target, insertId },
+        false,
+        label,
+      );
+      // The effect is closed with the slot; a new one at the same index is a new effect.
+      paramValues.delete(insertId);
+      return s;
+    },
+    moveInsert: async (target, insertId, toIndex, label) =>
+      applyCommand({ type: "moveInsert", target, insertId, toIndex }, false, label),
+    setInsertEnabled: async (target, insertId, on, label) =>
+      applyCommand(
+        { type: "setInsertEnabled", target, insertId, on },
+        false,
+        label,
+      ),
+    insertParams: async (insertId) => {
+      const held = liveInsert(insertId);
+      return held
+        ? mockParamsFor(held.uid).map((p) => ({
+            ...p,
+            value: held.values.get(p.id) ?? p.default,
+          }))
+        : [];
+    },
+    setInsertParam: async (insertId, paramId, value, commit = false) => {
+      const found = findInsert(insertId) ?? fail(NO_SUCH_INSERT);
+      const held = liveInsert(insertId) ?? fail(NO_SUCH_INSERT);
+      const info =
+        mockParamsFor(held.uid).find((p) => p.id === paramId) ??
+        fail(NO_SUCH_PARAM);
+      if (!allFinite(value)) fail(INVALID_VALUE);
+      const v = clamp(value, info.min, info.max);
+      held.values.set(paramId, info.isStepped ? Math.round(v) : v);
+      // Only the end of the gesture touches the document, exactly as for a track plugin.
+      if (!commit) return null;
+      const state = encodeState(held.values);
+      const s = await applyCommand(
+        { type: "setInsertState", target: found.target, insertId, state },
+        false,
+        `${found.insert.name} settings`,
+      );
+      held.state = state;
+      return s;
+    },
+
+    // ── Guitar ────────────────────────────────────────────────────────────────────────────
+    // There is no audio device in a browser, so anything that needs one says so plainly
+    // rather than pretending to work. Everything that is pure data still does.
+    inputDevices: async () => [],
+    setAudioArm: async () => ({
+      running: false,
+      sampleRate: null,
+      error: "browser mock: no engine",
+    }),
+    startAudioRecord: async () => {
+      throw new Error("recording needs the desktop app");
+    },
+    stopAudioRecord: async () => {
+      throw new Error("recording needs the desktop app");
+    },
+    importAudio: async () => {
+      throw new Error("importing audio needs the desktop app");
+    },
+    audioPeaks: async (sourceId, buckets) => syntheticPeaks(sourceId, buckets),
+    onAudioImport: () => () => {},
+    onAudioDropped: () => () => {},
   };
 }
 

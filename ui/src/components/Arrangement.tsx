@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { beatsPerBar, dbText, useStore } from "../store";
-import { DRUM_KIT, TRACK_PALETTE, trackColor, type Clip, type NoteEvent, type ScaleType, type Section, type SongPattern, type Track } from "../types";
+import { barTicks, beatsPerBar, dbText, useStore } from "../store";
+import { DRUM_KIT, songLength, ticksToBeats, TICKS_PER_BEAT, TRACK_PALETTE, trackColor, type Clip, type NoteEvent, type ScaleType, type Section, type SongPattern, type Track } from "../types";
 import { NOTE_NAMES, noteName } from "../theory";
 import { VMeter } from "./Meter";
 import { TempoLane } from "./TempoLane";
@@ -28,6 +28,7 @@ export function Arrangement() {
   const selectedPatternId = useStore((s) => s.selectedPatternId);
   const trackPeaks = useStore((s) => s.trackPeaks);
   const bpb = useStore(beatsPerBar);
+  const barTick = useStore(barTicks);
   const s = useStore();
 
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -42,11 +43,12 @@ export function Arrangement() {
   }, []);
 
   const pxPerBeat = pxPerBar / bpb;
-  const songEnd = model.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
-  const bars = Math.max(Math.ceil((viewW - HEAD_W - 12) / pxPerBar), Math.ceil(songEnd / bpb) + 8);
+  const pxPerTick = pxPerBeat / TICKS_PER_BEAT;
+  const songEnd = songLength(model);
+  const bars = Math.max(Math.ceil((viewW - HEAD_W - 12) / pxPerBar), Math.ceil(songEnd / barTick) + 8);
   const timelineW = bars * pxPerBar;
-  const snap = (beat: number) => Math.max(0, Math.round(beat / bpb) * bpb);
-  const snapFine = (beat: number) => Math.max(0, Math.round(beat));
+  const snap = (tick: number) => Math.max(0, Math.round(tick / barTick) * barTick);
+  const snapFine = (tick: number) => Math.max(0, Math.round(tick / TICKS_PER_BEAT) * TICKS_PER_BEAT);
 
   const [drag, setDrag] = useState<Drag | null>(null);
   const [preview, setPreview] = useState<Clip | null>(null);
@@ -69,12 +71,12 @@ export function Arrangement() {
   };
   const onClipMove = (e: React.PointerEvent) => {
     if (!drag || drag.kind === "section") return;
-    const dBeats = (e.clientX - drag.x0) / pxPerBeat;
+    const dTicks = (e.clientX - drag.x0) / pxPerTick;
     if (drag.kind === "move") {
-      setPreview({ ...drag.clip, startBeat: snap(drag.clip.startBeat + dBeats) });
+      setPreview({ ...drag.clip, startTick: snap(drag.clip.startTick + dTicks) });
     } else {
-      const len = Math.max(1, (e.shiftKey ? snapFine : snap)(drag.clip.lengthBeats + dBeats));
-      setPreview({ ...drag.clip, lengthBeats: len });
+      const len = Math.max(TICKS_PER_BEAT, (e.shiftKey ? snapFine : snap)(drag.clip.lengthTicks + dTicks));
+      setPreview({ ...drag.clip, lengthTicks: len });
     }
   };
   const onClipUp = () => {
@@ -85,8 +87,8 @@ export function Arrangement() {
     setPreview(null);
     if (!result) return;
     if (d.kind === "move" && d.dup) {
-      void dispatch({ type: "addClip", patternId: result.patternId, startBeat: result.startBeat, lengthBeats: result.lengthBeats });
-    } else if (result.startBeat !== d.clip.startBeat || result.lengthBeats !== d.clip.lengthBeats) {
+      void dispatch({ type: "addClip", patternId: result.patternId, startTick: result.startTick, lengthTicks: result.lengthTicks });
+    } else if (result.startTick !== d.clip.startTick || result.lengthTicks !== d.clip.lengthTicks) {
       void dispatch({ type: "updateClip", clip: result });
     }
   };
@@ -104,8 +106,8 @@ export function Arrangement() {
   };
   const onSectionMove = (e: React.PointerEvent) => {
     if (!drag || drag.kind !== "section") return;
-    const dBeats = (e.clientX - drag.x0) / pxPerBeat;
-    if (Math.abs(e.clientX - drag.x0) > 3) setSectionPreview({ ...drag.section, startBeat: snap(drag.section.startBeat + dBeats) });
+    const dTicks = (e.clientX - drag.x0) / pxPerTick;
+    if (Math.abs(e.clientX - drag.x0) > 3) setSectionPreview({ ...drag.section, startTick: snap(drag.section.startTick + dTicks) });
   };
   const onSectionUp = (e: React.PointerEvent) => {
     if (!drag || drag.kind !== "section") return;
@@ -113,13 +115,14 @@ export function Arrangement() {
     setDrag(null);
     const moved = sectionPreview;
     setSectionPreview(null);
-    if (moved && moved.startBeat !== d.section.startBeat) void dispatch({ type: "updateSection", section: moved });
+    if (moved && moved.startTick !== d.section.startTick) void dispatch({ type: "updateSection", section: moved });
     else if (Math.abs(e.clientX - d.x0) <= 3) setEditingSection(editingSection === d.section.id ? null : d.section.id);
   };
 
   const clipsShown = model.clips.map((c) => (preview && c.id === preview.id ? preview : c));
+  const audioClips = model.audioClips ?? [];
   const sectionsShown = model.sections.map((x) => (sectionPreview && x.id === sectionPreview.id ? sectionPreview : x));
-  const playX = HEAD_W + playhead * pxPerBeat;
+  const playX = HEAD_W + playhead * pxPerTick;
 
   return (
     <div className="arr">
@@ -134,7 +137,7 @@ export function Arrangement() {
               <button className="chip tiny" onClick={() => dispatch({ type: "addTrack", isDrum: true })}>+ drum</button>
             </div>
             <div className="r">
-              <span className="mono" style={{ color: "var(--text-5)" }}>{Math.ceil(songEnd / bpb)} bars</span>
+              <span className="mono" style={{ color: "var(--text-5)" }}>{Math.ceil(songEnd / barTick)} bars</span>
               <span className="spacer" />
               <button className="ico" onClick={() => setArrZoom(pxPerBar / 1.25)}>−</button>
               <span className="mono" style={{ color: "var(--text-5)" }}>1:{Math.round(pxPerBar)}</span>
@@ -147,24 +150,24 @@ export function Arrangement() {
             onPointerDown={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               if (e.clientY - rect.top < 16) return; // marker strip
-              s.seek(Math.max(0, (e.clientX - rect.left) / pxPerBeat));
+              s.seek(Math.max(0, (e.clientX - rect.left) / pxPerTick));
             }}
             onDoubleClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               if (e.clientY - rect.top >= 16) return;
-              void dispatch({ type: "addSection", name: "", startBeat: snap((e.clientX - rect.left) / pxPerBeat) });
+              void dispatch({ type: "addSection", name: "", startTick: snap((e.clientX - rect.left) / pxPerTick) });
             }}
             title="click to seek · double-click the top strip to add a section"
           >
             {sectionsShown.map((sec, i) => {
               const next = sectionsShown[i + 1];
-              const end = next ? next.startBeat : Math.max(songEnd, sec.startBeat + bpb * 4);
+              const end = next ? next.startTick : Math.max(songEnd, sec.startTick + barTick * 4);
               const color = sec.color ?? SECTION_COLORS[i % SECTION_COLORS.length];
               return (
                 <div
                   key={sec.id}
                   className="marker"
-                  style={{ left: sec.startBeat * pxPerBeat, width: Math.max(24, (end - sec.startBeat) * pxPerBeat - 2), borderLeftColor: color, background: `${color}1a`, color }}
+                  style={{ left: sec.startTick * pxPerTick, width: Math.max(24, (end - sec.startTick) * pxPerTick - 2), borderLeftColor: color, background: `${color}1a`, color }}
                   onPointerDown={(e) => onSectionDown(e, sec)}
                   onPointerMove={onSectionMove}
                   onPointerUp={onSectionUp}
@@ -186,7 +189,7 @@ export function Arrangement() {
                 {pxPerBar >= 22 || i % 4 === 0 ? i + 1 : ""}
               </div>
             ))}
-            <div className="phtri" style={{ left: playhead * pxPerBeat }} />
+            <div className="phtri" style={{ left: playhead * pxPerTick }} />
           </div>
         </div>
 
@@ -204,26 +207,50 @@ export function Arrangement() {
             pxPerBar={pxPerBar}
             bpb={bpb}
           >
-            {clipsShown.map((clip) => {
-              const pattern = model.patterns.find((p) => p.id === clip.patternId);
-              if (!pattern) return null;
-              return (
-                <ClipView
-                  key={clip.id}
-                  clip={clip}
-                  pattern={pattern}
-                  track={track}
-                  color={trackColor(track, ti)}
-                  pxPerBeat={pxPerBeat}
-                  selected={pattern.id === selectedPatternId}
-                  dragging={drag?.kind !== "section" && drag?.clip.id === clip.id}
-                  onDown={onClipDown}
-                  onMove={onClipMove}
-                  onUp={onClipUp}
-                  onDoubleClick={() => (s.selectPattern(pattern.id), s.selectTrack(track.id), s.setMode("pattern"))}
-                />
-              );
-            })}
+            {track.isAudio
+              ? // An audio track's lane shows its own clips, read-only: editing them happens on
+                // the guitar screen, where the waveform and the rig are.
+                audioClips
+                  .filter((c) => c.trackId === track.id)
+                  .map((c) => {
+                    const source = (model.audioSources ?? []).find((s2) => s2.id === c.sourceId);
+                    const widthTicks = ((c.lengthSeconds * model.tempo) / 60) * TICKS_PER_BEAT;
+                    return (
+                      <div
+                        key={c.id}
+                        className={`clip audio${c.muted ? " muted" : ""}`}
+                        style={{
+                          left: c.startTick * pxPerTick,
+                          width: Math.max(6, widthTicks * pxPerTick),
+                          borderColor: trackColor(track, ti),
+                        }}
+                        title={`${source?.name ?? "missing audio"} · ${c.lengthSeconds.toFixed(1)}s — edit on the guitar screen`}
+                        onDoubleClick={() => (s.selectTrack(track.id), s.selectAudioClip(c.id), s.setScreen("guitar"))}
+                      >
+                        <span className="name">{source?.name ?? "missing audio"}</span>
+                      </div>
+                    );
+                  })
+              : clipsShown.map((clip) => {
+                  const pattern = model.patterns.find((p) => p.id === clip.patternId);
+                  if (!pattern) return null;
+                  return (
+                    <ClipView
+                      key={clip.id}
+                      clip={clip}
+                      pattern={pattern}
+                      track={track}
+                      color={trackColor(track, ti)}
+                      pxPerBeat={pxPerBeat}
+                      selected={pattern.id === selectedPatternId}
+                      dragging={drag?.kind !== "section" && drag?.clip.id === clip.id}
+                      onDown={onClipDown}
+                      onMove={onClipMove}
+                      onUp={onClipUp}
+                      onDoubleClick={() => (s.selectPattern(pattern.id), s.selectTrack(track.id), s.setScreen("pattern"))}
+                    />
+                  );
+                })}
           </TrackRow>
         ))}
 
@@ -252,7 +279,7 @@ function SectionEditor({ section, color, onClose }: { section: Section; color: s
     >
       <div className="row" style={{ justifyContent: "space-between" }}>
         <span className="cap">section</span>
-        <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>from beat {section.startBeat}</span>
+        <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>from beat {ticksToBeats(section.startTick)}</span>
       </div>
       <input
         type="text"
@@ -410,13 +437,14 @@ function ClipView({
   onDoubleClick: () => void;
 }) {
   const notes = pattern.notesByTrack[track.id] ?? [];
-  const w = Math.max(6, clip.lengthBeats * pxPerBeat - 1);
-  const repeats = clip.lengthBeats / pattern.lengthBeats;
+  const pxPerTick = pxPerBeat / TICKS_PER_BEAT;
+  const w = Math.max(6, clip.lengthTicks * pxPerTick - 1);
+  const repeats = clip.lengthTicks / pattern.lengthTicks;
   return (
     <div
       className="clip"
       style={{
-        left: clip.startBeat * pxPerBeat,
+        left: clip.startTick * pxPerTick,
         width: w,
         background: `${color}24`,
         boxShadow: `inset 0 0 0 1px ${selected ? "#ffffff" : `${color}66`}`,
@@ -444,7 +472,7 @@ function ClipView({
 
 function ClipPreview({ notes, isDrum, pattern, clip, w, h, color }: { notes: NoteEvent[]; isDrum: boolean; pattern: SongPattern; clip: Clip; w: number; h: number; color: string }) {
   if (notes.length === 0) return <svg width={w} height={h} />;
-  const ppb = w / clip.lengthBeats;
+  const ppt = w / clip.lengthTicks;
   let lo = 36;
   let hi = 84;
   if (!isDrum) {
@@ -459,15 +487,15 @@ function ClipPreview({ notes, isDrum, pattern, clip, w, h, color }: { notes: Not
   const rows = isDrum ? DRUM_KIT.length : hi - lo;
   let d = "";
   // Draw every repetition of the pattern inside the clip, from the offset.
-  for (let base = -(clip.offsetBeats % pattern.lengthBeats); base < clip.lengthBeats; base += pattern.lengthBeats) {
+  for (let base = -(clip.offsetTicks % pattern.lengthTicks); base < clip.lengthTicks; base += pattern.lengthTicks) {
     for (const n of notes) {
-      const start = base + n.startBeat;
-      if (start < 0 || start >= clip.lengthBeats) continue;
+      const start = base + n.startTick;
+      if (start < 0 || start >= clip.lengthTicks) continue;
       if (isDrum && !DRUM_KIT.some((k) => k.pitch === n.pitch)) continue;
       const p = isDrum ? 1 - DRUM_KIT.findIndex((k) => k.pitch === n.pitch) / Math.max(1, rows - 1) : (n.pitch - lo) / Math.max(1, rows);
-      const x = start * ppb;
+      const x = start * ppt;
       const y = 2 + (1 - p) * (h - 6);
-      const ww = Math.max(1, Math.min(n.lengthBeats, clip.lengthBeats - start) * ppb - 1);
+      const ww = Math.max(1, Math.min(n.lengthTicks, clip.lengthTicks - start) * ppt - 1);
       d += `M${x.toFixed(1)} ${y.toFixed(1)}h${ww.toFixed(1)}v3h-${ww.toFixed(1)}z`;
     }
   }

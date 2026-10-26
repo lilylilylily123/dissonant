@@ -18,9 +18,9 @@ pub struct HighlightEngine {
 }
 
 impl HighlightEngine {
-    pub fn tier_map(&self, beat: f64, chord_track: &ChordTrack, key: &KeyState) -> [Option<Tier>; 12] {
+    pub fn tier_map(&self, tick: i64, chord_track: &ChordTrack, key: &KeyState) -> [Option<Tier>; 12] {
         let key_pcs = key.scale_pitch_classes();
-        if let Some(chord) = chord_track.chord_at(beat) {
+        if let Some(chord) = chord_track.chord_at(tick) {
             let map = self.classifier.tier_map(&chord.pitch_classes, key_pcs.as_deref());
             return map.map(Some);
         }
@@ -39,8 +39,8 @@ impl HighlightEngine {
     }
 
     /// Convenience for a single MIDI pitch.
-    pub fn tier(&self, pitch: i32, beat: f64, chord_track: &ChordTrack, key: &KeyState) -> Option<Tier> {
-        self.tier_map(beat, chord_track, key)[normalize(pitch) as usize]
+    pub fn tier(&self, pitch: i32, tick: i64, chord_track: &ChordTrack, key: &KeyState) -> Option<Tier> {
+        self.tier_map(tick, chord_track, key)[normalize(pitch) as usize]
     }
 }
 
@@ -48,11 +48,12 @@ impl HighlightEngine {
 mod tests {
     use super::*;
     use crate::model::{ChordEvent, ScaleType};
+    use crate::ticks::TICKS_PER_BEAT as BEAT;
 
     fn track() -> ChordTrack {
         ChordTrack::new(vec![
-            ChordEvent::new(0.0, 4.0, vec![0, 4, 7], Some("C".into())),
-            ChordEvent::new(4.0, 4.0, vec![5, 9, 0], Some("F".into())),
+            ChordEvent::new(0, 4 * BEAT, vec![0, 4, 7], Some("C".into())),
+            ChordEvent::new(4 * BEAT, 4 * BEAT, vec![5, 9, 0], Some("F".into())),
         ])
     }
 
@@ -60,28 +61,28 @@ mod tests {
     fn crossing_a_chord_boundary_changes_tiers() {
         let e = HighlightEngine::default();
         let key = KeyState::NONE;
-        assert_eq!(e.tier(64, 1.0, &track(), &key), Some(Tier::ChordTone)); // E over C
-        assert_eq!(e.tier(64, 5.0, &track(), &key), Some(Tier::Tension)); // E over F = maj7
-        assert_eq!(e.tier(65, 1.0, &track(), &key), Some(Tier::Dissonance)); // F over C: avoid note
-        assert_eq!(e.tier(65, 5.0, &track(), &key), Some(Tier::ChordTone)); // F over F
+        assert_eq!(e.tier(64, BEAT, &track(), &key), Some(Tier::ChordTone)); // E over C
+        assert_eq!(e.tier(64, 5 * BEAT, &track(), &key), Some(Tier::Tension)); // E over F = maj7
+        assert_eq!(e.tier(65, BEAT, &track(), &key), Some(Tier::Dissonance)); // F over C: avoid note
+        assert_eq!(e.tier(65, 5 * BEAT, &track(), &key), Some(Tier::ChordTone)); // F over F
     }
 
     #[test]
     fn three_state_degradation() {
         let e = HighlightEngine::default();
         let empty = ChordTrack::default();
-        assert_eq!(e.tier_map(0.0, &empty, &KeyState::NONE), [None; 12]);
+        assert_eq!(e.tier_map(0, &empty, &KeyState::NONE), [None; 12]);
         let key = KeyState::locked(0, ScaleType::Major);
-        let m = e.tier_map(0.0, &empty, &key);
+        let m = e.tier_map(0, &empty, &key);
         assert_eq!(m[0], Some(Tier::ChordTone));
         assert_eq!(m[1], Some(Tier::Dissonance));
-        assert!(e.tier_map(0.0, &track(), &key).iter().all(Option::is_some));
+        assert!(e.tier_map(0, &track(), &key).iter().all(Option::is_some));
     }
 
     #[test]
     fn key_filter_applies_in_full_context() {
         let e = HighlightEngine::default();
-        assert_eq!(e.tier(70, 1.0, &track(), &KeyState::NONE), Some(Tier::Tension));
-        assert_eq!(e.tier(70, 1.0, &track(), &KeyState::locked(0, ScaleType::Major)), Some(Tier::Dissonance));
+        assert_eq!(e.tier(70, BEAT, &track(), &KeyState::NONE), Some(Tier::Tension));
+        assert_eq!(e.tier(70, BEAT, &track(), &KeyState::locked(0, ScaleType::Major)), Some(Tier::Dissonance));
     }
 }

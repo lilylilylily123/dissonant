@@ -65,10 +65,10 @@ fn an_unknown_plugin_is_refused_by_name_rather_than_guessed_at() {
 }
 
 #[test]
-fn state_cannot_be_pushed_into_a_track_that_hosts_nothing() {
+fn state_cannot_be_pushed_into_an_id_that_hosts_nothing() {
     let host = host();
     let err = host.load_state(Uuid::new_v4(), vec![1, 2, 3]).expect_err("there is no plugin to load into");
-    assert_eq!(err, "track has no plugin");
+    assert_eq!(err, "nothing is loaded under that id");
 }
 
 #[test]

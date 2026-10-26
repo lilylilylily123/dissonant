@@ -4,7 +4,8 @@
   "version": "0.2.0",
   "description": "A cross-platform DAW that shows you which notes sound good.",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --no-watch --config src-tauri/tauri.dev.conf.json",
+    "dev:watch": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "build": "tauri build",
     "tauri": "tauri",
     "ui": "pnpm --dir ui dev",

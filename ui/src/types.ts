@@ -1,5 +1,20 @@
 // Mirrors the Rust model in crates/dissonant-core (serde camelCase). Keep in sync.
 
+/** Ticks per quarter-note beat (PPQ). Mirrors `dissonant_core::ticks::TICKS_PER_BEAT`. */
+export const TICKS_PER_BEAT = 960;
+
+/** Beats → ticks, rounded half away from zero. Non-finite input gives 0. */
+export function beatsToTicks(beats: number): number {
+  if (!Number.isFinite(beats)) return 0;
+  const t = beats * TICKS_PER_BEAT;
+  return t < 0 ? -Math.round(-t) : Math.round(t);
+}
+
+/** Ticks → beats as a real number. */
+export function ticksToBeats(ticks: number): number {
+  return ticks / TICKS_PER_BEAT;
+}
+
 export type ScaleType = "major" | "minor";
 
 export interface KeyState {
@@ -8,26 +23,90 @@ export interface KeyState {
   isLocked: boolean;
 }
 
-export const NO_KEY: KeyState = { rootPitchClass: null, scale: "major", isLocked: false };
+export const NO_KEY: KeyState = {
+  rootPitchClass: null,
+  scale: "major",
+  isLocked: false,
+};
 
 export interface ChordEvent {
   id: string;
-  startBeat: number;
-  lengthBeats: number;
+  startTick: number;
+  lengthTicks: number;
   pitchClasses: number[];
   name: string | null;
 }
 
+/**
+ * One note. The properties after `velocity` are per-note performance controls modelled on
+ * FL Studio's note record; a drum step is the same record, which is why one graph editor
+ * drives both editors. All are optional on the wire: Rust fills the neutral value and skips
+ * it again when serialising, so untouched notes stay byte-identical in saved projects.
+ */
 export interface NoteEvent {
   id: string;
-  startBeat: number;
-  lengthBeats: number;
+  startTick: number;
+  lengthTicks: number;
   pitch: number;
   velocity: number;
   /** The player marked this dissonance as deliberate. */
   intentional?: boolean;
   /** Kept in the pattern but not played (drawn hollow). */
   muted?: boolean;
+  /** 0 hard left · 0.5 centre · 1 hard right. */
+  pan?: number;
+  /** Scales the voice's release: 0.5 is the instrument's own tail. */
+  release?: number;
+  /** Detune in cents, ±1200. Doubles as the drum grid's step pitch. */
+  fine?: number;
+  /** Filter cutoff for this note: 0.5 is the track's tone. */
+  modX?: number;
+  /** Filter resonance for this note: 0.5 is flat. */
+  modY?: number;
+  /** Start offset in ticks; the grid position stays the note's identity. */
+  shiftTicks?: number;
+  /** Retriggers across the note's own length; 0 plays it once. */
+  repeats?: number;
+  /** Colour group 0–15; the MIDI channel on export. */
+  color?: number;
+}
+
+/** The per-note properties the roll's lane and the drum graph editor can draw. */
+export type NoteProp = "velocity" | "pan" | "fine" | "release" | "modX" | "modY" | "shiftTicks" | "repeats";
+
+export interface NotePropSpec {
+  /** Lane label, matching FL's naming. */
+  label: string;
+  min: number;
+  max: number;
+  /** Value a note has when the property was never touched. */
+  neutral: number;
+  /** Whether the lane draws from its centre (pan) or from the floor (velocity). */
+  bipolar: boolean;
+  format: (v: number) => string;
+}
+
+export const NOTE_PROPS: Record<NoteProp, NotePropSpec> = {
+  velocity: { label: "velocity", min: 1, max: 127, neutral: 100, bipolar: false, format: (v) => String(Math.round(v)) },
+  pan: { label: "panning", min: 0, max: 1, neutral: 0.5, bipolar: true, format: panText },
+  fine: { label: "fine pitch", min: -1200, max: 1200, neutral: 0, bipolar: true, format: (v) => `${Math.round(v)} ct` },
+  release: { label: "release", min: 0, max: 1, neutral: 0.5, bipolar: true, format: (v) => v.toFixed(2) },
+  modX: { label: "mod X", min: 0, max: 1, neutral: 0.5, bipolar: true, format: (v) => v.toFixed(2) },
+  modY: { label: "mod Y", min: 0, max: 1, neutral: 0.5, bipolar: true, format: (v) => v.toFixed(2) },
+  shiftTicks: { label: "shift", min: -TICKS_PER_BEAT / 2, max: TICKS_PER_BEAT / 2, neutral: 0, bipolar: true, format: (v) => `${v >= 0 ? "+" : ""}${Math.round(v)} t` },
+  repeats: { label: "repeats", min: 0, max: 14, neutral: 0, bipolar: false, format: (v) => (v < 1 ? "none" : `×${Math.round(v) + 1}`) },
+};
+
+function panText(v: number): string {
+  const off = Math.round((v - 0.5) * 200);
+  if (off === 0) return "centre";
+  return `${Math.abs(off)}% ${off < 0 ? "L" : "R"}`;
+}
+
+/** The value a note carries for `prop`, falling back to the neutral default. */
+export function noteProp(note: NoteEvent, prop: NoteProp): number {
+  const v = note[prop];
+  return v === undefined ? NOTE_PROPS[prop].neutral : v;
 }
 
 export interface TimeSignature {
@@ -39,6 +118,11 @@ export interface TimeSignature {
 export function beatsPerBar(ts: TimeSignature | undefined): number {
   if (!ts) return 4;
   return (ts.numerator * 4) / Math.max(1, ts.denominator);
+}
+
+/** Ticks per bar. Mirrors `dissonant_core::ticks::bar_ticks`. */
+export function barTicks(ts: TimeSignature | undefined): number {
+  return beatsToTicks(beatsPerBar(ts));
 }
 
 export const TIME_SIGNATURES: TimeSignature[] = [
@@ -57,6 +141,8 @@ export interface Track {
   muted: boolean;
   soloed: boolean;
   isDrum: boolean;
+  /** An audio track holds recorded or imported audio and a guitar rig instead of notes. */
+  isAudio: boolean;
   volume: number;
   reverbSend: number;
   tone: number;
@@ -65,6 +151,233 @@ export interface Track {
   color: string | null;
   /** The CLAP plugin that replaces the built-in voice, or null for the built-in voice. */
   plugin: TrackPlugin | null;
+  /** This track's effect chain, in order, applied pre-fader. Absent when empty, like Rust's
+   *  `#[serde(skip_serializing_if = "Vec::is_empty")]`. */
+  inserts?: Insert[];
+  /** The guitar rig, on audio tracks only. */
+  amp: AmpRig | null;
+}
+
+export type TrackKind = "midi" | "drum" | "audio";
+
+/** Audio wins over drum; the model guarantees they are never both set. */
+export function trackKind(t: Track): TrackKind {
+  return t.isAudio ? "audio" : t.isDrum ? "drum" : "midi";
+}
+
+/**
+ * An audio file the project uses. The samples live in the app's audio store; the project only
+ * carries this description.
+ */
+export interface AudioSource {
+  id: string;
+  /** The imported file's name, or "take 3". */
+  name: string;
+  frames: number;
+  sampleRate: number;
+  channels: number;
+}
+
+/**
+ * A piece of an {@link AudioSource} on an audio track's timeline. Audio never warps: it is
+ * anchored at a tick and then plays for a length in seconds.
+ */
+export interface AudioClip {
+  id: string;
+  trackId: string;
+  sourceId: string;
+  startTick: number;
+  lengthSeconds: number;
+  offsetSeconds: number;
+  /** Linear, 0…{@link MAX_CLIP_GAIN}. */
+  gain: number;
+  fadeInSeconds: number;
+  fadeOutSeconds: number;
+  muted: boolean;
+}
+
+export const MAX_CLIP_GAIN = 4;
+export const MAX_FADE_SECONDS = 5;
+/** Most pedals a rig will hold. Mirrors `dissonant_core::MAX_PEDALS`. */
+export const MAX_PEDALS = 4;
+
+/** The guitar rig: input strip → pedals → amp head → cabinet → rack. */
+export interface AmpRig {
+  enabled: boolean;
+  /** Input trim, -24…+24 dB. */
+  inputDb: number;
+  gate: Gate;
+  /** In signal order, at most {@link MAX_PEDALS}. */
+  pedals: Pedal[];
+  amp: AmpHead;
+  /** The tone stack, picked apart from the amp: the same voicing through another topology is a
+   *  different guitar sound, which is the whole point of splitting them. */
+  eq: EqModel;
+  cab: Cabinet;
+  rack: Rack;
+}
+
+export interface Gate {
+  on: boolean;
+  /** -80…0 dBFS. */
+  thresholdDb: number;
+  /** 5…500 ms. */
+  releaseMs: number;
+}
+
+export type PedalKind =
+  "comp" | "drive" | "wah" | "chorus" | "phaser" | "tremolo" | "delay";
+
+export const PEDAL_KINDS: PedalKind[] = [
+  "comp",
+  "drive",
+  "wah",
+  "chorus",
+  "phaser",
+  "tremolo",
+  "delay",
+];
+
+/** One stompbox. Knobs are 0…10 like the real thing; times and rates are in their own units. */
+export type Pedal =
+  | { kind: "comp"; on: boolean; sustain: number; level: number }
+  | { kind: "drive"; on: boolean; drive: number; tone: number; level: number }
+  | { kind: "wah"; on: boolean; sensitivity: number; range: number }
+  | { kind: "chorus"; on: boolean; rateHz: number; depth: number; mix: number }
+  | {
+      kind: "phaser";
+      on: boolean;
+      rateHz: number;
+      depth: number;
+      feedback: number;
+    }
+  | { kind: "tremolo"; on: boolean; rateHz: number; depth: number }
+  | {
+      kind: "delay";
+      on: boolean;
+      timeMs: number;
+      feedback: number;
+      mix: number;
+    };
+
+export type AmpModel = "clean" | "crunch" | "lead" | "fuzz";
+export const AMP_MODELS: AmpModel[] = ["clean", "crunch", "lead", "fuzz"];
+
+/** The amp head: which voicing, and the knob row across its face. All 0…10. */
+export interface AmpHead {
+  model: AmpModel;
+  gain: number;
+  bass: number;
+  mid: number;
+  treble: number;
+  presence: number;
+  master: number;
+}
+
+/** The tone-stack topology, which is what actually separates one classic amp from another once
+ *  the gain stage is equal. Named for where the circuit comes from, not for a brand. */
+export type EqModel = "usClassic" | "british" | "britishBright" | "boutique";
+export const EQ_MODELS: EqModel[] = [
+  "usClassic",
+  "british",
+  "britishBright",
+  "boutique",
+];
+
+/** What each tone stack is called on screen. */
+export const EQ_LABELS: Record<EqModel, string> = {
+  usClassic: "us classic",
+  british: "british",
+  britishBright: "british bright",
+  boutique: "boutique",
+};
+
+export type CabModel =
+  "fourByTwelve" | "twoByTwelve" | "oneByTwelve" | "direct";
+export const CAB_MODELS: CabModel[] = [
+  "fourByTwelve",
+  "twoByTwelve",
+  "oneByTwelve",
+  "direct",
+];
+
+/** What each cabinet is called on screen. */
+export const CAB_LABELS: Record<CabModel, string> = {
+  fourByTwelve: "4×12",
+  twoByTwelve: "2×12",
+  oneByTwelve: "1×12",
+  direct: "direct",
+};
+
+/** The microphone in front of the cabinet. Each type hears the same speaker differently. */
+export type MicModel = "dynamic" | "condenser" | "ribbon";
+export const MIC_MODELS: MicModel[] = ["dynamic", "condenser", "ribbon"];
+
+/** What each microphone is called on screen. */
+export const MIC_LABELS: Record<MicModel, string> = {
+  dynamic: "dynamic",
+  condenser: "condenser",
+  ribbon: "ribbon",
+};
+
+export interface Cabinet {
+  model: CabModel;
+  micModel: MicModel;
+  /** Across the cone, 0…10: 0 = cone edge, dark and mellow; 10 = dust cap, bright and aggressive. */
+  posX: number;
+  /** Away from the cab, 0…10: 0 = on the grille, proximity bass and tight; 10 = backed off and roomier. */
+  posZ: number;
+}
+
+export interface Rack {
+  /** Reverb mix, 0…10. */
+  reverb: number;
+  /** Reverb decay, 0…10. */
+  decay: number;
+  /** -24…+12 dB. */
+  outputDb: number;
+}
+
+/** A fresh pedal of `kind`, switched on, every knob at noon. Mirrors `Pedal::of`. */
+export function newPedal(kind: PedalKind): Pedal {
+  switch (kind) {
+    case "comp":
+      return { kind, on: true, sustain: 5, level: 5 };
+    case "drive":
+      return { kind, on: true, drive: 5, tone: 5, level: 5 };
+    case "wah":
+      return { kind, on: true, sensitivity: 5, range: 5 };
+    case "chorus":
+      return { kind, on: true, rateHz: 1.2, depth: 5, mix: 5 };
+    case "phaser":
+      return { kind, on: true, rateHz: 0.8, depth: 5, feedback: 4 };
+    case "tremolo":
+      return { kind, on: true, rateHz: 5, depth: 5 };
+    case "delay":
+      return { kind, on: true, timeMs: 350, feedback: 3, mix: 3 };
+  }
+}
+
+/** The rig an audio track is created with. Mirrors `AmpRig::default`. */
+export function defaultAmpRig(): AmpRig {
+  return {
+    enabled: true,
+    inputDb: 0,
+    gate: { on: true, thresholdDb: -55, releaseMs: 120 },
+    pedals: [{ kind: "drive", on: false, drive: 5, tone: 5, level: 5 }],
+    amp: {
+      model: "crunch",
+      gain: 5,
+      bass: 5,
+      mid: 5,
+      treble: 6,
+      presence: 5,
+      master: 5,
+    },
+    eq: "usClassic",
+    cab: { model: "fourByTwelve", micModel: "dynamic", posX: 5, posZ: 2 },
+    rack: { reverb: 2, decay: 5, outputDb: 0 },
+  };
 }
 
 export interface ChordTrack {
@@ -72,71 +385,85 @@ export interface ChordTrack {
 }
 
 /**
- * A pattern. `lengthBeats` is the merged length: each track and the chord track may loop
+ * A pattern. `lengthTicks` is the merged length: each track and the chord track may loop
  * shorter and repeat to fill it, so a 2-bar drum loop plays twice under a 4-bar progression.
  */
 export interface SongPattern {
   id: string;
   name: string;
-  lengthBeats: number;
+  lengthTicks: number;
   chords: ChordTrack;
   notesByTrack: Record<string, NoteEvent[]>;
-  /** Loop length in beats per track; a track that is absent fills the pattern. */
-  trackLoopBeats: Record<string, number>;
-  /** Loop length in beats of the chord track; `null` fills the pattern. */
-  chordLoopBeats: number | null;
+  /** Loop length in ticks per track; a track that is absent fills the pattern. */
+  trackLoopTicks: Record<string, number>;
+  /** Loop length in ticks of the chord track; `null` fills the pattern. */
+  chordLoopTicks: number | null;
 }
 
-/** Mirrors `dissonant_core::model::MIN_LOOP_BEATS`. */
-export const MIN_LOOP_BEATS = 1;
+/** Mirrors `dissonant_core::model::MIN_LOOP_TICKS`. */
+export const MIN_LOOP_TICKS = TICKS_PER_BEAT;
+
+/** Shortest note the model keeps. Mirrors `dissonant_core::model::MIN_NOTE_TICKS`. */
+export const MIN_NOTE_TICKS = TICKS_PER_BEAT / 16;
+
+/** Largest start offset a note may carry. Mirrors `dissonant_core::model::MAX_SHIFT_TICKS`. */
+export const MAX_SHIFT_TICKS = 4 * TICKS_PER_BEAT;
 
 /** A stored loop length made usable: clamped into the pattern, with anything missing or
  *  nonsensical meaning "fills the pattern". Mirrors `SongPattern::usable_loop`. */
-function usableLoop(p: SongPattern, beats: number | null | undefined): number {
-  const len = Math.max(1, p.lengthBeats);
-  return beats != null && Number.isFinite(beats) && beats > 0 ? Math.min(Math.max(beats, Math.min(MIN_LOOP_BEATS, len)), len) : len;
+function usableLoop(p: SongPattern, ticks: number | null | undefined): number {
+  const len = Math.max(1, p.lengthTicks);
+  return ticks != null && Number.isFinite(ticks) && ticks > 0
+    ? Math.min(Math.max(ticks, Math.min(MIN_LOOP_TICKS, len)), len)
+    : len;
 }
 
-/** How long one turn of `trackId` is inside `p`. */
+/** How long one turn of `trackId` is inside `p`, in ticks. */
 export function trackLoop(p: SongPattern, trackId: string): number {
-  return usableLoop(p, p.trackLoopBeats?.[trackId]);
+  return usableLoop(p, p.trackLoopTicks?.[trackId]);
 }
 
-/** How long one turn of the chord track is inside `p`. */
+/** How long one turn of the chord track is inside `p`, in ticks. */
 export function chordLoop(p: SongPattern): number {
-  return usableLoop(p, p.chordLoopBeats);
+  return usableLoop(p, p.chordLoopTicks);
 }
 
 /**
- * Lay `events` out across `totalBeats` in turns of `turnBeats`, trimming each turn at its own
+ * Lay `events` out across `totalTicks` in turns of `turnTicks`, trimming each turn at its own
  * end. Mirrors `SongPattern::looped_notes` / `looped_chords` for display; repeats carry a
  * suffixed id so React keys stay unique and hit-testing can tell them from the source.
  */
-export function layOutLoop<T extends { id: string; startBeat: number; lengthBeats: number }>(
-  events: T[],
-  turnBeats: number,
-  totalBeats: number,
-): T[] {
-  if (turnBeats >= totalBeats || events.length === 0) return events;
+export function layOutLoop<
+  T extends { id: string; startTick: number; lengthTicks: number },
+>(events: T[], turnTicks: number, totalTicks: number): T[] {
+  if (turnTicks >= totalTicks || events.length === 0) return events;
   const out: T[] = [];
-  for (let rep = 0, base = 0; base < totalBeats; rep++, base += turnBeats) {
-    const end = Math.min(base + turnBeats, totalBeats);
+  for (let rep = 0, base = 0; base < totalTicks; rep++, base += turnTicks) {
+    const end = Math.min(base + turnTicks, totalTicks);
     for (const e of events) {
-      const startBeat = base + e.startBeat;
-      if (startBeat >= end) continue;
-      out.push({ ...e, id: rep === 0 ? e.id : `${e.id}~${rep}`, startBeat, lengthBeats: Math.max(1 / 64, Math.min(startBeat + e.lengthBeats, end) - startBeat) });
+      const startTick = base + e.startTick;
+      if (startTick >= end) continue;
+      out.push({
+        ...e,
+        id: rep === 0 ? e.id : `${e.id}~${rep}`,
+        startTick,
+        lengthTicks: Math.max(
+          MIN_NOTE_TICKS,
+          Math.min(startTick + e.lengthTicks, end) - startTick,
+        ),
+      });
     }
   }
   return out;
 }
 
-/** A pattern placed on the song; loops from `offsetBeats` for `lengthBeats`. */
+/** A pattern placed on the song; loops from `offsetTicks` for `lengthTicks`. */
 export interface Clip {
   id: string;
   patternId: string;
-  startBeat: number;
-  lengthBeats: number;
-  offsetBeats: number;
+  startTick: number;
+  lengthTicks: number;
+  offsetTicks: number;
   muted: boolean;
 }
 
@@ -144,7 +471,7 @@ export interface Clip {
 export interface Section {
   id: string;
   name: string;
-  startBeat: number;
+  startTick: number;
   key: KeyState | null;
   color: string | null;
 }
@@ -166,89 +493,119 @@ export interface ProjectModel {
   tracks: Track[];
   patterns: SongPattern[];
   clips: Clip[];
+  /** Every audio file the project refers to; kept even when nothing points at one. */
+  audioSources?: AudioSource[];
+  /** Audio placed on the song timeline, each in its own track's lane. */
+  audioClips?: AudioClip[];
   sections: Section[];
   master: MasterSettings;
   timeSignature?: TimeSignature;
   /** 50 = straight … 75 = hard shuffle. */
   swing?: number;
-  /** 0.5 (eighths) or 0.25 (sixteenths). */
-  swingGrid?: number;
+  /** Swing grid in ticks: 480 (eighths) or 240 (sixteenths). */
+  swingGridTicks?: number;
   /** Tempo changes along the song (absent / empty = constant). */
   tempoPoints?: TempoPoint[];
+  /** The master effect chain, ahead of the master bus. Absent when empty. */
+  masterInserts?: Insert[];
 }
 
 export interface TempoPoint {
   id: string;
-  beat: number;
+  tick: number;
   bpm: number;
   /** Glide linearly from the previous point's tempo to this one. */
   ramp: boolean;
 }
 
-/** Mirror of `dissonant_core::tempo::TempoMap`: tempo and elapsed seconds along the song. */
+/** The grid a project swings on when it carries none. Mirrors `default_swing_grid`. */
+export const DEFAULT_SWING_GRID_TICKS = TICKS_PER_BEAT / 2;
+
+/** Mirror of `dissonant_core::tempo::TempoMap`: tempo and elapsed seconds along the song.
+ *  Positions are ticks (fractional ticks allowed for a sub-tick playhead). */
 export function tempoMap(baseBpm: number, points: TempoPoint[] | undefined) {
-  const anchors: { beat: number; bpm: number; ramp: boolean }[] = [{ beat: 0, bpm: baseBpm, ramp: false }];
-  for (const p of [...(points ?? [])].sort((a, b) => a.beat - b.beat)) {
-    if (p.beat <= 0) anchors[0] = { beat: 0, bpm: p.bpm, ramp: false };
-    else if (anchors[anchors.length - 1].beat !== p.beat) anchors.push({ beat: p.beat, bpm: p.bpm, ramp: p.ramp });
+  const anchors: { tick: number; bpm: number; ramp: boolean }[] = [
+    { tick: 0, bpm: baseBpm, ramp: false },
+  ];
+  for (const p of [...(points ?? [])].sort((a, b) => a.tick - b.tick)) {
+    if (p.tick <= 0) anchors[0] = { tick: 0, bpm: p.bpm, ramp: false };
+    else if (anchors[anchors.length - 1].tick !== p.tick)
+      anchors.push({ tick: p.tick, bpm: p.bpm, ramp: p.ramp });
   }
-  const segSeconds = (b0: number, bpm0: number, b1: number, bpm1: number) => {
-    const len = b1 - b0;
+  const segSeconds = (t0: number, bpm0: number, t1: number, bpm1: number) => {
+    const len = (t1 - t0) / TICKS_PER_BEAT;
     if (len <= 0) return 0;
-    return Math.abs(bpm1 - bpm0) < 1e-9 ? (60 * len) / bpm0 : ((60 * len) / (bpm1 - bpm0)) * Math.log(bpm1 / bpm0);
+    return Math.abs(bpm1 - bpm0) < 1e-9
+      ? (60 * len) / bpm0
+      : ((60 * len) / (bpm1 - bpm0)) * Math.log(bpm1 / bpm0);
   };
   const starts: number[] = [0];
   for (let i = 1; i < anchors.length; i++) {
     const a = anchors[i - 1];
     const n = anchors[i];
-    starts.push(starts[i - 1] + segSeconds(a.beat, a.bpm, n.beat, n.ramp ? n.bpm : a.bpm));
+    starts.push(
+      starts[i - 1] + segSeconds(a.tick, a.bpm, n.tick, n.ramp ? n.bpm : a.bpm),
+    );
   }
-  const segAt = (beat: number) => {
+  const segAt = (tick: number) => {
     let i = 0;
-    while (i + 1 < anchors.length && anchors[i + 1].beat <= beat) i++;
+    while (i + 1 < anchors.length && anchors[i + 1].tick <= tick) i++;
     return i;
   };
-  const bpmAt = (beat: number) => {
-    const i = segAt(beat);
+  const bpmAt = (tick: number) => {
+    const i = segAt(tick);
     const a = anchors[i];
     const n = anchors[i + 1];
     if (!n || !n.ramp) return a.bpm;
-    const t = Math.min(1, Math.max(0, (beat - a.beat) / (n.beat - a.beat)));
+    const t = Math.min(1, Math.max(0, (tick - a.tick) / (n.tick - a.tick)));
     return a.bpm + (n.bpm - a.bpm) * t;
   };
-  const secondsAt = (beat: number) => {
-    const i = segAt(Math.max(0, beat));
+  const secondsAt = (tick: number) => {
+    const i = segAt(Math.max(0, tick));
     const a = anchors[i];
-    return starts[i] + segSeconds(a.beat, a.bpm, Math.max(0, beat), bpmAt(beat));
+    return (
+      starts[i] + segSeconds(a.tick, a.bpm, Math.max(0, tick), bpmAt(tick))
+    );
   };
   return { bpmAt, secondsAt, isConstant: anchors.length === 1 };
 }
 
 /**
- * Swing as a piecewise-linear warp of the beat line (mirrors `dissonant_core::tempo::swing_warp`):
+ * Swing as a piecewise-linear warp of the tick line (mirrors `dissonant_core::tempo::swing_warp_ticks`):
  * the second half of each `2·grid` pair is pushed so it lands at `2·grid·swing/100`.
  */
-export function swingWarp(beat: number, swing: number, grid: number): number {
-  if (!(grid > 0) || !(swing > 50) || swing > 75) return beat;
-  const pair = 2 * grid;
+export function swingWarp(tick: number, swing: number, gridTicks: number): number {
+  if (!(gridTicks > 0) || !(swing > 50) || swing > 75) return tick;
+  const pair = 2 * gridTicks;
   const late = (pair * swing) / 100;
-  const base = Math.floor(beat / pair) * pair;
-  const u = beat - base;
-  return base + (u <= grid ? u * (late / grid) : late + (u - grid) * ((pair - late) / grid));
+  const base = Math.floor(tick / pair) * pair;
+  const u = tick - base;
+  return (
+    base +
+    (u <= gridTicks
+      ? u * (late / gridTicks)
+      : late + (u - gridTicks) * ((pair - late) / gridTicks))
+  );
 }
 
+/** The song's end, in ticks. */
 export function songLength(m: ProjectModel): number {
-  return m.clips.reduce((max, c) => Math.max(max, c.startBeat + c.lengthBeats), 0);
+  return m.clips.reduce(
+    (max, c) => Math.max(max, c.startTick + c.lengthTicks),
+    0,
+  );
 }
 
-export function sectionAt(m: ProjectModel, beat: number): Section | null {
+export function sectionAt(m: ProjectModel, tick: number): Section | null {
   let best: Section | null = null;
-  for (const s of m.sections) if (s.startBeat <= beat && (!best || s.startBeat >= best.startBeat)) best = s;
+  for (const s of m.sections)
+    if (s.startTick <= tick && (!best || s.startTick >= best.startTick))
+      best = s;
   return best;
 }
 
-export function keyAt(m: ProjectModel, beat: number): KeyState {
-  return sectionAt(m, beat)?.key ?? m.key;
+export function keyAt(m: ProjectModel, tick: number): KeyState {
+  return sectionAt(m, tick)?.key ?? m.key;
 }
 
 export interface Snapshot {
@@ -269,7 +626,10 @@ export interface RecoveryCandidate {
   savedAtMs: number;
 }
 
-export function fileNameOf(path: string | null | undefined, fallback = "untitled.dissonant"): string {
+export function fileNameOf(
+  path: string | null | undefined,
+  fallback = "untitled.dissonant",
+): string {
   if (!path) return fallback;
   return path.split(/[\\/]/).pop() || fallback;
 }
@@ -315,6 +675,31 @@ export interface TrackPlugin {
   state: string | null;
 }
 
+/** Most inserts one chain will hold. Mirrors `dissonant_core::MAX_INSERTS`. */
+export const MAX_INSERTS = 8;
+
+/**
+ * One effect slot in a chain, on a track or on the master. `uid` names a scanned plugin, `name`
+ * is cached so an uninstalled effect can still be listed, and `state` is the effect's own
+ * base64 blob — absent until it has been dialled. Mirrors `dissonant_core::Insert`.
+ */
+export interface Insert {
+  id: string;
+  uid: string;
+  name: string;
+  enabled: boolean;
+  state?: string | null;
+}
+
+/** Which chain an insert command addresses: one track's, or the master's. */
+export type InsertTarget = { track: string } | "master";
+
+/** The chain a target names; empty when the track is gone or has never held an effect. */
+export function insertChain(m: ProjectModel, target: InsertTarget): Insert[] {
+  if (target === "master") return m.masterInserts ?? [];
+  return m.tracks.find((t) => t.id === target.track)?.inserts ?? [];
+}
+
 export type Platform = "macArm" | "macIntel" | "windows" | "linux";
 export type AssetKind = "zip" | "tarGz" | "installer";
 
@@ -341,7 +726,8 @@ export interface CatalogEntry {
   assets: CatalogAsset[];
 }
 
-export type InstallPhase = "downloading" | "verifying" | "unpacking" | "installed" | "failed";
+export type InstallPhase =
+  "downloading" | "verifying" | "unpacking" | "installed" | "failed";
 
 /** The `plugin-install` event: one entry's progress through the install. `done`/`total` are
  *  bytes while downloading and steps otherwise, so a bar can be drawn from them throughout. */
@@ -383,35 +769,71 @@ export type Command =
   | { type: "setTrackColor"; id: string; color: string | null }
   | { type: "setTrackPlugin"; id: string; plugin: TrackPlugin | null }
   | { type: "setPluginState"; id: string; state: string }
+  | {
+      type: "addInsert";
+      target: InsertTarget;
+      uid: string;
+      name: string;
+      /** Where in the chain, or null to append. */
+      index: number | null;
+    }
+  | { type: "removeInsert"; target: InsertTarget; insertId: string }
+  | { type: "moveInsert"; target: InsertTarget; insertId: string; toIndex: number }
+  | { type: "setInsertEnabled"; target: InsertTarget; insertId: string; on: boolean }
+  | { type: "setInsertState"; target: InsertTarget; insertId: string; state: string }
   | { type: "addPattern" }
   | { type: "duplicatePattern"; id: string }
   | { type: "deletePattern"; id: string }
   | { type: "renamePattern"; id: string; name: string }
-  | { type: "setPatternLength"; id: string; beats: number }
-  | { type: "setTrackLoop"; patternId: string; trackId: string; beats: number | null }
-  | { type: "setChordLoop"; patternId: string; beats: number | null }
+  | { type: "setPatternLength"; id: string; ticks: number }
+  | {
+      type: "setTrackLoop";
+      patternId: string;
+      trackId: string;
+      ticks: number | null;
+    }
+  | { type: "setChordLoop"; patternId: string; ticks: number | null }
   | { type: "setNotes"; patternId: string; trackId: string; notes: NoteEvent[] }
   | { type: "setChords"; patternId: string; chords: ChordEvent[] }
-  | { type: "addClip"; patternId: string; startBeat: number; lengthBeats: number | null }
+  | {
+      type: "addClip";
+      patternId: string;
+      startTick: number;
+      lengthTicks: number | null;
+    }
   | { type: "updateClip"; clip: Clip }
   | { type: "removeClip"; id: string }
-  | { type: "addSection"; name: string; startBeat: number }
+  | { type: "addSection"; name: string; startTick: number }
   | { type: "updateSection"; section: Section }
   | { type: "removeSection"; id: string }
   | { type: "setMaster"; master: MasterSettings }
   | { type: "setTimeSignature"; numerator: number; denominator: number }
-  | { type: "setSwing"; swing: number; grid: number }
-  | { type: "addTempoPoint"; beat: number; bpm: number; ramp: boolean }
+  | { type: "setSwing"; swing: number; gridTicks: number }
+  | { type: "addTempoPoint"; tick: number; bpm: number; ramp: boolean }
   | { type: "updateTempoPoint"; point: TempoPoint }
-  | { type: "removeTempoPoint"; id: string };
+  | { type: "removeTempoPoint"; id: string }
+  | { type: "addAudioTrack"; name: string }
+  | { type: "setTrackAmp"; id: string; amp: AmpRig }
+  | {
+      type: "addAudioTake";
+      trackId: string;
+      source: AudioSource;
+      clip: AudioClip;
+    }
+  | { type: "updateAudioClip"; clip: AudioClip }
+  | { type: "removeAudioClip"; id: string };
 
 export interface PlayheadEvent {
-  beat: number;
+  tick: number;
   playing: boolean;
   masterPeak: [number, number];
   trackPeaks: number[];
   /** Beats of count-in left; 0 when not counting in. */
   countIn?: number;
+  /** Peak of the live input; 0 when nothing is captured. */
+  inputPeak?: number;
+  /** True while a take is actually being captured. */
+  recording?: boolean;
 }
 
 export interface AudioStatus {
@@ -424,6 +846,14 @@ export interface AudioStatus {
   latencyMs?: number;
   load?: number;
   xruns?: number;
+  /** The capture device in use, if one opened. */
+  inputDevice?: string | null;
+  /** Why the capture device did not open, if it did not. */
+  inputError?: string | null;
+  inputLatencyMs?: number;
+  /** What a guitarist actually feels: in plus out. */
+  roundTripMs?: number;
+  inputUnderruns?: number;
 }
 
 /** What the export dialog sends; `null` fields fall back to the export settings. */
@@ -462,6 +892,19 @@ export interface OutputDevice {
   defaultSampleRate: number;
 }
 
+export interface InputDevice {
+  name: string;
+  isDefault: boolean;
+  channels: number;
+  defaultSampleRate: number;
+}
+
+/** What the guitar screen's progress strip reads while a file imports. */
+export interface AudioImportProgress {
+  name: string;
+  fraction: number;
+}
+
 // ─── Settings (mirrors src-tauri/src/settings.rs) ──────────────────────────────────────────
 
 export type VelocityCurve = "linear" | "soft" | "hard" | "fixed";
@@ -475,8 +918,22 @@ export interface TierColors {
 }
 
 export interface Settings {
-  audio: { device: string | null; sampleRate: number | null; bufferSize: number | null };
-  midi: { defaultInput: string | null; autoReconnect: boolean; velocityCurve: VelocityCurve; channel: number | null; octaveOffset: number };
+  audio: {
+    device: string | null;
+    sampleRate: number | null;
+    bufferSize: number | null;
+    /** Capture device name; null follows the system default. */
+    inputDevice: string | null;
+    /** Which of the input device's channels the guitar is plugged into. */
+    inputChannel: number;
+  };
+  midi: {
+    defaultInput: string | null;
+    autoReconnect: boolean;
+    velocityCurve: VelocityCurve;
+    channel: number | null;
+    octaveOffset: number;
+  };
   editing: {
     defaultGrid: number;
     defaultNoteLength: number;
@@ -490,26 +947,67 @@ export interface Settings {
     altKey: AltKey;
     snapToChords: boolean;
   };
-  export: { sampleRate: number; bitDepth: 16 | 24 | 32; dither: boolean; normalize: boolean; normalizeDb: number; tailSeconds: number };
-  appearance: { uiScale: number; rowHeight: number; reducedMotion: boolean; tierColors: TierColors; accent: string };
-  metronome: { on: boolean; volume: number; countInBars: number; preRollBars: number; duringPlayback: boolean };
+  export: {
+    sampleRate: number;
+    bitDepth: 16 | 24 | 32;
+    dither: boolean;
+    normalize: boolean;
+    normalizeDb: number;
+    tailSeconds: number;
+  };
+  appearance: {
+    uiScale: number;
+    rowHeight: number;
+    reducedMotion: boolean;
+    tierColors: TierColors;
+    accent: string;
+  };
+  metronome: {
+    on: boolean;
+    volume: number;
+    countInBars: number;
+    preRollBars: number;
+    duringPlayback: boolean;
+  };
 }
 
-export const DEFAULT_TIER_COLORS: TierColors = { chordTone: "#3dffb0", tension: "#ff9d2a", dissonance: "#ff3b30" };
+export const DEFAULT_TIER_COLORS: TierColors = {
+  chordTone: "#3dffb0",
+  tension: "#ff9d2a",
+  dissonance: "#ff3b30",
+};
 
 /** Tier palettes: the default, and an Okabe–Ito set that survives red-green and blue-yellow CVD. */
 export const TIER_PRESETS: { name: string; colors: TierColors }[] = [
   { name: "default", colors: DEFAULT_TIER_COLORS },
-  { name: "okabe–ito (color-blind safe)", colors: { chordTone: "#56b4e9", tension: "#f0e442", dissonance: "#d55e00" } },
-  { name: "cool", colors: { chordTone: "#4dd2ff", tension: "#c9b3ff", dissonance: "#ff5f9e" } },
+  {
+    name: "okabe–ito (color-blind safe)",
+    colors: { chordTone: "#56b4e9", tension: "#f0e442", dissonance: "#d55e00" },
+  },
+  {
+    name: "cool",
+    colors: { chordTone: "#4dd2ff", tension: "#c9b3ff", dissonance: "#ff5f9e" },
+  },
 ];
 
 export const DEFAULT_SETTINGS: Settings = {
-  audio: { device: null, sampleRate: null, bufferSize: null },
-  midi: { defaultInput: null, autoReconnect: true, velocityCurve: "linear", channel: null, octaveOffset: 0 },
+  audio: {
+    device: null,
+    sampleRate: null,
+    bufferSize: null,
+    inputDevice: null,
+    inputChannel: 0,
+  },
+  midi: {
+    defaultInput: null,
+    autoReconnect: true,
+    velocityCurve: "linear",
+    channel: null,
+    octaveOffset: 0,
+  },
   editing: {
-    defaultGrid: 0.25,
-    defaultNoteLength: 0.25,
+    defaultGrid: 240,
+    defaultNoteLength: 240,
     defaultVelocity: 100,
     defaultPatternBars: 4,
     defaultTempo: 120,
@@ -520,20 +1018,55 @@ export const DEFAULT_SETTINGS: Settings = {
     altKey: "noSnap",
     snapToChords: false,
   },
-  export: { sampleRate: 44100, bitDepth: 16, dither: true, normalize: false, normalizeDb: -1, tailSeconds: 1.5 },
-  appearance: { uiScale: 1, rowHeight: 18, reducedMotion: false, tierColors: DEFAULT_TIER_COLORS, accent: "#b48cff" },
-  metronome: { on: false, volume: 0.6, countInBars: 1, preRollBars: 0, duringPlayback: true },
+  export: {
+    sampleRate: 44100,
+    bitDepth: 16,
+    dither: true,
+    normalize: false,
+    normalizeDb: -1,
+    tailSeconds: 1.5,
+  },
+  appearance: {
+    uiScale: 1,
+    rowHeight: 18,
+    reducedMotion: false,
+    tierColors: DEFAULT_TIER_COLORS,
+    accent: "#b48cff",
+  },
+  metronome: {
+    on: false,
+    volume: 0.6,
+    countInBars: 1,
+    preRollBars: 0,
+    duringPlayback: true,
+  },
 };
 
 /** Deep-merge a (possibly partial / older) settings object over the defaults. */
-export function withDefaults(s: Partial<Settings> | null | undefined): Settings {
+export function withDefaults(
+  s: Partial<Settings> | null | undefined,
+): Settings {
   const d = DEFAULT_SETTINGS;
   return {
     audio: { ...d.audio, ...(s?.audio ?? {}) },
     midi: { ...d.midi, ...(s?.midi ?? {}) },
-    editing: { ...d.editing, ...(s?.editing ?? {}), defaultTimeSignature: { ...d.editing.defaultTimeSignature, ...(s?.editing?.defaultTimeSignature ?? {}) } },
+    editing: {
+      ...d.editing,
+      ...(s?.editing ?? {}),
+      defaultTimeSignature: {
+        ...d.editing.defaultTimeSignature,
+        ...(s?.editing?.defaultTimeSignature ?? {}),
+      },
+    },
     export: { ...d.export, ...(s?.export ?? {}) },
-    appearance: { ...d.appearance, ...(s?.appearance ?? {}), tierColors: { ...d.appearance.tierColors, ...(s?.appearance?.tierColors ?? {}) } },
+    appearance: {
+      ...d.appearance,
+      ...(s?.appearance ?? {}),
+      tierColors: {
+        ...d.appearance.tierColors,
+        ...(s?.appearance?.tierColors ?? {}),
+      },
+    },
     metronome: { ...d.metronome, ...(s?.metronome ?? {}) },
   };
 }
@@ -549,7 +1082,14 @@ export interface MidiStatus {
   armed: boolean;
 }
 
-export const VOICES = ["saw", "square", "triangle", "sine", "pad", "pluck"] as const;
+export const VOICES = [
+  "saw",
+  "square",
+  "triangle",
+  "sine",
+  "pad",
+  "pluck",
+] as const;
 
 /** The handoff's 12-color track palette (last one is reserved for returns/master). */
 export const TRACK_PALETTE = [
@@ -597,7 +1137,8 @@ export const DRUM_KIT: { name: string; pitch: number }[] = [
 ];
 
 export function uuid(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto)
+    return crypto.randomUUID();
   // Fallback for very old webviews.
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;

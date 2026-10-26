@@ -8,19 +8,21 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
-use dissonant_core::{MasterSettings, NoteEvent, ProjectModel, Sequence};
+use dissonant_core::{MasterSettings, NoteEvent, ProjectModel, Sequence, TICKS_PER_BEAT};
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
 use dissonant_engine::render::{render_to_buffer, RenderOptions};
 
 const SR: f32 = 44_100.0;
 const SRD: f64 = 44_100.0;
+/// Ticks per beat, short enough to keep each test's musical intent readable.
+const B: i64 = TICKS_PER_BEAT;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────────────────────
 
-fn model(voice: &str, length_beats: f64) -> ProjectModel {
+fn model(voice: &str, length_ticks: i64) -> ProjectModel {
     let mut m = ProjectModel::empty();
     m.tracks[0].voice = voice.to_string();
-    m.patterns[0].length_beats = length_beats;
+    m.patterns[0].length_ticks = length_ticks;
     m
 }
 
@@ -129,9 +131,9 @@ fn assert_finite(x: &[f32], what: &str) {
 // ─── 1. pan ──────────────────────────────────────────────────────────────────────────────────
 
 fn panned_peaks(pan: f64) -> (f32, f32) {
-    let mut m = model("sine", 2.0);
+    let mut m = model("sine", 2 * B);
     m.tracks[0].pan = pan;
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 1.0, 69)]);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B, 69)]);
     let (l, r) = render(&m, 0.5);
     (peak(&l), peak(&r))
 }
@@ -186,9 +188,9 @@ fn pan_is_monotonic_across_the_sweep() {
 #[test]
 fn track_volume_scales_the_output() {
     let build = |vol: f64| {
-        let mut m = model("sine", 2.0);
+        let mut m = model("sine", 2 * B);
         m.tracks[0].volume = vol;
-        set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 1.0, 69)]);
+        set_notes(&mut m, 0, vec![NoteEvent::new(0, B, 69)]);
         let (l, _) = render(&m, 0.5);
         peak(&l)
     };
@@ -208,9 +210,9 @@ fn track_volume_scales_the_output() {
 fn track_tone_lowpasses_a_bright_voice() {
     // A 220 Hz saw: fundamental well under the cutoff, 8th harmonic well over it.
     let build = |tone: f64| {
-        let mut m = model("saw", 2.0);
+        let mut m = model("saw", 2 * B);
         m.tracks[0].tone = tone;
-        set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 1.0, 57)]);
+        set_notes(&mut m, 0, vec![NoteEvent::new(0, B, 57)]);
         let (l, _) = render(&m, 0.5);
         // Measure inside the sustain, away from the attack transient.
         let w = l[secs(0.10)..secs(0.40)].to_vec();
@@ -234,9 +236,9 @@ fn track_tone_lowpasses_a_bright_voice() {
 #[test]
 fn reverb_send_adds_a_tail_and_zero_adds_none() {
     let build = |send: f64| {
-        let mut m = model("sine", 2.0);
+        let mut m = model("sine", 2 * B);
         m.tracks[0].reverb_send = send;
-        set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+        set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
         let (l, _) = render(&m, 1.5);
         l
     };
@@ -300,9 +302,9 @@ fn a_fully_wet_track_does_not_slam_the_master_clamp() {
     // A sustained note with the track reverb wide open must stay in the same ballpark as the
     // dry take, rather than being pushed into the limiter at `Master::process`.
     let bus = |send: f64| {
-        let mut m = model("sine", 8.0);
+        let mut m = model("sine", 8 * B);
         m.tracks[0].reverb_send = send;
-        set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 6.0, 69)]);
+        set_notes(&mut m, 0, vec![NoteEvent::new(0, 6 * B, 69)]);
         let (l, _) = render(&m, 1.0);
         // 6 beats = 3 s; measure once the reverb has fully built up.
         (peak(&l[secs(1.8)..secs(2.8)]), rms(&l[secs(1.8)..secs(2.8)]))
@@ -328,12 +330,12 @@ const A_PITCH: i32 = 69; // 440.0 Hz
 const B_PITCH: i32 = 74; // 587.3 Hz
 
 fn two_track_model() -> ProjectModel {
-    let mut m = model("sine", 2.0);
+    let mut m = model("sine", 2 * B);
     let mut b = dissonant_core::Track::new("b");
     b.voice = "sine".into();
     m.tracks.push(b);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 1.0, A_PITCH)]);
-    set_notes(&mut m, 1, vec![NoteEvent::new(0.0, 1.0, B_PITCH)]);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B, A_PITCH)]);
+    set_notes(&mut m, 1, vec![NoteEvent::new(0, B, B_PITCH)]);
     m
 }
 
@@ -397,37 +399,37 @@ fn last_sounding(x: &[f32], thresh: f32) -> usize {
 }
 
 #[test]
-fn notes_stop_at_their_end_beat() {
-    let mut m = model("sine", 4.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 1.0, 69)]);
+fn notes_stop_at_their_end_tick() {
+    let mut m = model("sine", 4 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B, 69)]);
     let (l, _) = render(&m, 0.5);
     // 1 beat @120 bpm = 0.5 s, "sine" release = 0.2 s → silence from ~0.70 s onwards.
     assert!(rms(&l[secs(0.10)..secs(0.40)]) > 1e-3, "note never sounded");
     assert!(
         rms(&l[secs(0.85)..secs(2.0)]) < 1e-6,
-        "voice is stuck past the note's end beat (rms {})",
+        "voice is stuck past the note's end tick (rms {})",
         rms(&l[secs(0.85)..secs(2.0)])
     );
 }
 
 #[test]
-fn length_beats_is_honored_not_a_fixed_duration() {
+fn length_ticks_is_honored_not_a_fixed_duration() {
     // `sine`'s release is a linear ramp that takes `release` seconds from full scale, so the
     // tail after note-off is at most 0.2 s and shrinks with the level the note was at. What
-    // must hold is that the note sustains right up to its end beat and stops within one
+    // must hold is that the note sustains right up to its end tick and stops within one
     // release afterwards — and that doubling the length doubles the sound.
-    let probe = |len: f64| {
-        let mut m = model("sine", 8.0);
-        set_notes(&mut m, 0, vec![NoteEvent::new(0.0, len, 69)]);
+    let probe = |len: i64| {
+        let mut m = model("sine", 8 * B);
+        set_notes(&mut m, 0, vec![NoteEvent::new(0, len, 69)]);
         let (l, _) = render(&m, 0.5);
-        let end = len * 0.5; // seconds, @120 bpm
+        let end = len as f64 / B as f64 * 0.5; // seconds, @120 bpm
         let before_end = rms(&l[secs(end - 0.05)..secs(end)]);
         (last_sounding(&l, 1e-4) as f64 / SRD, before_end)
     };
-    let (short, short_sustain) = probe(0.25); // ends at 0.125 s
-    let (long, long_sustain) = probe(3.0); // ends at 1.500 s
+    let (short, short_sustain) = probe(B / 4); // ends at 0.125 s
+    let (long, long_sustain) = probe(3 * B); // ends at 1.500 s
 
-    assert!(short_sustain > 1e-3 && long_sustain > 1e-3, "note died before its end beat");
+    assert!(short_sustain > 1e-3 && long_sustain > 1e-3, "note died before its end tick");
     assert!(
         short > 0.125 && short < 0.125 + 0.21,
         "a 0.25-beat note sounded for {short:.3} s; expected its 0.125 s plus at most one 0.2 s release"
@@ -438,17 +440,17 @@ fn length_beats_is_honored_not_a_fixed_duration() {
     );
     assert!(
         ((long - short) - 1.375).abs() < 0.05,
-        "the extra 2.75 beats added {:.3} s of sound, not 1.375 s — length_beats is not driving the duration",
+        "the extra 2.75 beats added {:.3} s of sound, not 1.375 s — length_ticks is not driving the duration",
         long - short
     );
 }
 
 #[test]
 fn a_note_shorter_than_one_block_still_sounds() {
-    // 0.04 beats @120 bpm = 882 samples; both the note-on and the note-off land inside one
-    // 4096-frame block, so the engine must still render the sub-block between them.
-    let mut m = model("sine", 4.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.04, 69)]);
+    // 38 ticks (0.04 beats) @120 bpm = 873 samples; both the note-on and the note-off land
+    // inside one 4096-frame block, so the engine must still render the sub-block between them.
+    let mut m = model("sine", 4 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, 38, 69)]);
     let (mut e, _) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));
     e.handle(EngineCommand::Play);
@@ -466,11 +468,11 @@ fn a_note_shorter_than_one_block_still_sounds() {
 
 #[test]
 fn repeated_same_pitch_notes_retrigger() {
-    let mut m = model("sine", 4.0);
+    let mut m = model("sine", 4 * B);
     set_notes(
         &mut m,
         0,
-        vec![NoteEvent::new(0.0, 1.0, 69), NoteEvent::new(1.0, 1.0, 69)],
+        vec![NoteEvent::new(0, B, 69), NoteEvent::new(B, B, 69)],
     );
     let (l, _) = render(&m, 0.5);
     // Second note runs 0.5 s → 1.0 s. If it never retriggered, the first note's 0.2 s release
@@ -478,7 +480,7 @@ fn repeated_same_pitch_notes_retrigger() {
     assert!(rms(&l[secs(0.80)..secs(0.95)]) > 1e-3, "the second note never fired");
     assert!(
         rms(&l[secs(1.30)..secs(2.0)]) < 1e-6,
-        "the retriggered note is stuck past its end beat"
+        "the retriggered note is stuck past its end tick"
     );
 }
 
@@ -486,11 +488,11 @@ fn repeated_same_pitch_notes_retrigger() {
 fn overlapping_same_pitch_notes_do_not_cut_each_other_off() {
     // note A: beats 0–2 (0.0–1.0 s), note B: beats 1–3 (0.5–1.5 s), same pitch.
     // A's note-off at 1.0 s must not take B with it; B has to keep sounding to 1.5 s.
-    let mut m = model("sine", 6.0);
+    let mut m = model("sine", 6 * B);
     set_notes(
         &mut m,
         0,
-        vec![NoteEvent::new(0.0, 2.0, 69), NoteEvent::new(1.0, 2.0, 69)],
+        vec![NoteEvent::new(0, 2 * B, 69), NoteEvent::new(B, 2 * B, 69)],
     );
     let (l, _) = render(&m, 0.5);
     let during_b = rms(&l[secs(1.15)..secs(1.45)]);
@@ -530,8 +532,8 @@ fn onsets(x: &[f32], thresh: f32) -> Vec<usize> {
 #[test]
 fn looping_retriggers_at_the_loop_point() {
     // 2-beat loop = 1.0 s @120 bpm, one note at the top of each cycle.
-    let mut m = model("sine", 2.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+    let mut m = model("sine", 2 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
     let (mut e, _) = engine_with(&m);
     e.handle(EngineCommand::Play);
     let (l, _) = run(&mut e, secs(3.05), 512);
@@ -549,10 +551,10 @@ fn looping_retriggers_at_the_loop_point() {
 /// 8-beat pattern sounds four times per pass, on the beat each turn starts.
 #[test]
 fn a_track_looping_shorter_than_its_pattern_sounds_on_every_turn() {
-    let mut m = model("sine", 8.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+    let mut m = model("sine", 8 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
     let track_id = m.tracks[0].id;
-    m.patterns[0].track_loop_beats.insert(track_id, 2.0);
+    m.patterns[0].track_loop_ticks.insert(track_id, 2 * B);
 
     let (mut e, _) = engine_with(&m);
     e.handle(EngineCommand::Play);
@@ -572,8 +574,8 @@ fn a_track_looping_shorter_than_its_pattern_sounds_on_every_turn() {
 #[test]
 fn a_note_crossing_the_loop_end_does_not_leak_into_the_next_cycle() {
     // 2-beat loop; the note runs beats 1.5–2.5, i.e. 0.5 beats past the loop end.
-    let mut m = model("sine", 2.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(1.5, 1.0, 69)]);
+    let mut m = model("sine", 2 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(3 * B / 2, B, 69)]);
     let (mut e, _) = engine_with(&m);
     e.handle(EngineCommand::Play);
     let (l, _) = run(&mut e, secs(3.0), 512);
@@ -590,8 +592,8 @@ fn a_note_crossing_the_loop_end_does_not_leak_into_the_next_cycle() {
 
 #[test]
 fn disabling_looping_plays_the_sequence_once() {
-    let mut m = model("sine", 2.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+    let mut m = model("sine", 2 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
     let (mut e, _) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));
     e.handle(EngineCommand::Play);
@@ -607,9 +609,9 @@ const POLYPHONY: usize = 12;
 fn exceeding_polyphony_steals_the_oldest_voice() {
     // 16 simultaneous notes on a 12-voice synth. Notes fire in list order, so the four
     // lowest pitches must be the ones stolen.
-    let mut m = model("sine", 4.0);
+    let mut m = model("sine", 4 * B);
     m.tracks[0].volume = 0.15; // keep the sum clear of the master clamp so the spectrum is clean
-    let notes: Vec<NoteEvent> = (60..76).map(|p| NoteEvent::new(0.0, 2.0, p)).collect();
+    let notes: Vec<NoteEvent> = (60..76).map(|p| NoteEvent::new(0, 2 * B, p)).collect();
     set_notes(&mut m, 0, notes);
     let (l, r) = render(&m, 0.5);
     assert_finite(&l, "left");
@@ -635,13 +637,14 @@ fn exceeding_polyphony_steals_the_oldest_voice() {
 
 #[test]
 fn voice_stealing_stays_in_range_and_free_of_nan() {
-    let mut m = model("saw", 4.0);
+    let mut m = model("saw", 4 * B);
     m.tracks[0].volume = 1.5;
     m.tracks[0].reverb_send = 0.8;
     m.master.gain = 1.5;
-    // 24 notes, staggered so steals happen mid-sustain rather than all at sample 0.
+    // 24 notes, staggered by a twentieth of a beat so steals happen mid-sustain rather than
+    // all at sample 0.
     let notes: Vec<NoteEvent> = (0..24)
-        .map(|i| NoteEvent::new(i as f64 * 0.05, 2.0, 48 + i))
+        .map(|i| NoteEvent::new(i as i64 * (B / 20), 2 * B, 48 + i))
         .collect();
     set_notes(&mut m, 0, notes);
     let (l, r) = render(&m, 1.0);
@@ -656,11 +659,11 @@ fn stealing_a_sounding_voice_does_not_click() {
     // a 13th a quarter-second in forces the oldest to be reassigned mid-sustain. Slamming the
     // stolen voice's oscillator and envelope back to zero shows up as a step discontinuity
     // many times the natural slew — that step is the click.
-    let mut m = model("sine", 8.0);
+    let mut m = model("sine", 8 * B);
     let mut notes: Vec<NoteEvent> = (0..POLYPHONY)
-        .map(|i| NoteEvent::new(0.0, 4.0, 36 + i as i32).with_velocity(127))
+        .map(|i| NoteEvent::new(0, 4 * B, 36 + i as i32).with_velocity(127))
         .collect();
-    notes.push(NoteEvent::new(0.5, 2.0, 80).with_velocity(127)); // 0.25 s in
+    notes.push(NoteEvent::new(B / 2, 2 * B, 80).with_velocity(127)); // 0.25 s in
     set_notes(&mut m, 0, notes);
     let (l, _) = render(&m, 0.5);
     assert_finite(&l, "left");
@@ -678,9 +681,9 @@ fn stealing_a_sounding_voice_does_not_click() {
 // ─── 7. master chain ─────────────────────────────────────────────────────────────────────────
 
 fn master_render(pitch: i32, voice: &str, tweak: impl Fn(&mut MasterSettings)) -> Vec<f32> {
-    let mut m = model(voice, 2.0);
+    let mut m = model(voice, 2 * B);
     tweak(&mut m.master);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 1.0, pitch)]);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B, pitch)]);
     let (l, _) = render(&m, 0.5);
     l[secs(0.10)..secs(0.40)].to_vec()
 }
@@ -726,11 +729,14 @@ fn master_high_cut_removes_high_frequencies() {
     );
 }
 
+/// A probe pitch, the master tweak that should move it, and the band's name.
+type EqCase = (i32, fn(&mut MasterSettings), &'static str);
+
 #[test]
 fn master_eq_bands_each_move_their_own_band() {
     // low shelf @120 Hz, peaking @1 kHz, high shelf @6 kHz. Probe each with a tone that sits
     // squarely inside that band, and check the other bands leave it alone.
-    let cases: [(i32, fn(&mut MasterSettings), &str); 3] = [
+    let cases: [EqCase; 3] = [
         (31, |s| s.low_eq = 2.0, "low"),   //  49 Hz
         (83, |s| s.mid_eq = 2.0, "mid"),   // 988 Hz
         (127, |s| s.high_eq = 2.0, "high"), // 12.5 kHz
@@ -750,7 +756,7 @@ fn master_eq_bands_each_move_their_own_band() {
 
 #[test]
 fn master_clamp_never_emits_nan() {
-    let mut m = model("saw", 2.0);
+    let mut m = model("saw", 2 * B);
     m.tracks[0].volume = 1.5;
     m.tracks[0].reverb_send = 1.0;
     m.master = MasterSettings {
@@ -762,7 +768,7 @@ fn master_clamp_never_emits_nan() {
         mid_eq: 4.0,
         high_eq: 4.0,
     };
-    let notes: Vec<NoteEvent> = (0..16).map(|i| NoteEvent::new(0.0, 2.0, 40 + i * 4)).collect();
+    let notes: Vec<NoteEvent> = (0..16).map(|i| NoteEvent::new(0, 2 * B, 40 + i * 4)).collect();
     set_notes(&mut m, 0, notes);
     let (l, r) = render(&m, 1.0);
     assert_finite(&l, "left");
@@ -776,8 +782,8 @@ fn master_clamp_never_emits_nan() {
 /// the reading must be at least that block's peak and never above the running maximum.
 #[test]
 fn master_peak_tracks_each_block_then_falls_back_to_zero() {
-    let mut m = model("sine", 8.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+    let mut m = model("sine", 8 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
     let (mut e, shared) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));
     e.handle(EngineCommand::Play);
@@ -812,8 +818,8 @@ fn master_peak_tracks_each_block_then_falls_back_to_zero() {
 fn track_peak_falls_back_to_zero_after_the_track_goes_silent() {
     for block in [256usize, 4096] {
         for voice in ["sine", "pluck"] {
-            let mut m = model(voice, 16.0);
-            set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+            let mut m = model(voice, 16 * B);
+            set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
             let (mut e, shared) = engine_with(&m);
             e.handle(EngineCommand::SetLooping(false));
             e.handle(EngineCommand::Play);
@@ -838,9 +844,9 @@ fn track_peak_falls_back_to_zero_after_the_track_goes_silent() {
 
 #[test]
 fn a_drum_track_meter_also_returns_to_zero() {
-    let mut m = model("sine", 16.0);
+    let mut m = model("sine", 16 * B);
     m.tracks[0].is_drum = true;
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.25, 36)]);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 4, 36)]);
     let (mut e, shared) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));
     e.handle(EngineCommand::Play);
@@ -852,7 +858,7 @@ fn a_drum_track_meter_also_returns_to_zero() {
 
 #[test]
 fn a_silent_project_leaves_every_meter_at_zero() {
-    let m = model("sine", 4.0);
+    let m = model("sine", 4 * B);
     let (mut e, shared) = engine_with(&m);
     e.handle(EngineCommand::Play);
     let (l, r) = run(&mut e, secs(1.0), 256);
@@ -865,14 +871,14 @@ fn a_silent_project_leaves_every_meter_at_zero() {
 // ─── resuming a note the playhead landed inside ──────────────────────────────────────────────
 
 /// Clicking the ruler in the middle of a long note must play that note, not silence until the
-/// next one starts. Scheduling alone only fires a note at its start beat.
+/// next one starts. Scheduling alone only fires a note at its start tick.
 #[test]
 fn seeking_into_a_sustained_note_sounds_it() {
-    let mut m = model("sine", 8.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 6.0, 69)]);
+    let mut m = model("sine", 8 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, 6 * B, 69)]);
     let (mut e, _shared) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));
-    e.handle(EngineCommand::Seek { beat: 3.0 });
+    e.handle(EngineCommand::Seek { tick: (3 * B) as f64 });
     e.handle(EngineCommand::Play);
 
     let (left, _) = run(&mut e, secs(0.5), 512);
@@ -894,10 +900,10 @@ fn seeking_into_a_sustained_note_sounds_it() {
 /// play is the ordinary way to audition the middle of a pattern.
 #[test]
 fn playing_from_inside_a_note_sounds_it() {
-    let mut m = model("sine", 8.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(2.0, 4.0, 69)]);
+    let mut m = model("sine", 8 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(2 * B, 4 * B, 69)]);
     let (mut e, _shared) = engine_with(&m);
-    e.handle(EngineCommand::Seek { beat: 4.0 });
+    e.handle(EngineCommand::Seek { tick: (4 * B) as f64 });
     let (before, _) = run(&mut e, secs(0.2), 512);
     assert_eq!(peak(&before), 0.0, "a stopped engine must stay silent");
 
@@ -910,11 +916,11 @@ fn playing_from_inside_a_note_sounds_it() {
 #[test]
 fn seeking_does_not_retrigger_a_drum_hit() {
     let mut m = ProjectModel::empty();
-    m.patterns[0].length_beats = 8.0;
+    m.patterns[0].length_ticks = 8 * B;
     m.tracks[0].is_drum = true;
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 4.0, 36)]);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, 4 * B, 36)]);
     let (mut e, _shared) = engine_with(&m);
-    e.handle(EngineCommand::Seek { beat: 2.0 });
+    e.handle(EngineCommand::Seek { tick: (2 * B) as f64 });
     e.handle(EngineCommand::Play);
     let (left, _) = run(&mut e, secs(0.4), 512);
     assert!(peak(&left) < 1e-3, "seeking past a drum hit replayed it: peak {}", peak(&left));
@@ -926,8 +932,8 @@ fn seeking_does_not_retrigger_a_drum_hit() {
 /// level it had when the mute landed.
 #[test]
 fn muting_a_sounding_track_lets_its_meter_fall() {
-    let mut m = model("sine", 16.0);
-    set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 12.0, 69)]);
+    let mut m = model("sine", 16 * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, 12 * B, 69)]);
     let (mut e, shared) = engine_with(&m);
     e.handle(EngineCommand::Play);
     run(&mut e, secs(0.3), 512);
@@ -950,8 +956,8 @@ fn muting_a_sounding_track_lets_its_meter_fall() {
 fn meter_release_does_not_depend_on_the_buffer_size() {
     let mut lit = Vec::new();
     for block in [128usize, 512, 4096] {
-        let mut m = model("sine", 16.0);
-        set_notes(&mut m, 0, vec![NoteEvent::new(0.0, 0.5, 69)]);
+        let mut m = model("sine", 16 * B);
+        set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
         let (mut e, shared) = engine_with(&m);
         e.handle(EngineCommand::SetLooping(false));
         e.handle(EngineCommand::Play);

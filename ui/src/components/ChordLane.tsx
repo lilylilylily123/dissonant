@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { selectedPattern, useStore } from "../store";
 import { chordAt, chordName, diatonicChords, noteName, tier } from "../theory";
-import { chordLoop, layOutLoop, type ChordEvent } from "../types";
+import { chordLoop, layOutLoop, TICKS_PER_BEAT, type ChordEvent } from "../types";
 
 export const GUTTER = 64;
 export const BASE_BEAT_W = 96;
@@ -20,7 +20,8 @@ export function ChordLane() {
 
   if (!pattern) return null;
   const beatW = BASE_BEAT_W * zoom;
-  const total = Math.max(1, pattern.lengthBeats);
+  const pxPerTick = beatW / TICKS_PER_BEAT;
+  const total = Math.max(TICKS_PER_BEAT, pattern.lengthTicks);
   const turn = chordLoop(pattern);
   const source = preview ?? pattern.chords.chords;
   // One turn is what you edit; the rest of the pattern shows that turn repeating. Shortening
@@ -45,15 +46,15 @@ export function ChordLane() {
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
-    const dBeats = Math.round((e.clientX - d.startX) / beatW);
-    if (dBeats === 0 && preview === null) return;
+    const dTicks = Math.round((e.clientX - d.startX) / beatW) * TICKS_PER_BEAT;
+    if (dTicks === 0 && preview === null) return;
     setPreview(
       pattern.chords.chords.map((c) => {
         if (c.id !== d.id) return c;
         if (d.kind === "move") {
-          return { ...c, startBeat: Math.min(Math.max(0, d.orig.startBeat + dBeats), turn - d.orig.lengthBeats) };
+          return { ...c, startTick: Math.min(Math.max(0, d.orig.startTick + dTicks), turn - d.orig.lengthTicks) };
         }
-        return { ...c, lengthBeats: Math.min(Math.max(1, d.orig.lengthBeats + dBeats), turn - d.orig.startBeat) };
+        return { ...c, lengthTicks: Math.min(Math.max(TICKS_PER_BEAT, d.orig.lengthTicks + dTicks), turn - d.orig.startTick) };
       }),
     );
   };
@@ -75,14 +76,14 @@ export function ChordLane() {
       <div className="gut">
         <span className="cap">chords</span>
       </div>
-      <div className="inner" style={{ width: total * beatW }}>
+      <div className="inner" style={{ width: total * pxPerTick }}>
         {source.length === 0 && <span className="hint">no chords — pick a starter under HARMONY, or ＋ chord</span>}
-        {turn < total && <div className="loopend" style={{ left: turn * beatW }} title="where the chord loop starts over" />}
+        {turn < total && <div className="loopend" style={{ left: turn * pxPerTick }} title="where the chord loop starts over" />}
         {echoes.map((c) => (
           <div
             key={c.id}
             className={`chordblock echo${current?.id === c.id ? " current" : ""}`}
-            style={{ left: c.startBeat * beatW, width: Math.max(8, c.lengthBeats * beatW - 3) }}
+            style={{ left: c.startTick * pxPerTick, width: Math.max(8, c.lengthTicks * pxPerTick - 3) }}
             title="a repeat of the chord loop — edit the first turn"
           >
             {c.name ?? chordName(c.pitchClasses)}
@@ -92,7 +93,7 @@ export function ChordLane() {
           <div
             key={c.id}
             className={`chordblock${current?.id === c.id ? " current" : ""}`}
-            style={{ left: c.startBeat * beatW, width: Math.max(8, c.lengthBeats * beatW - 3) }}
+            style={{ left: c.startTick * pxPerTick, width: Math.max(8, c.lengthTicks * pxPerTick - 3) }}
             onPointerDown={(e) => onPointerDown(e, c, "move")}
             onPointerMove={onPointerMove}
             onPointerUp={(e) => onPointerUp(e, c)}

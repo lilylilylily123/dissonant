@@ -22,6 +22,17 @@ pub struct AudioConfig {
     pub buffer_size: Option<u32>,
 }
 
+/// The live-input and take-capture rings handed to the engine when the stream opens.
+///
+/// Separate from [`AudioConfig`] because it is not a wish: these are the ends of real ring
+/// buffers, moved exactly once into the audio thread.
+pub struct EngineIo {
+    /// Mono samples from the capture device, one per output frame.
+    pub input: rtrb::Consumer<f32>,
+    /// Where the engine pushes samples while recording.
+    pub capture: rtrb::Producer<f32>,
+}
+
 /// One output device as the settings window lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputDeviceInfo {
@@ -117,12 +128,12 @@ struct Opened {
 impl AudioDevice {
     /// Open the default output device and start rendering. `master` seeds the master chain.
     pub fn start(master: MasterSettings) -> Result<AudioDevice, DeviceError> {
-        Self::start_with(master, AudioConfig::default())
+        Self::start_with(master, AudioConfig::default(), None)
     }
 
     /// Open the requested device / rate / buffer size, falling back to the device defaults
     /// for whatever it refuses.
-    pub fn start_with(master: MasterSettings, config: AudioConfig) -> Result<AudioDevice, DeviceError> {
+    pub fn start_with(master: MasterSettings, config: AudioConfig, io: Option<EngineIo>) -> Result<AudioDevice, DeviceError> {
         let shared = Arc::new(Shared::default());
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
@@ -139,11 +150,21 @@ impl AudioDevice {
                 if config.buffer_size.is_some() {
                     attempts.push(AudioConfig { buffer_size: None, ..config.clone() });
                 }
+                // The rings move into whichever attempt succeeds; a refused attempt never
+                // reaches the engine, so they are still here for the next one.
+                let mut io = io;
                 let mut result = Err(DeviceError::NoDevice);
                 for (i, attempt) in attempts.iter().enumerate() {
                     let (producer, consumer) = rtrb::RingBuffer::<EngineCommand>::new(1024);
-                    result = build_stream(consumer, thread_shared.clone(), master.clone(), thread_failed.clone(), attempt)
-                        .map(|(stream, opened)| (stream, opened, producer));
+                    result = build_stream(
+                        consumer,
+                        thread_shared.clone(),
+                        master.clone(),
+                        thread_failed.clone(),
+                        attempt,
+                        &mut io,
+                    )
+                    .map(|(stream, opened)| (stream, opened, producer));
                     match &result {
                         Ok(_) => break,
                         Err(e) if i + 1 < attempts.len() => {
@@ -218,6 +239,7 @@ fn build_stream(
     master: MasterSettings,
     failed: Arc<AtomicBool>,
     wanted: &AudioConfig,
+    io: &mut Option<EngineIo>,
 ) -> Result<(cpal::Stream, Opened), DeviceError> {
     let host = cpal::default_host();
     let device = match &wanted.device {
@@ -257,7 +279,10 @@ fn build_stream(
     if let Some(n) = buffer_size {
         stream_config.buffer_size = cpal::BufferSize::Fixed(n);
     }
-    let engine = Engine::new(sample_rate as f32, shared, &master);
+    let mut engine = Engine::new(sample_rate as f32, shared, &master);
+    if let Some(EngineIo { input, capture }) = io.take() {
+        engine.attach_io(input, capture);
+    }
     let stream = match format {
         SampleFormat::F32 => make_stream::<f32>(&device, &stream_config, channels, engine, consumer, failed),
         SampleFormat::I16 => make_stream::<i16>(&device, &stream_config, channels, engine, consumer, failed),

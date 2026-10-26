@@ -1,5 +1,15 @@
+import { useState, type MouseEvent } from "react";
 import { dbText, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { DRUM_KIT, trackColor, type MasterSettings, type Track, type TrackParam } from "../types";
+import {
+  DRUM_KIT,
+  insertChain,
+  MAX_INSERTS,
+  trackColor,
+  type InsertTarget,
+  type MasterSettings,
+  type Track,
+  type TrackParam,
+} from "../types";
 import { eqDb, hz, Knob, lin, log, panText, pct } from "./Knob";
 import { InstrumentPicker, PluginParams } from "./PluginBrowser";
 import { VMeter } from "./Meter";
@@ -108,6 +118,10 @@ function Devices() {
         </div>
       )}
 
+      {/* Pre-fader, as every DAW means by an insert: the instrument above feeds this chain,
+          and the chain feeds the bus to its right. */}
+      <InsertChain target={{ track: track.id }} title="inserts" />
+
       <div className="device" style={{ width: 240 }}>
         <div className="title">
           <span className="led" />
@@ -123,6 +137,8 @@ function Devices() {
           </div>
         </div>
       </div>
+
+      <InsertChain target="master" title="master inserts" />
 
       <div className="device" style={{ width: 440 }}>
         <div className="title">
@@ -147,6 +163,135 @@ function Devices() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One effect chain, track or master: the effects in signal order, each with a bypass switch,
+ * reorder arrows and a remove cross, and the chosen one's own controls underneath.
+ *
+ * Everything is in the row rather than behind a menu — a chain is at most {@link MAX_INSERTS}
+ * long, so there is room, and reordering is the one thing a chain is for.
+ */
+function InsertChain({ target, title }: { target: InsertTarget; title: string }) {
+  const model = useStore((s) => s.snapshot!.model);
+  const plugins = useStore((s) => s.plugins);
+  const addInsert = useStore((s) => s.addInsert);
+  const removeInsert = useStore((s) => s.removeInsert);
+  const moveInsert = useStore((s) => s.moveInsert);
+  const setInsertEnabled = useStore((s) => s.setInsertEnabled);
+  const openPluginBrowser = useStore((s) => s.openPluginBrowser);
+  const [adding, setAdding] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const chain = insertChain(model, target);
+  const effects = plugins.filter((p) => p.kind === "effect");
+  // A removed row takes its parameters with it; the chain is short enough that nothing has to
+  // be open for the card to be useful.
+  const open = chain.find((i) => i.id === selected) ?? null;
+
+  /** A row's own buttons must not also select the row. */
+  const rowAction = (run: () => void) => (e: MouseEvent) => {
+    e.stopPropagation();
+    run();
+  };
+
+  return (
+    <div className="device chain" style={{ width: 250 }}>
+      <div className="title">
+        <span className="led" />
+        <span>{title}</span>
+        <span className="meta">{chain.length}/{MAX_INSERTS}</span>
+      </div>
+      <div className="pad">
+        {chain.length === 0 ? (
+          <div className="help">nothing in this chain — the signal passes straight through</div>
+        ) : (
+          <div className="list">
+            {chain.map((ins, i) => (
+              <div
+                key={ins.id}
+                className={`lrow${open?.id === ins.id ? " on" : ""}`}
+                onClick={() => setSelected(selected === ins.id ? null : ins.id)}
+                title={ins.uid}
+              >
+                <span className="num">{i + 1}</span>
+                <span className={`name${ins.enabled ? "" : " muted"}`}>{ins.name}</span>
+                <span
+                  className={`ctl${ins.enabled ? "" : " byp"}`}
+                  title={ins.enabled ? "bypass this effect" : "switch this effect back on"}
+                  onClick={rowAction(() => void setInsertEnabled(target, ins.id, !ins.enabled))}
+                >
+                  {ins.enabled ? "on" : "byp"}
+                </span>
+                <span
+                  className={`ctl${i === 0 ? " dim" : ""}`}
+                  title="move earlier in the chain"
+                  onClick={rowAction(() => void moveInsert(target, ins.id, i - 1))}
+                >
+                  ▲
+                </span>
+                <span
+                  className={`ctl${i === chain.length - 1 ? " dim" : ""}`}
+                  title="move later in the chain"
+                  onClick={rowAction(() => void moveInsert(target, ins.id, i + 1))}
+                >
+                  ▼
+                </span>
+                <span className="ctl" title="remove this effect" onClick={rowAction(() => void removeInsert(target, ins.id))}>
+                  ✕
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {effects.length === 0 ? (
+          // Nothing to add and no way to guess why: say where effects come from.
+          <div className="help">
+            no effects installed —{" "}
+            <button className="quiet" onClick={() => openPluginBrowser(true)}>
+              find a free one
+            </button>
+          </div>
+        ) : chain.length >= MAX_INSERTS ? (
+          <div className="help">this chain is full at {MAX_INSERTS} effects</div>
+        ) : adding ? (
+          <div className="chipsrow" style={{ display: "grid", gridTemplateColumns: "1fr" }}>
+            {effects.map((p) => (
+              <button
+                key={p.uid}
+                className="chip"
+                title={`${p.vendor} · ${p.version}`}
+                onClick={() => {
+                  setAdding(false);
+                  void addInsert(target, p.uid);
+                }}
+              >
+                {p.name}
+              </button>
+            ))}
+            <button className="chip quiet" onClick={() => setAdding(false)}>
+              cancel
+            </button>
+          </div>
+        ) : (
+          <button className="chip addeffect" onClick={() => setAdding(true)} title="add an effect to this chain">
+            + effect
+          </button>
+        )}
+
+        {open &&
+          (plugins.some((p) => p.uid === open.uid) ? (
+            <div className="insertparams">
+              <span className="flabel">{open.name}</span>
+              <PluginParams insertId={open.id} uid={open.uid} state={open.state ?? null} />
+            </div>
+          ) : (
+            <div className="help">{open.name} is not installed on this computer</div>
+          ))}
       </div>
     </div>
   );

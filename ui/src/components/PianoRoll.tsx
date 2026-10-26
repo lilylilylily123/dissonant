@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { beatsPerBar, effectiveKey, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { barTicks, beatsPerBar, effectiveKey, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { chordAt, explainNote, midiName, tierMap } from "../theory";
 import {
-  adjustVelocity,
   duplicateBySpan,
   duplicateNotes,
   glueNotes,
@@ -11,19 +10,39 @@ import {
   stampChord,
   noteAt,
   notesInRect,
+  nudgeNoteProp,
   pasteNotes,
   placeNote,
-  rampVelocity,
+  quantizeNoteProp,
+  rampNoteProp,
   removeNotes,
   resizeNotes,
   selectionBounds,
+  setNoteProp,
   snapFloor,
   snapRound,
   splitNotes,
   stepSelection,
   toggleMute,
 } from "../noteEditing";
-import { chordLoop, layOutLoop, mixHex, swingWarp, TIER_COLORS, trackColor, trackLoop, uuid, type NoteEvent, type Tier } from "../types";
+import {
+  DEFAULT_SWING_GRID_TICKS,
+  chordLoop,
+  layOutLoop,
+  mixHex,
+  noteProp,
+  NOTE_PROPS,
+  swingWarp,
+  TICKS_PER_BEAT,
+  ticksToBeats,
+  TIER_COLORS,
+  trackColor,
+  trackLoop,
+  uuid,
+  type NoteEvent,
+  type NoteProp,
+  type Tier,
+} from "../types";
 import { BASE_BEAT_W, GUTTER } from "./ChordLane";
 
 // Geometry (from the handoff: 18px rows, 96px beats at 1×, 64px keyboard, 28px ruler)
@@ -33,12 +52,39 @@ const RULER_H = 28;
 const EDGE_PX = 7;
 const VEL_H = 110;
 /** Grid used while ⌥ bypasses snap. */
-const FINE = 1 / 64;
+const FINE_TICKS = TICKS_PER_BEAT / 64;
 const BLACK = new Set([1, 3, 6, 8, 10]);
-/** Note lengths in beats, doubling: 1/32 … whole. ⇧-dragging a note walks this ladder. */
-const NOTE_VALUES = [0.125, 0.25, 0.5, 1, 2, 4];
-/** Horizontal travel that moves one rung of `NOTE_VALUES`. */
+/** Note lengths in ticks, doubling: 1/32 … whole. ⇧-dragging a note walks this ladder. */
+const NOTE_VALUE_TICKS = [TICKS_PER_BEAT / 8, TICKS_PER_BEAT / 4, TICKS_PER_BEAT / 2, TICKS_PER_BEAT, 2 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT];
+/** Horizontal travel that moves one rung of `NOTE_VALUE_TICKS`. */
 const VALUE_STEP_PX = 26;
+
+/**
+ * The property lane's drawn scale: `LANE_BOT` is its floor, `LANE_TOP` its ceiling, and a
+ * value maps linearly onto the span between them. Unipolar lanes (velocity, repeats) read
+ * from zero — velocity's `min` of 1 is a clamp, not a scale mark — while bipolar lanes span
+ * their own range, whose midpoint is the property's neutral value.
+ */
+const LANE_BOT = VEL_H - 4;
+const LANE_TOP = 10;
+const LANE_SPAN = LANE_BOT - LANE_TOP;
+const laneFloor = (p: NoteProp) => (NOTE_PROPS[p].bipolar ? NOTE_PROPS[p].min : 0);
+/** Lane y for a value, rounded to the pixel the stem is drawn on. */
+const laneY = (p: NoteProp, v: number) => LANE_BOT - Math.round(((v - laneFloor(p)) / (NOTE_PROPS[p].max - laneFloor(p))) * LANE_SPAN);
+/** The value a lane y stands for; left unclamped, since the pure setters clamp. */
+const laneValue = (p: NoteProp, y: number) => laneFloor(p) + ((LANE_BOT - y) / LANE_SPAN) * (NOTE_PROPS[p].max - laneFloor(p));
+
+/** How far `[` / `]` moves each lane property: one usable increment, not one LSB. */
+const NUDGE_STEP: Record<NoteProp, number> = {
+  velocity: 10,
+  pan: 0.05,
+  release: 0.05,
+  modX: 0.05,
+  modY: 0.05,
+  fine: 25,
+  shiftTicks: TICKS_PER_BEAT / 64,
+  repeats: 1,
+};
 
 const C = {
   editor: "#101013",
@@ -72,11 +118,11 @@ type Drag =
   | { kind: "move"; ids: Set<string>; anchor: NoteEvent; startX: number; startY: number; startPitch: number; base: NoteEvent[]; lastPitch: number; origin?: "place" | "duplicate"; axis?: "x" | "y" | null }
   | { kind: "resize"; ids: Set<string>; anchor: NoteEvent; startX: number; base: NoteEvent[] }
   | { kind: "noteValue"; ids: Set<string>; anchor: NoteEvent; startX: number; base: NoteEvent[]; steps: number }
-  | { kind: "ramp"; ids: Set<string>; b0: number; v0: number; base: NoteEvent[] }
+  | { kind: "ramp"; ids: Set<string>; prop: NoteProp; t0: number; v0: number; base: NoteEvent[] }
   | { kind: "paint"; base: NoteEvent[] }
   | { kind: "erase"; base: NoteEvent[] }
   | { kind: "marquee"; x0: number; y0: number; x1: number; y1: number; baseSelection: Set<string> }
-  | { kind: "velocity"; ids: Set<string>; anchorId: string; startY: number; base: NoteEvent[] };
+  | { kind: "lane"; ids: Set<string>; prop: NoteProp; anchorId: string; startY: number; base: NoteEvent[] };
 
 let clipboard: NoteEvent[] = [];
 
@@ -88,10 +134,12 @@ let clipboard: NoteEvent[] = [];
  *    ⌥-drag = duplicate
  *  - shift/⌘-drag empty = marquee select · shift-click = toggle · double-click a key = select
  *    that pitch (⌘: the pitch class) · Tab/⇧Tab = next/previous note
- *  - right-click / right-drag = erase · ruler click = seek · velocity lane: drag stems, ⌥-drag
- *    draws a ramp · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel zooms at the cursor
+ *  - right-click / right-drag = erase · ruler click = seek · property lane: pick the property
+ *    it edits, drag stems, ⌥-drag draws a ramp · ⌥-wheel transposes (⌥⇧ octaves) · ⌘-wheel
+ *    zooms at the cursor
  *  - keys: ⌫ delete · ⌘A/⌘C/⌘X/⌘V/⌘D · ⌘E split at playhead · ⌘J glue · ⌘B duplicate one
- *    loop later · 0 mute · arrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] velocity · esc
+ *    loop later · 0 mute · arrows nudge (⇧ = octave / bar, ⌥ = fine) · [ ] the lane's
+ *    property · esc
  * Tiering is visual only — any note can be placed in any tier.
  */
 export function PianoRoll() {
@@ -110,6 +158,7 @@ export function PianoRoll() {
   const setZoom = useStore((s) => s.setZoom);
   const setSelectedNoteIds = useStore((s) => s.setSelectedNoteIds);
   const bpb = useStore(beatsPerBar);
+  const ticksPerBar = useStore(barTicks);
   const loopRegion = useStore((s) => s.loopRegion);
   const looping = useStore((s) => s.looping);
   const setLoopRegion = useStore((s) => s.setLoopRegion);
@@ -122,17 +171,19 @@ export function PianoRoll() {
   const selectionRequest = useStore((s) => s.selectionRequest);
   const fold = useStore((s) => s.fold);
   const ghostTrackId = useStore((s) => s.ghostTrackId);
+  const laneProp = useStore((s) => s.laneProp);
+  const setLaneProp = useStore((s) => s.setLaneProp);
   const commitGesture = useStore((s) => s.commitGesture);
   const editing = useStore((s) => s.settings.editing);
   const swing = useStore((s) => s.snapshot?.model.swing ?? 50);
-  const swingGrid = useStore((s) => s.snapshot?.model.swingGrid ?? 0.5);
+  const swingGridTicks = useStore((s) => s.snapshot?.model.swingGridTicks ?? DEFAULT_SWING_GRID_TICKS);
   const appearance = useStore((s) => s.settings.appearance);
   const ROW_H = appearance.rowHeight;
   const defaultVelocity = editing.defaultVelocity;
-  // Audition only when the setting says so; drags still audition pitch changes. `beats` is the
-  // length of the note being previewed, so a preview never outlasts the note it stands for.
-  const auditionPlace = (pitch: number, velocity: number, beats?: number) => {
-    if (editing.auditionOnPlace) audition(pitch, velocity, beats);
+  // Audition only when the setting says so; drags still audition pitch changes. `lengthTicks` is
+  // the length of the note being previewed, so a preview never outlasts the note it stands for.
+  const auditionPlace = (pitch: number, velocity: number, lengthTicks?: number) => {
+    if (editing.auditionOnPlace) audition(pitch, velocity, lengthTicks);
   };
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -141,7 +192,7 @@ export function PianoRoll() {
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const dragRef = useRef<Drag | null>(null);
   const [preview, setPreview] = useState<NoteEvent[] | null>(null);
-  const [hover, setHover] = useState<{ beat: number; pitch: number } | null>(null);
+  const [hover, setHover] = useState<{ tick: number; pitch: number } | null>(null);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewW, setViewW] = useState(800);
 
@@ -150,21 +201,22 @@ export function PianoRoll() {
     () => (pattern && ghostTrackId && ghostTrackId !== track?.id ? (pattern.notesByTrack[ghostTrackId] ?? []) : []),
     [pattern, ghostTrackId, track],
   );
-  const beats = pattern?.lengthBeats ?? 16;
-  // The pattern's full length is what the ruler, grid and playhead span; `editBeats` is the one
+  const totalTicks = pattern?.lengthTicks ?? 16 * TICKS_PER_BEAT;
+  // The pattern's full length is what the ruler, grid and playhead span; `editTicks` is the one
   // turn of this track's loop that holds the notes you edit. The rest of the pattern is that
   // turn repeating, so a 2-bar drum loop reads as two passes under a 4-bar progression.
-  const editBeats = pattern && track ? trackLoop(pattern, track.id) : beats;
-  const chordTurn = pattern ? chordLoop(pattern) : beats;
+  const editTicks = pattern && track ? trackLoop(pattern, track.id) : totalTicks;
+  const chordTurn = pattern ? chordLoop(pattern) : totalTicks;
   const chords = useMemo(
-    () => layOutLoop(pattern?.chords.chords ?? [], chordTurn, beats),
-    [pattern, chordTurn, beats],
+    () => layOutLoop(pattern?.chords.chords ?? [], chordTurn, totalTicks),
+    [pattern, chordTurn, totalTicks],
   );
   const beatW = BASE_BEAT_W * zoom;
-  const gridW = beats * beatW;
+  const pxPerTick = beatW / TICKS_PER_BEAT;
+  const gridW = totalTicks * pxPerTick;
   const shown = preview ?? notes;
   /** The source notes laid out across the rest of the pattern; drawn, never edited. */
-  const echoes = useMemo(() => layOutLoop(shown, editBeats, beats).slice(shown.length), [shown, editBeats, beats]);
+  const echoes = useMemo(() => layOutLoop(shown, editTicks, totalTicks).slice(shown.length), [shown, editTicks, totalTicks]);
   const color = track ? trackColor(track, trackIdx) : C.accent;
   const rootPc = key.rootPitchClass;
 
@@ -187,7 +239,7 @@ export function PianoRoll() {
   /** Top of a pitch's row; hidden pitches land above the ruler (never drawn). */
   const yForPitch = (p: number) => RULER_H + (rowOf.get(p) ?? -2) * ROW_H;
   const pitchForY = (y: number) => visiblePitches[Math.floor((y - RULER_H) / ROW_H)] ?? NaN;
-  const beatForX = (x: number) => (x - GUTTER) / beatW;
+  const tickForX = (x: number) => (x - GUTTER) / pxPerTick;
 
   const commit = useCallback(
     (next: NoteEvent[], label = "edit notes") => {
@@ -215,11 +267,11 @@ export function PianoRoll() {
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !follow || !playing) return;
-    const px = GUTTER + playhead * beatW;
+    const px = GUTTER + playhead * pxPerTick;
     const left = el.scrollLeft;
     const w = el.clientWidth;
     if (px < left + GUTTER || px > left + w - 24) el.scrollLeft = Math.max(0, px - GUTTER - 16);
-  }, [playhead, follow, playing, beatW]);
+  }, [playhead, follow, playing, pxPerTick]);
 
   // Track the viewport width for the velocity lane. (Centering on C4 happens in the canvas
   // effect below, once the canvas has its height — a layout effect here would clamp to 0.)
@@ -283,12 +335,12 @@ export function PianoRoll() {
 
     // Harmonic landscape: every cell tinted by its fit against the chord at that beat
     if (showLandscape) {
-      for (let b = 0; b < beats; b++) {
-        const map = tierMap(b + 0.5, chords, key);
+      for (let tk = 0; tk < totalTicks; tk += TICKS_PER_BEAT) {
+        const map = tierMap(tk + TICKS_PER_BEAT / 2, chords, key);
         for (const p of visiblePitches) {
           const t = map[p % 12];
           if (!t) continue;
-          const x = GUTTER + b * beatW;
+          const x = GUTTER + tk * pxPerTick;
           const y = yForPitch(p);
           ctx.globalAlpha = t === "dissonance" ? 0.28 : t === "tension" ? 0.2 : 0.14;
           ctx.fillStyle = tierColor(t);
@@ -308,30 +360,30 @@ export function PianoRoll() {
 
     // Vertical grid: subdivision, beat, bar. With swing on, the swung sub-lines are drawn
     // where the notes will actually sound (accent-tinted), next to the straight grid.
-    const sub = Math.min(noteLength, 1);
-    for (let t = 0; t <= beats + 1e-9; t += sub) {
-      const x = GUTTER + t * beatW;
-      const isBar = Math.abs(t % bpb) < 1e-9;
-      const isBeat = Math.abs(t % 1) < 1e-9;
+    const sub = Math.min(noteLength, TICKS_PER_BEAT);
+    for (let t = 0; t <= totalTicks + 1e-9; t += sub) {
+      const x = GUTTER + t * pxPerTick;
+      const isBar = t % ticksPerBar === 0;
+      const isBeat = t % TICKS_PER_BEAT === 0;
       ctx.fillStyle = isBar ? C.gridBar : isBeat ? C.gridBeat : C.gridSub;
       ctx.fillRect(Math.round(x), RULER_H, 1, gridH);
       if (swing > 50 && !isBeat) {
-        const w = swingWarp(t, swing, swingGrid);
+        const w = swingWarp(t, swing, swingGridTicks);
         if (Math.abs(w - t) > 1e-6) {
           ctx.fillStyle = "rgba(180,140,255,.22)";
-          ctx.fillRect(Math.round(GUTTER + w * beatW), RULER_H, 1, gridH);
+          ctx.fillRect(Math.round(GUTTER + w * pxPerTick), RULER_H, 1, gridH);
         }
       }
     }
 
     // Past the track's own loop the grid is a repeat: dimmed, with a boundary line at each
     // turn so the "two 2-bar passes under one 4-bar pass" reads at a glance.
-    if (editBeats < beats) {
+    if (editTicks < totalTicks) {
       ctx.fillStyle = "rgba(0,0,0,.34)";
-      ctx.fillRect(GUTTER + editBeats * beatW, RULER_H, (beats - editBeats) * beatW, gridH);
-      for (let t = editBeats; t < beats - 1e-9; t += editBeats) {
-        ctx.fillStyle = t === editBeats ? color : "rgba(255,255,255,.18)";
-        ctx.fillRect(Math.round(GUTTER + t * beatW), RULER_H, 1, gridH);
+      ctx.fillRect(GUTTER + editTicks * pxPerTick, RULER_H, (totalTicks - editTicks) * pxPerTick, gridH);
+      for (let t = editTicks; t < totalTicks - 1e-9; t += editTicks) {
+        ctx.fillStyle = t === editTicks ? color : "rgba(255,255,255,.18)";
+        ctx.fillRect(Math.round(GUTTER + t * pxPerTick), RULER_H, 1, gridH);
       }
     }
 
@@ -346,28 +398,29 @@ export function PianoRoll() {
     ctx.fillRect(GUTTER, 2, gridW, 6);
     if (loopRegion) {
       ctx.fillStyle = C.accent;
-      ctx.fillRect(GUTTER + loopRegion[0] * beatW, 2, (loopRegion[1] - loopRegion[0]) * beatW, 6);
+      ctx.fillRect(GUTTER + loopRegion[0] * pxPerTick, 2, (loopRegion[1] - loopRegion[0]) * pxPerTick, 6);
     }
     ctx.globalAlpha = 1;
-    for (let b = 0; b < beats; b++) {
-      const x = GUTTER + b * beatW;
-      const barIdx = Math.floor(b / bpb);
-      const isBar = Math.abs(b % bpb) < 1e-9;
+    for (let tk = 0; tk < totalTicks; tk += TICKS_PER_BEAT) {
+      const x = GUTTER + tk * pxPerTick;
+      const beat = ticksToBeats(tk);
+      const barIdx = Math.floor(beat / bpb);
+      const isBar = tk % ticksPerBar === 0;
       if (!isBar && beatW < 40) continue;
       ctx.fillStyle = isBar ? "#5a5a62" : "#2e2e36";
       ctx.fillRect(Math.round(x), 10, 1, 18);
       ctx.fillStyle = isBar ? C.text1 : C.text4;
       ctx.font = isBar ? mono(600, 11) : mono(400, 9);
-      ctx.fillText(isBar ? `${barIdx + 1}` : `${barIdx + 1}.${Math.floor(b % bpb) + 1}`, x + 4, 19);
+      ctx.fillText(isBar ? `${barIdx + 1}` : `${barIdx + 1}.${Math.floor(beat % bpb) + 1}`, x + 4, 19);
     }
     // Chord names in the ruler
     ctx.font = mono(500, 9);
     ctx.fillStyle = C.accent;
     for (const c of chords) {
-      const x = GUTTER + c.startBeat * beatW;
+      const x = GUTTER + c.startTick * pxPerTick;
       const label = c.name ?? "";
       const tw = ctx.measureText(label).width;
-      ctx.fillText(label, x + c.lengthBeats * beatW - tw - 4, 19);
+      ctx.fillText(label, x + c.lengthTicks * pxPerTick - tw - 4, 19);
     }
 
     // Ghost notes: another track, dashed, behind everything else.
@@ -376,10 +429,10 @@ export function PianoRoll() {
       ctx.lineWidth = 1;
       for (const g of ghostNotes) {
         if (!rowOf.has(g.pitch)) continue;
-        const t = tierMap(g.startBeat, chords, key)[g.pitch % 12];
-        const x = GUTTER + g.startBeat * beatW;
+        const t = tierMap(g.startTick, chords, key)[g.pitch % 12];
+        const x = GUTTER + g.startTick * pxPerTick;
         const y = yForPitch(g.pitch);
-        const w = Math.max(3, g.lengthBeats * beatW - 1);
+        const w = Math.max(3, g.lengthTicks * pxPerTick - 1);
         ctx.globalAlpha = 0.16;
         ctx.fillStyle = tierColor(t);
         roundRect(ctx, x, y, w, ROW_H - 1, 2);
@@ -397,10 +450,10 @@ export function PianoRoll() {
     // repeat that falls under a different chord is coloured for that chord.
     for (const n of echoes) {
       if (!rowOf.has(n.pitch) || n.muted) continue;
-      const t = tierMap(n.startBeat, chords, key)[n.pitch % 12];
-      const x = GUTTER + n.startBeat * beatW;
+      const t = tierMap(n.startTick, chords, key)[n.pitch % 12];
+      const x = GUTTER + n.startTick * pxPerTick;
       const y = yForPitch(n.pitch);
-      const w = Math.max(3, n.lengthBeats * beatW - 1);
+      const w = Math.max(3, n.lengthTicks * pxPerTick - 1);
       ctx.globalAlpha = 0.42;
       ctx.fillStyle = tierColor(t);
       roundRect(ctx, x, y, w, ROW_H - 1, 2);
@@ -412,12 +465,20 @@ export function PianoRoll() {
     const velocityAlpha = (v: number) => 0.45 + 0.55 * (v / 127);
     for (const n of shown) {
       if (!rowOf.has(n.pitch)) continue;
-      const t = tierMap(n.startBeat, chords, key)[n.pitch % 12];
+      const t = tierMap(n.startTick, chords, key)[n.pitch % 12];
       const sel = selection.has(n.id);
-      const x = GUTTER + n.startBeat * beatW;
       const y = yForPitch(n.pitch);
-      const w = Math.max(3, n.lengthBeats * beatW - 1);
+      const w = Math.max(3, n.lengthTicks * pxPerTick - 1);
       const h = ROW_H - 1;
+      // A shifted note is drawn where it sounds, but keeps a tick on the grid slot it belongs
+      // to: the slot stays its identity, and is what every edit and hit test works from.
+      const shiftTicks = n.shiftTicks ?? 0;
+      const gridX = GUTTER + n.startTick * pxPerTick;
+      const x = shiftTicks ? GUTTER + Math.max(0, n.startTick + shiftTicks) * pxPerTick : gridX;
+      if (shiftTicks) {
+        ctx.fillStyle = "rgba(255,255,255,.35)";
+        ctx.fillRect(Math.round(gridX), y, 1, h);
+      }
       ctx.fillStyle = sel ? (t ? noteSel(t) : "#f0f0f4") : tierColor(t);
       ctx.globalAlpha = n.muted ? 0.14 : sel ? 1 : velocityAlpha(n.velocity);
       roundRect(ctx, x, y, w, h, 2);
@@ -452,6 +513,13 @@ export function PianoRoll() {
           ctx.stroke();
         }
         ctx.restore();
+      }
+      // Repeats: the note retriggers `repeats + 1` times across its own length, so the body
+      // carries one divider per sub-hit — dropped when they would crowd into a solid block.
+      const repeats = n.repeats ?? 0;
+      if (repeats > 0 && w / (repeats + 1) >= 3) {
+        ctx.fillStyle = "rgba(0,0,0,.45)";
+        for (let i = 1; i <= repeats; i++) ctx.fillRect(Math.round(x + (i * w) / (repeats + 1)), y, 1, h);
       }
       // Accent marker (vel ≥ 118): 3px bar on the left edge
       if (n.velocity >= 118) {
@@ -535,7 +603,7 @@ export function PianoRoll() {
     ctx.fillText(gl, (GUTTER - ctx.measureText(gl).width) / 2, RULER_H / 2);
 
     // Playhead
-    const px = Math.round(GUTTER + playhead * beatW);
+    const px = Math.round(GUTTER + playhead * pxPerTick);
     if (!appearance.reducedMotion) {
       ctx.shadowColor = "rgba(255,255,255,.5)";
       ctx.shadowBlur = 6;
@@ -552,12 +620,12 @@ export function PianoRoll() {
 
     // Hover readout
     if (hover && !dragRef.current) {
-      const t = tierMap(hover.beat, chords, key)[hover.pitch % 12];
+      const t = tierMap(hover.tick, chords, key)[hover.pitch % 12];
       const label = `${midiName(hover.pitch)}${t ? ` · ${t === "chordTone" ? "chord tone" : t}` : ""}`;
-      const why = explainNote(hover.pitch, chords, key, hover.beat);
+      const why = explainNote(hover.pitch, chords, key, hover.tick);
       ctx.font = mono(500, 9);
       const tw = Math.max(ctx.measureText(label).width, ctx.measureText(why).width) + 12;
-      const hx = Math.min(GUTTER + hover.beat * beatW + 8, W - tw - 4);
+      const hx = Math.min(GUTTER + hover.tick * pxPerTick + 8, W - tw - 4);
       const hy = Math.max(RULER_H + 2, yForPitch(hover.pitch) - 30);
       ctx.fillStyle = "rgba(22,22,26,.94)";
       ctx.fillRect(hx, hy, tw, 28);
@@ -566,9 +634,12 @@ export function PianoRoll() {
       ctx.fillStyle = "#b8b8c0";
       ctx.fillText(why, hx + 6, hy + 20);
     }
-  }, [shown, echoes, editBeats, ghostNotes, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, beats, gridW, gridH, selection, hover, preview, color, rootPc, bpb, loopRegion, looping, ROW_H, appearance, swing, swingGrid, visiblePitches, rowOf, fold]);
+  }, [shown, echoes, editTicks, ghostNotes, chords, key, playhead, showLandscape, highlightRows, noteLength, beatW, pxPerTick, totalTicks, gridW, gridH, selection, hover, preview, color, rootPc, bpb, ticksPerBar, loopRegion, looping, ROW_H, appearance, swing, swingGridTicks, visiblePitches, rowOf, fold]);
 
-  // ─── Velocity lane canvas ─────────────────────────────────────────────────────────────────
+  // ─── Property lane canvas ─────────────────────────────────────────────────────────────────
+  // One stem per note, drawn for whichever property the lane picker selects. Unipolar
+  // properties grow from the floor; bipolar ones grow out of a visible centre line, so a
+  // note left at its neutral value reads as a cap sitting on that line.
   useEffect(() => {
     const canvas = velRef.current;
     if (!canvas) return;
@@ -581,6 +652,12 @@ export function PianoRoll() {
       canvas.style.width = `${W}px`;
       canvas.style.height = `${H}px`;
     }
+    const spec = NOTE_PROPS[laneProp];
+    const floor = laneFloor(laneProp);
+    const middle = (floor + spec.max) / 2;
+    // Bipolar lanes measure against their centre, so the rule has to sit on the value it
+    // stands for; a unipolar lane's rule is a half-way mark, left where it has always been.
+    const ruleY = spec.bipolar ? laneY(laneProp, middle) : H / 2;
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.textBaseline = "middle";
@@ -589,37 +666,42 @@ export function PianoRoll() {
     ctx.save();
     ctx.translate(-scrollLeft, 0);
     // grid
-    for (let b = 0; b <= beats; b++) {
-      ctx.fillStyle = Math.abs(b % bpb) < 1e-9 ? "#2a2a32" : "#18181d";
-      ctx.fillRect(Math.round(GUTTER + b * beatW), 0, 1, H);
+    for (let tk = 0; tk <= totalTicks; tk += TICKS_PER_BEAT) {
+      ctx.fillStyle = tk % ticksPerBar === 0 ? "#2a2a32" : "#18181d";
+      ctx.fillRect(Math.round(GUTTER + tk * pxPerTick), 0, 1, H);
     }
-    ctx.fillStyle = "#1c1c22";
-    ctx.fillRect(GUTTER, H / 2, gridW, 1);
+    ctx.fillStyle = spec.bipolar ? "#32323c" : "#1c1c22";
+    ctx.fillRect(GUTTER, ruleY, gridW, 1);
     // stems
     for (const n of shown) {
-      const t = tierMap(n.startBeat, chords, key)[n.pitch % 12];
+      const t = tierMap(n.startTick, chords, key)[n.pitch % 12];
       const sel = selection.has(n.id);
-      const x = GUTTER + n.startBeat * beatW + 2;
-      const h = Math.round((n.velocity / 127) * (H - 14));
+      const x = GUTTER + n.startTick * pxPerTick + 2;
+      const yv = laneY(laneProp, noteProp(n, laneProp));
+      const root = spec.bipolar ? ruleY : LANE_BOT;
       ctx.fillStyle = sel ? "#e6fff4" : tierColor(t);
-      ctx.fillRect(x, H - 4 - h, 3, h);
-      ctx.fillRect(x - 2, H - 4 - h - 2, 7, 4);
+      ctx.fillRect(x, Math.min(yv, root), 3, Math.max(1, Math.abs(root - yv)));
+      ctx.fillRect(x - 2, yv - 2, 7, 4);
     }
     // playhead
     ctx.fillStyle = "rgba(255,255,255,.6)";
-    ctx.fillRect(Math.round(GUTTER + playhead * beatW), 0, 1, H);
+    ctx.fillRect(Math.round(GUTTER + playhead * pxPerTick), 0, 1, H);
     ctx.restore();
-    // scale column (fixed)
+    // scale column (fixed): ceiling, middle, floor of whatever the lane is showing
     ctx.fillStyle = "#101013";
     ctx.fillRect(0, 0, GUTTER, H);
     ctx.fillStyle = C.line1;
     ctx.fillRect(GUTTER - 1, 0, 1, H);
     ctx.fillStyle = "#4a4a52";
     ctx.font = '400 8.5px "JetBrains Mono", ui-monospace, monospace';
-    ctx.fillText("127", GUTTER - 8 - ctx.measureText("127").width, 8);
-    ctx.fillText("64", GUTTER - 8 - ctx.measureText("64").width, H / 2);
-    ctx.fillText("0", GUTTER - 8 - ctx.measureText("0").width, H - 8);
-  }, [shown, chords, key, playhead, beatW, beats, gridW, selection, scrollLeft, viewW, bpb]);
+    for (const [text, ty] of [
+      [spec.format(spec.max), 8],
+      [spec.format(middle), ruleY],
+      [spec.format(floor), H - 8],
+    ] as const) {
+      ctx.fillText(text, GUTTER - 8 - ctx.measureText(text).width, ty);
+    }
+  }, [shown, chords, key, playhead, pxPerTick, totalTicks, gridW, selection, scrollLeft, viewW, ticksPerBar, laneProp]);
 
   // ─── Interaction ──────────────────────────────────────────────────────────────────────────
   const local = (e: React.PointerEvent, el: HTMLElement) => {
@@ -628,10 +710,10 @@ export function PianoRoll() {
   };
 
   const hitTest = (x: number, y: number): { note: NoteEvent; edge: boolean } | null => {
-    const n = noteAt(shown, beatForX(x), pitchForY(y));
+    const n = noteAt(shown, tickForX(x), pitchForY(y));
     if (!n) return null;
-    const rightX = GUTTER + (n.startBeat + n.lengthBeats) * beatW;
-    const edgeZone = Math.min(EDGE_PX, (n.lengthBeats * beatW) / 3);
+    const rightX = GUTTER + (n.startTick + n.lengthTicks) * pxPerTick;
+    const edgeZone = Math.min(EDGE_PX, (n.lengthTicks * pxPerTick) / 3);
     return { note: n, edge: x >= rightX - edgeZone };
   };
 
@@ -648,10 +730,10 @@ export function PianoRoll() {
       if (y < 10) {
         // Drag in the brace strip to set a loop region (snapped to beats).
         canvas.setPointerCapture(e.pointerId);
-        loopDrag.current = { anchor: Math.max(0, Math.min(beats, Math.round(beatForX(x)))) };
+        loopDrag.current = { anchor: Math.max(0, Math.min(totalTicks, Math.round(tickForX(x) / TICKS_PER_BEAT) * TICKS_PER_BEAT)) };
         return;
       }
-      seek(Math.max(0, Math.min(beats, beatForX(x))));
+      seek(Math.max(0, Math.min(totalTicks, tickForX(x))));
       return;
     }
     if (x < GUTTER) {
@@ -659,14 +741,14 @@ export function PianoRoll() {
       if (pitch >= LOW && pitch <= HIGH) audition(pitch);
       return;
     }
-    const beat = beatForX(x);
+    const tick = tickForX(x);
     const pitch = pitchForY(y);
     // Past the loop the grid is this track repeating itself; it holds nothing to edit.
-    if (beat < 0 || beat >= editBeats || pitch < LOW || pitch > HIGH) return;
+    if (tick < 0 || tick >= editTicks || pitch < LOW || pitch > HIGH) return;
     canvas.setPointerCapture(e.pointerId);
 
     if (e.button === 2) {
-      const n = noteAt(notes, beat, pitch);
+      const n = noteAt(notes, tick, pitch);
       const base = n ? removeNotes(notes, new Set([n.id])) : notes;
       dragRef.current = { kind: "erase", base };
       setPreview(base);
@@ -709,33 +791,33 @@ export function PianoRoll() {
       return;
     }
     if (brush || (e.altKey && editing.altKey === "paint")) {
-      const placed = placeNote(notes, beat, pitch, noteLength, noteLength, defaultVelocity);
+      const placed = placeNote(notes, tick, pitch, noteLength, noteLength, defaultVelocity);
       const base = placed ? [...notes, placed] : notes;
-      if (placed) auditionPlace(pitch, placed.velocity, placed.lengthBeats);
+      if (placed) auditionPlace(pitch, placed.velocity, placed.lengthTicks);
       dragRef.current = { kind: "paint", base };
       setPreview(base);
       return;
     }
     // ⌥ (no-snap mode): place exactly where the cursor is instead of on the grid.
-    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE : noteLength;
+    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE_TICKS : noteLength;
     if (stamp) {
       // Chord stamp: place the chord under the cursor as stacked notes, voiced upward.
-      const chord = chordAt(chords, beat);
+      const chord = chordAt(chords, tick);
       if (!chord) return;
-      const added = stampChord(notes, beat, chord.pitchClasses, pitch, noteLength, noteLength).map((n) => ({ ...n, velocity: defaultVelocity }));
+      const added = stampChord(notes, tick, chord.pitchClasses, pitch, noteLength, noteLength).map((n) => ({ ...n, velocity: defaultVelocity }));
       if (!added.length) return;
-      for (const a of added) auditionPlace(a.pitch, a.velocity, a.lengthBeats);
+      for (const a of added) auditionPlace(a.pitch, a.velocity, a.lengthTicks);
       commit([...notes, ...added], "stamp chord");
       setSelection(new Set(added.map((a) => a.id)));
       return;
     }
-    const target = magnet ? magnetPitch(pitch, tierMap(beat, chords, key)) : pitch;
-    const placed = placeNote(notes, beat, target, noteLength, snapGrid, defaultVelocity);
+    const target = magnet ? magnetPitch(pitch, tierMap(tick, chords, key)) : pitch;
+    const placed = placeNote(notes, tick, target, noteLength, snapGrid, defaultVelocity);
     if (!placed) {
       setSelection(new Set());
       return;
     }
-    auditionPlace(target, placed.velocity, placed.lengthBeats);
+    auditionPlace(target, placed.velocity, placed.lengthTicks);
     const base = [...notes, placed];
     const ids = new Set([placed.id]);
     setSelection(ids);
@@ -747,60 +829,60 @@ export function PianoRoll() {
     const canvas = canvasRef.current!;
     const { x, y } = local(e, canvas);
     if (loopDrag.current) {
-      const b = Math.max(0, Math.min(beats, Math.round(beatForX(x))));
+      const tk = Math.max(0, Math.min(totalTicks, Math.round(tickForX(x) / TICKS_PER_BEAT) * TICKS_PER_BEAT));
       const a = loopDrag.current.anchor;
-      if (b !== a) setLoopRegion([Math.min(a, b), Math.max(a, b)]);
+      if (tk !== a) setLoopRegion([Math.min(a, tk), Math.max(a, tk)]);
       return;
     }
     const d = dragRef.current;
     if (!d) {
-      const beat = beatForX(x);
+      const tick = tickForX(x);
       const pitch = pitchForY(y);
-      setHover(x >= GUTTER && y >= RULER_H && beat < beats && pitch >= LOW && pitch <= HIGH ? { beat, pitch } : null);
+      setHover(x >= GUTTER && y >= RULER_H && tick < totalTicks && pitch >= LOW && pitch <= HIGH ? { tick, pitch } : null);
       return;
     }
     // Auto-scroll when dragging past the viewport's edges.
     const el = scrollRef.current;
-    if (el && d.kind !== "velocity" && d.kind !== "ramp") {
+    if (el && d.kind !== "lane" && d.kind !== "ramp") {
       const rect = el.getBoundingClientRect();
       if (e.clientX > rect.right - 24) el.scrollLeft += 12;
       else if (e.clientX < rect.left + GUTTER + 12) el.scrollLeft = Math.max(0, el.scrollLeft - 12);
       if (e.clientY > rect.bottom - 24) el.scrollTop += 10;
       else if (e.clientY < rect.top + RULER_H + 12) el.scrollTop = Math.max(0, el.scrollTop - 10);
     }
-    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE : noteLength;
+    const snapGrid = e.altKey && editing.altKey === "noSnap" ? FINE_TICKS : noteLength;
     switch (d.kind) {
       case "move": {
-        const rawDelta = (x - d.startX) / beatW;
-        const newStart = snapRound(d.anchor.startBeat + rawDelta, snapGrid);
-        let dBeats = newStart - d.anchor.startBeat;
+        const rawDelta = (x - d.startX) / pxPerTick;
+        const newStart = snapRound(d.anchor.startTick + rawDelta, snapGrid);
+        let dTicks = newStart - d.anchor.startTick;
         const rowPitch = pitchForY(y);
         let dPitch = Number.isNaN(rowPitch) ? 0 : rowPitch - d.startPitch;
         // ⇧ constrains to the axis that moved first (time or pitch).
         if (e.shiftKey) {
           d.axis ??= Math.abs(x - d.startX) >= Math.abs(y - d.startY) ? "x" : "y";
           if (d.axis === "x") dPitch = 0;
-          else dBeats = 0;
+          else dTicks = 0;
         } else {
           d.axis = null;
         }
         if (magnet && d.ids.size === 1) {
-          const want = magnetPitch(d.anchor.pitch + dPitch, tierMap(d.anchor.startBeat + dBeats, chords, key));
+          const want = magnetPitch(d.anchor.pitch + dPitch, tierMap(d.anchor.startTick + dTicks, chords, key));
           dPitch = want - d.anchor.pitch;
         }
-        const next = moveNotes(d.base, d.ids, dBeats, dPitch, { min: LOW, max: HIGH }, editBeats);
+        const next = moveNotes(d.base, d.ids, dTicks, dPitch, { min: LOW, max: HIGH }, editTicks);
         const moved = next.find((n) => n.id === d.anchor.id);
         if (moved && moved.pitch !== d.lastPitch) {
           d.lastPitch = moved.pitch;
-          audition(moved.pitch, moved.velocity, moved.lengthBeats);
+          audition(moved.pitch, moved.velocity, moved.lengthTicks);
         }
         setPreview(next);
         break;
       }
       case "resize": {
-        const rawDelta = (x - d.startX) / beatW;
-        const newLen = Math.max(snapGrid, snapRound(d.anchor.lengthBeats + rawDelta, snapGrid));
-        setPreview(resizeNotes(d.base, d.ids, newLen - d.anchor.lengthBeats, snapGrid));
+        const rawDelta = (x - d.startX) / pxPerTick;
+        const newLen = Math.max(snapGrid, snapRound(d.anchor.lengthTicks + rawDelta, snapGrid));
+        setPreview(resizeNotes(d.base, d.ids, newLen - d.anchor.lengthTicks, snapGrid));
         break;
       }
       case "noteValue": {
@@ -808,23 +890,23 @@ export function PianoRoll() {
         const steps = Math.round((x - d.startX) / VALUE_STEP_PX);
         if (steps === d.steps) break;
         d.steps = steps;
-        setPreview(d.base.map((n) => (d.ids.has(n.id) ? { ...n, lengthBeats: steppedNoteValue(n.lengthBeats, steps) } : n)));
+        setPreview(d.base.map((n) => (d.ids.has(n.id) ? { ...n, lengthTicks: steppedNoteValue(n.lengthTicks, steps) } : n)));
         break;
       }
       case "paint": {
-        const beat = beatForX(x);
+        const tick = tickForX(x);
         const pitch = pitchForY(y);
-        if (beat < 0 || beat >= editBeats || pitch < LOW || pitch > HIGH) return;
-        const placed = placeNote(d.base, beat, pitch, noteLength, noteLength, defaultVelocity);
+        if (tick < 0 || tick >= editTicks || pitch < LOW || pitch > HIGH) return;
+        const placed = placeNote(d.base, tick, pitch, noteLength, noteLength, defaultVelocity);
         if (placed) {
           d.base = [...d.base, placed];
-          auditionPlace(pitch, placed.velocity, placed.lengthBeats);
+          auditionPlace(pitch, placed.velocity, placed.lengthTicks);
           setPreview(d.base);
         }
         break;
       }
       case "erase": {
-        const n = noteAt(d.base, beatForX(x), pitchForY(y));
+        const n = noteAt(d.base, tickForX(x), pitchForY(y));
         if (n) {
           d.base = removeNotes(d.base, new Set([n.id]));
           setPreview(d.base);
@@ -834,12 +916,12 @@ export function PianoRoll() {
       case "marquee": {
         d.x1 = x;
         d.y1 = y;
-        const ids = notesInRect(notes, beatForX(d.x0), beatForX(d.x1), pitchForY(d.y0), pitchForY(d.y1));
+        const ids = notesInRect(notes, tickForX(d.x0), tickForX(d.x1), pitchForY(d.y0), pitchForY(d.y1));
         setSelection(new Set([...d.baseSelection, ...ids]));
         setPreview([...notes]);
         break;
       }
-      case "velocity":
+      case "lane":
       case "ramp":
         break;
     }
@@ -867,7 +949,7 @@ export function PianoRoll() {
     if (e.altKey && selection.size) {
       e.preventDefault();
       const step = (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 12 : 1);
-      const next = moveNotes(notes, selection, 0, step, { min: LOW, max: HIGH }, editBeats);
+      const next = moveNotes(notes, selection, 0, step, { min: LOW, max: HIGH }, editTicks);
       if (next !== notes && pattern && track) {
         void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, true, "transpose notes");
         if (wheelCommit.current) clearTimeout(wheelCommit.current);
@@ -879,12 +961,12 @@ export function PianoRoll() {
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const cursorX = e.clientX - rect.left;
-      const beatUnderCursor = (el.scrollLeft + cursorX - GUTTER) / beatW;
+      const tickUnderCursor = (el.scrollLeft + cursorX - GUTTER) / pxPerTick;
       const nextZoom = Math.min(3, Math.max(0.25, zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
       setZoom(nextZoom);
-      const nextBeatW = BASE_BEAT_W * nextZoom;
+      const nextPxPerTick = (BASE_BEAT_W * nextZoom) / TICKS_PER_BEAT;
       requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(0, beatUnderCursor * nextBeatW + GUTTER - cursorX);
+        el.scrollLeft = Math.max(0, tickUnderCursor * nextPxPerTick + GUTTER - cursorX);
       });
       return;
     }
@@ -931,24 +1013,25 @@ export function PianoRoll() {
     if (result && result !== notes) commit(result, dragLabel(d, notes, result));
   };
 
-  // Velocity lane: drag a stem (or all selected stems) vertically.
-  const velAt = (y: number) => Math.round(Math.min(127, Math.max(1, ((VEL_H - 4 - y) / (VEL_H - 14)) * 127)));
-  const onVelDown = (e: React.PointerEvent) => {
+  // Property lane: drag a stem (and every selected stem with it) vertically. The anchor lands
+  // on the value under the pointer and the rest travel by the same amount, so a drag keeps the
+  // shape of a selection instead of flattening it.
+  const onLaneDown = (e: React.PointerEvent) => {
     const canvas = velRef.current!;
     const { x, y } = local(e, canvas);
     if (x < GUTTER || e.button !== 0) return;
-    const beat = (x + scrollLeft - GUTTER) / beatW;
+    const tick = (x + scrollLeft - GUTTER) / pxPerTick;
     if (e.altKey) {
       // Ramp: draw a line through the stems; selected notes only when there is a selection.
       canvas.setPointerCapture(e.pointerId);
-      dragRef.current = { kind: "ramp", ids: new Set(selection), b0: beat, v0: velAt(y), base: notes };
+      dragRef.current = { kind: "ramp", ids: new Set(selection), prop: laneProp, t0: tick, v0: quantizeNoteProp(laneProp, laneValue(laneProp, y)), base: notes };
       setPreview(notes);
       return;
     }
     let best: NoteEvent | null = null;
     let bestDx = Infinity;
     for (const n of notes) {
-      const dx = Math.abs(n.startBeat - beat) * beatW;
+      const dx = Math.abs(n.startTick - tick) * pxPerTick;
       if (dx < bestDx && dx <= 8) {
         best = n;
         bestDx = dx;
@@ -958,29 +1041,32 @@ export function PianoRoll() {
     canvas.setPointerCapture(e.pointerId);
     const ids = selection.has(best.id) ? new Set(selection) : new Set([best.id]);
     if (!selection.has(best.id)) setSelection(ids);
-    dragRef.current = { kind: "velocity", ids, anchorId: best.id, startY: y, base: notes };
-    applyVelocityAt(y);
+    dragRef.current = { kind: "lane", ids, prop: laneProp, anchorId: best.id, startY: y, base: notes };
+    applyLaneAt(y);
   };
-  const applyVelocityAt = (y: number) => {
+  const applyLaneAt = (y: number) => {
     const d = dragRef.current;
-    if (!d || d.kind !== "velocity") return;
-    const v = Math.round(Math.min(127, Math.max(1, ((VEL_H - 4 - y) / (VEL_H - 14)) * 127)));
+    if (!d || d.kind !== "lane") return;
     const anchor = d.base.find((n) => n.id === d.anchorId);
     if (!anchor) return;
-    const delta = v - anchor.velocity;
-    setPreview(d.base.map((n) => (d.ids.has(n.id) ? { ...n, velocity: n.id === d.anchorId ? v : Math.min(127, Math.max(1, n.velocity + delta)) } : n)));
+    // Pin the anchor to the value under the pointer, then carry the others by the distance it
+    // actually travelled — the setter owns clamping, so that distance is the real one.
+    const pinned = setNoteProp(d.base, new Set([d.anchorId]), d.prop, laneValue(d.prop, y));
+    const delta = noteProp(pinned.find((n) => n.id === d.anchorId)!, d.prop) - noteProp(anchor, d.prop);
+    const others = new Set([...d.ids].filter((id) => id !== d.anchorId));
+    setPreview(others.size ? nudgeNoteProp(pinned, others, d.prop, delta) : pinned);
   };
-  const onVelMove = (e: React.PointerEvent) => {
+  const onLaneMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
     if (d.kind === "ramp") {
       const { x, y } = local(e, velRef.current!);
-      const b1 = (x + scrollLeft - GUTTER) / beatW;
-      setPreview(rampVelocity(d.base, d.ids, d.b0, d.v0, b1, velAt(y)));
+      const t1 = (x + scrollLeft - GUTTER) / pxPerTick;
+      setPreview(rampAcross(d, t1, quantizeNoteProp(d.prop, laneValue(d.prop, y))));
       return;
     }
-    if (d.kind !== "velocity") return;
-    applyVelocityAt(local(e, velRef.current!).y);
+    if (d.kind !== "lane") return;
+    applyLaneAt(local(e, velRef.current!).y);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -1000,7 +1086,7 @@ export function PianoRoll() {
       if (id) {
         setSelection(new Set([id]));
         const n = notes.find((x) => x.id === id);
-        if (n) auditionPlace(n.pitch, n.velocity, n.lengthBeats);
+        if (n) auditionPlace(n.pitch, n.velocity, n.lengthTicks);
       }
     } else if (k === "0" && !mod) {
       if (selection.size) commit(toggleMute(notes, selection), "mute notes");
@@ -1013,7 +1099,7 @@ export function PianoRoll() {
       if (selection.size) commit(glueNotes(notes, selection), "glue notes");
     } else if (mod && k.toLowerCase() === "b") {
       if (!selection.size) return;
-      const { notes: next, newIds } = duplicateBySpan(notes, selection, editBeats);
+      const { notes: next, newIds } = duplicateBySpan(notes, selection, editTicks);
       commit(next, "duplicate to next loop");
       setSelection(newIds);
     } else if (mod && k.toLowerCase() === "a") {
@@ -1041,12 +1127,12 @@ export function PianoRoll() {
     } else if (k === "Escape") {
       setSelection(new Set());
     } else if (k.startsWith("Arrow") && selection.size) {
-      const step = e.altKey ? FINE : e.shiftKey ? bpb : grid;
-      const dBeats = k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0;
+      const step = e.altKey ? FINE_TICKS : e.shiftKey ? ticksPerBar : grid;
+      const dTicks = k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0;
       const dPitch = k === "ArrowUp" ? (e.shiftKey ? 12 : 1) : k === "ArrowDown" ? -(e.shiftKey ? 12 : 1) : 0;
-      commit(moveNotes(notes, selection, dBeats, dPitch, { min: LOW, max: HIGH }, editBeats), dPitch ? "transpose notes" : "nudge notes");
+      commit(moveNotes(notes, selection, dTicks, dPitch, { min: LOW, max: HIGH }, editTicks), dPitch ? "transpose notes" : "nudge notes");
     } else if ((k === "[" || k === "]") && selection.size) {
-      commit(adjustVelocity(notes, selection, k === "]" ? 10 : -10), "change velocity");
+      commit(nudgeNoteProp(notes, selection, laneProp, k === "]" ? NUDGE_STEP[laneProp] : -NUDGE_STEP[laneProp]), `change ${NOTE_PROPS[laneProp].label}`);
     } else {
       return; // let global shortcuts through
     }
@@ -1056,11 +1142,17 @@ export function PianoRoll() {
 
   if (!pattern || !track) return null;
 
-  const selVel = notes.filter((n) => selection.has(n.id)).map((n) => n.velocity);
-  const velSummary = selVel.length
-    ? `sel ${Math.min(...selVel)}–${Math.max(...selVel)} · avg ${Math.round(selVel.reduce((a, b) => a + b, 0) / selVel.length)}`
+  // The lane header reports the property the lane is showing, over the selection when there is
+  // one and over the whole track otherwise.
+  const laneSpec = NOTE_PROPS[laneProp];
+  const laneVals = (selection.size ? notes.filter((n) => selection.has(n.id)) : notes).map((n) => noteProp(n, laneProp));
+  const laneAvg = laneVals.length ? laneSpec.format(laneVals.reduce((a, b) => a + b, 0) / laneVals.length) : "";
+  const laneSummary = selection.size
+    ? laneVals.length
+      ? `sel ${laneSpec.format(Math.min(...laneVals))}–${laneSpec.format(Math.max(...laneVals))} · avg ${laneAvg}`
+      : "—"
     : notes.length
-      ? `${notes.length} notes · avg ${Math.round(notes.reduce((a, n) => a + n.velocity, 0) / notes.length)}`
+      ? `${notes.length} notes · avg ${laneAvg}`
       : "—";
 
   return (
@@ -1084,14 +1176,39 @@ export function PianoRoll() {
         />
       </div>
       <div className="lanehdr">
-        <span className="on">velocity</span>
-        <span className="sum">{velSummary}</span>
+        <select className="lanepick" value={laneProp} onChange={(e) => setLaneProp(e.target.value as NoteProp)} aria-label="lane property">
+          {(Object.keys(NOTE_PROPS) as NoteProp[]).map((p) => (
+            <option key={p} value={p}>
+              {NOTE_PROPS[p].label}
+            </option>
+          ))}
+        </select>
+        <span className="sum">{laneSummary}</span>
       </div>
       <div className="vellane">
-        <canvas ref={velRef} onPointerDown={onVelDown} onPointerMove={onVelMove} onPointerUp={endDrag} onPointerCancel={endDrag} onContextMenu={(e) => e.preventDefault()} />
+        <canvas ref={velRef} onPointerDown={onLaneDown} onPointerMove={onLaneMove} onPointerUp={endDrag} onPointerCancel={endDrag} onContextMenu={(e) => e.preventDefault()} />
       </div>
     </div>
   );
+}
+
+/**
+ * The ⌥-ramp: a straight line from (`t0`, `v0`) to (`t1`, `v1`) in tick × value space, taken
+ * by every stem whose note starts between the two ticks — the selection's stems when there is
+ * a selection, otherwise all of them. Handing `rampNoteProp` the line's own value at the first
+ * and last note it touches makes its interpolation reproduce that line exactly.
+ */
+function rampAcross(d: Extract<Drag, { kind: "ramp" }>, t1: number, v1: number): NoteEvent[] {
+  const [from, to] = d.t0 <= t1 ? [d.t0, t1] : [t1, d.t0];
+  const [vf, vt] = d.t0 <= t1 ? [d.v0, v1] : [v1, d.v0];
+  const pool = d.ids.size ? d.base.filter((n) => d.ids.has(n.id)) : d.base;
+  const touched = pool.filter((n) => n.startTick >= from - 1e-9 && n.startTick <= to + 1e-9);
+  if (!touched.length) return d.base;
+  const slope = (vt - vf) / Math.max(1e-9, to - from);
+  const starts = touched.map((n) => n.startTick);
+  const lo = Math.min(...starts);
+  const hi = Math.max(...starts);
+  return rampNoteProp(d.base, new Set(touched.map((n) => n.id)), d.prop, vf + slope * (lo - from), vf + slope * (hi - from));
 }
 
 /** Name a finished drag for the Edit menu. */
@@ -1102,7 +1219,7 @@ function dragLabel(d: Drag, before: NoteEvent[], after: NoteEvent[]): string {
       if (d.origin === "duplicate") return "duplicate notes";
       const anchorBefore = before.find((n) => n.id === d.anchor.id);
       const anchorAfter = after.find((n) => n.id === d.anchor.id);
-      if (anchorBefore && anchorAfter && anchorBefore.pitch !== anchorAfter.pitch && anchorBefore.startBeat === anchorAfter.startBeat) return "transpose notes";
+      if (anchorBefore && anchorAfter && anchorBefore.pitch !== anchorAfter.pitch && anchorBefore.startTick === anchorAfter.startTick) return "transpose notes";
       return "move notes";
     }
     case "resize":
@@ -1113,31 +1230,31 @@ function dragLabel(d: Drag, before: NoteEvent[], after: NoteEvent[]): string {
       return "paint notes";
     case "erase":
       return "erase notes";
-    case "velocity":
-      return "change velocity";
+    case "lane":
+      return `set note ${NOTE_PROPS[d.prop].label}`;
     case "ramp":
-      return "ramp velocity";
+      return `ramp note ${NOTE_PROPS[d.prop].label}`;
     case "marquee":
       return "edit notes";
   }
 }
 
-function gridLabelFor(len: number): string {
-  const map: Record<string, string> = { "0.125": "1/32", "0.25": "1/16", "0.5": "1/8", "1": "1/4", "2": "1/2", "4": "1" };
-  return map[String(len)] ?? `${len}`;
+function gridLabelFor(ticks: number): string {
+  const map: Record<string, string> = { "120": "1/32", "240": "1/16", "480": "1/8", "960": "1/4", "1920": "1/2", "3840": "1" };
+  return map[String(ticks)] ?? `${ticks}`;
 }
 
 /**
- * Walk a length `steps` rungs along `NOTE_VALUES`, starting from the rung nearest the length
+ * Walk a length `steps` rungs along `NOTE_VALUE_TICKS`, starting from the rung nearest the length
  * it has now — so a 1/16 note dragged one rung right becomes a 1/8, and an off-grid length
  * lands on the ladder instead of staying off it.
  */
-function steppedNoteValue(lengthBeats: number, steps: number): number {
+function steppedNoteValue(lengthTicks: number, steps: number): number {
   let nearest = 0;
-  for (let i = 1; i < NOTE_VALUES.length; i++) {
-    if (Math.abs(NOTE_VALUES[i] - lengthBeats) < Math.abs(NOTE_VALUES[nearest] - lengthBeats)) nearest = i;
+  for (let i = 1; i < NOTE_VALUE_TICKS.length; i++) {
+    if (Math.abs(NOTE_VALUE_TICKS[i] - lengthTicks) < Math.abs(NOTE_VALUE_TICKS[nearest] - lengthTicks)) nearest = i;
   }
-  return NOTE_VALUES[Math.min(NOTE_VALUES.length - 1, Math.max(0, nearest + steps))];
+  return NOTE_VALUE_TICKS[Math.min(NOTE_VALUE_TICKS.length - 1, Math.max(0, nearest + steps))];
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {

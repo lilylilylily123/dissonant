@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { peakDb, selectedPattern, useStore } from "../store";
-import { tempoMap, TIME_SIGNATURES } from "../types";
+import { DEFAULT_SWING_GRID_TICKS, tempoMap, TICKS_PER_BEAT, ticksToBeats, TIME_SIGNATURES } from "../types";
 import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
 
@@ -18,16 +18,17 @@ export function Transport() {
   const bpmDrag = useRef<{ y0: number; bpm0: number; moved: boolean } | null>(null);
   const setTempo = (bpm: number, transient = false) => void s.dispatch({ type: "setTempo", bpm: Math.min(300, Math.max(20, bpm)) }, transient, "set tempo");
   const swing = model.swing ?? 50;
-  const swingGrid = model.swingGrid ?? 0.5;
+  const swingGridTicks = model.swingGridTicks ?? DEFAULT_SWING_GRID_TICKS;
 
   // Position: BBB.B.SS (bar . beat . sixteenth) and MM:SS.mmm
-  const beat = s.playhead;
-  const bar = Math.floor(beat / 4) + 1;
-  const bib = Math.floor(beat % 4) + 1;
-  const six = Math.floor((beat % 1) * 4) + 1;
+  const tick = s.playhead;
+  const bticks = 4 * TICKS_PER_BEAT;
+  const bar = Math.floor(tick / bticks) + 1;
+  const bib = Math.floor((tick % bticks) / TICKS_PER_BEAT) + 1;
+  const six = Math.floor((tick % TICKS_PER_BEAT) / (TICKS_PER_BEAT / 4)) + 1;
   const map = s.mode === "song" ? tempoMap(model.tempo, model.tempoPoints) : null;
-  const secs = map && !map.isConstant ? map.secondsAt(beat) : (beat * 60) / model.tempo;
-  const liveBpm = map && !map.isConstant ? map.bpmAt(beat) : null;
+  const secs = map && !map.isConstant ? map.secondsAt(tick) : (ticksToBeats(tick) * 60) / model.tempo;
+  const liveBpm = map && !map.isConstant ? map.bpmAt(tick) : null;
   const mm = Math.floor(secs / 60);
   const ss = secs - mm * 60;
 
@@ -49,14 +50,17 @@ export function Transport() {
 
   const [pl, pr] = s.masterPeak;
   const peak = Math.max(pl, pr);
+  // On the guitar screen the record button captures audio instead of arming MIDI.
+  const audioRecord = s.screen === "guitar" && s.armedAudioTrackId !== null;
 
   return (
     <div className="transport">
       <div className="tgroup">
-        <span className="cap">mode</span>
+        <span className="cap">view</span>
         <div className="seg">
-          <div className={s.mode === "pattern" ? "on" : ""} onClick={() => s.setMode("pattern")}>pat</div>
-          <div className={s.mode === "song" ? "on" : ""} onClick={() => s.setMode("song")}>song</div>
+          <div className={s.screen === "pattern" ? "on" : ""} onClick={() => s.setScreen("pattern")}>pat</div>
+          <div className={s.screen === "song" ? "on" : ""} onClick={() => s.setScreen("song")}>song</div>
+          <div className={s.screen === "guitar" ? "on" : ""} onClick={() => s.setScreen("guitar")}>gtr</div>
         </div>
       </div>
       <div className="tdiv" />
@@ -75,14 +79,33 @@ export function Transport() {
             <polygon points="0,0 12,7 0,14" fill={s.playing ? "#0b0b0d" : "#9a9aa4"} />
           </svg>
         </button>
-        <button
-          className="tbtn"
-          style={s.armed ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
-          onClick={() => s.toggleRecord()}
-          title="record arm (R): played notes land in the selected pattern while playing"
-        >
-          <div style={{ width: 11, height: 11, borderRadius: "50%", background: s.armed ? "#ff3b30" : "#5f5f68", boxShadow: s.armed ? "0 0 8px #ff3b30" : "none" }} />
-        </button>
+        {audioRecord ? (
+          <button
+            className="tbtn"
+            style={s.recordingAudio ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
+            onClick={() => void (s.recordingAudio ? s.stopRecording() : s.startRecording())}
+            title="record (R): capture the input onto the armed audio track"
+          >
+            <div
+              style={{
+                width: 11,
+                height: 11,
+                borderRadius: "50%",
+                background: s.recordingAudio ? "#ff3b30" : "#5f5f68",
+                boxShadow: s.recordingAudio ? "0 0 8px #ff3b30" : "none",
+              }}
+            />
+          </button>
+        ) : (
+          <button
+            className="tbtn"
+            style={s.armed ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
+            onClick={() => s.toggleRecord()}
+            title="record arm (R): played notes land in the selected pattern while playing"
+          >
+            <div style={{ width: 11, height: 11, borderRadius: "50%", background: s.armed ? "#ff3b30" : "#5f5f68", boxShadow: s.armed ? "0 0 8px #ff3b30" : "none" }} />
+          </button>
+        )}
         <button
           className="tbtn"
           style={s.looping ? { background: "var(--accent-bg)", borderColor: "var(--accent-border)" } : undefined}
@@ -200,9 +223,9 @@ export function Transport() {
               style={{ color: swing > 50 ? "var(--accent)" : "var(--text-4)", cursor: "ns-resize", minWidth: 22, textAlign: "right" }}
               onWheel={(e) => {
                 e.preventDefault();
-                void s.dispatch({ type: "setSwing", swing: Math.round(swing) + (e.deltaY < 0 ? 1 : -1), grid: swingGrid }, false, "set swing");
+                void s.dispatch({ type: "setSwing", swing: Math.round(swing) + (e.deltaY < 0 ? 1 : -1), gridTicks: swingGridTicks }, false, "set swing");
               }}
-              onDoubleClick={() => s.dispatch({ type: "setSwing", swing: 50, grid: swingGrid })}
+              onDoubleClick={() => s.dispatch({ type: "setSwing", swing: 50, gridTicks: swingGridTicks })}
             >
               {Math.round(swing)}
             </span>
@@ -213,12 +236,12 @@ export function Transport() {
               step={1}
               value={Math.round(swing)}
               style={{ width: 44 }}
-              onChange={(e) => void s.dispatch({ type: "setSwing", swing: Number(e.target.value), grid: swingGrid }, true, "set swing")}
+              onChange={(e) => void s.dispatch({ type: "setSwing", swing: Number(e.target.value), gridTicks: swingGridTicks }, true, "set swing")}
               onPointerUp={() => void s.commitGesture()}
             />
-            <select value={swingGrid} onChange={(e) => s.dispatch({ type: "setSwing", swing, grid: Number(e.target.value) })} style={{ height: 16, padding: "0 12px 0 3px", fontSize: 9 }}>
-              <option value={0.5}>8th</option>
-              <option value={0.25}>16th</option>
+            <select value={swingGridTicks} onChange={(e) => s.dispatch({ type: "setSwing", swing, gridTicks: Number(e.target.value) })} style={{ height: 16, padding: "0 12px 0 3px", fontSize: 9 }}>
+              <option value={480}>8th</option>
+              <option value={240}>16th</option>
             </select>
           </span>
           <span className="micro">swing</span>

@@ -1,20 +1,27 @@
-//! A track channel (instrument → tone → reverb → gain/pan) and the master chain
-//! (low-cut → 3-band EQ → high-cut → reverb → gain).
+//! A track channel (instrument → tone → inserts → reverb/gain/pan) and the master chain
+//! (master inserts → low-cut → 3-band EQ → high-cut → reverb → gain).
 
+use crate::audio::{AudioLane, BlockContext};
 use crate::drums::DrumKit;
-use crate::dsp::{linear_to_db, pan_gains, Biquad, Reverb, StereoBiquad};
+use crate::dsp::{linear_to_db, pan_gains, Reverb, StereoBiquad};
+use crate::engine::NoteShape;
 use crate::synth::{PolySynth, VoicePreset};
 use dissonant_core::{MasterSettings, SequenceTrack};
 use dissonant_plugins::PluginAudioUnit;
+use uuid::Uuid;
 
-/// What makes a track's sound. The built-in voices render mono and are panned by the channel;
-/// a plugin renders its own stereo, so the channel feeds it the pan rather than applying one.
+/// What makes a track's sound. The built-in voices place themselves in stereo from each note's
+/// own pan; a plugin renders its own stereo, so the channel feeds it the track pan rather than
+/// applying one.
 pub enum Instrument {
     Synth(PolySynth),
     Drums(DrumKit),
     /// A hosted plugin. Boxed because it is an order of magnitude larger than the other two and
     /// every `Channel` would otherwise carry that size whether or not it hosts anything.
     Plugin(Box<PluginAudioUnit>),
+    /// An audio track has no note source: its sound comes from its [`AudioLane`]. Every note
+    /// call is a no-op and it renders nothing of its own.
+    Silent,
 }
 
 impl std::fmt::Debug for Instrument {
@@ -24,16 +31,28 @@ impl std::fmt::Debug for Instrument {
             Instrument::Drums(d) => f.debug_tuple("Drums").field(d).finish(),
             // A plugin's innards belong to the plugin; naming it is all a log line needs.
             Instrument::Plugin(_) => f.write_str("Plugin(..)"),
+            Instrument::Silent => f.write_str("Silent"),
         }
     }
 }
 
 impl Instrument {
-    pub fn note_on(&mut self, pitch: u8, velocity: u8) {
+    pub fn note_on(&mut self, pitch: u8, velocity: u8, shape: NoteShape) {
         match self {
-            Instrument::Synth(s) => s.note_on(pitch, velocity),
-            Instrument::Drums(d) => d.note_on(pitch, velocity),
+            Instrument::Synth(s) => s.note_on(pitch, velocity, shape),
+            Instrument::Drums(d) => d.note_on(pitch, velocity, shape),
+            // A plugin owns its own expression: MIDI is all the contract there is.
             Instrument::Plugin(p) => p.note_on(pitch, velocity),
+            Instrument::Silent => {}
+        }
+    }
+
+    /// Tell the built-in voices the track's tone cutoff, which per-note Mod X sweeps around.
+    fn set_tone_hz(&mut self, hz: f32) {
+        match self {
+            Instrument::Synth(s) => s.set_tone_hz(hz),
+            Instrument::Drums(d) => d.set_tone_hz(hz),
+            Instrument::Plugin(_) | Instrument::Silent => {}
         }
     }
     pub fn note_off(&mut self, pitch: u8) {
@@ -41,14 +60,14 @@ impl Instrument {
             Instrument::Synth(s) => s.note_off(pitch),
             Instrument::Plugin(p) => p.note_off(pitch),
             // A drum hit is a one-shot: it has no sustain to release.
-            Instrument::Drums(_) => {}
+            Instrument::Drums(_) | Instrument::Silent => {}
         }
     }
     pub fn all_notes_off(&mut self) {
         match self {
             Instrument::Synth(s) => s.all_notes_off(),
             Instrument::Plugin(p) => p.all_notes_off(),
-            Instrument::Drums(_) => {}
+            Instrument::Drums(_) | Instrument::Silent => {}
         }
     }
     pub fn is_silent(&self) -> bool {
@@ -56,16 +75,80 @@ impl Instrument {
             Instrument::Synth(s) => s.is_silent(),
             Instrument::Drums(d) => d.is_silent(),
             Instrument::Plugin(p) => p.is_silent(),
+            Instrument::Silent => true,
         }
     }
-    fn render_add(&mut self, out: &mut [f32]) {
+    fn render_add(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         match self {
-            Instrument::Synth(s) => s.render_add(out),
-            Instrument::Drums(d) => d.render_add(out),
-            // Stereo instruments go through `Channel::render_add`'s own path.
-            Instrument::Plugin(_) => {}
+            Instrument::Synth(s) => s.render_add(out_l, out_r),
+            Instrument::Drums(d) => d.render_add(out_l, out_r),
+            // A plugin goes through `Channel::render_add`'s own path.
+            Instrument::Plugin(_) | Instrument::Silent => {}
         }
     }
+}
+
+/// One effect slot in a chain, on a track or on the master.
+///
+/// `unit` is `None` when the plugin the project names is not installed: the slot keeps its place
+/// so the chain's order (and the name the UI shows) survives a round trip through a machine that
+/// cannot load it.
+pub struct InsertSlot {
+    pub id: Uuid,
+    pub enabled: bool,
+    pub unit: Option<Box<PluginAudioUnit>>,
+}
+
+impl std::fmt::Debug for InsertSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InsertSlot")
+            .field("id", &self.id)
+            .field("enabled", &self.enabled)
+            .field("loaded", &self.unit.is_some())
+            .finish()
+    }
+}
+
+impl InsertSlot {
+    /// A slot starts enabled; a bypassed one is set so by its own command right after.
+    pub fn new(id: Uuid, unit: Option<Box<PluginAudioUnit>>) -> Self {
+        InsertSlot { id, enabled: true, unit }
+    }
+
+    /// The unit this slot would run this block, or `None` when there is nothing to run.
+    #[inline]
+    fn active(&mut self) -> Option<&mut PluginAudioUnit> {
+        if self.enabled {
+            self.unit.as_deref_mut()
+        } else {
+            None
+        }
+    }
+
+    /// Whether the slot has stopped making sound of its own. A bypassed or empty slot is silent
+    /// by definition; a loaded effect is silent once its tail has run out.
+    fn is_silent(&self) -> bool {
+        match &self.unit {
+            Some(unit) if self.enabled => unit.is_silent(),
+            _ => true,
+        }
+    }
+}
+
+/// Run a chain in place over one block. A bypassed slot, or one whose plugin is missing, is
+/// skipped outright: the signal passes through it untouched and unconverted.
+pub fn run_inserts(chain: &mut [InsertSlot], l: &mut [f32], r: &mut [f32]) {
+    for slot in chain {
+        if let Some(unit) = slot.active() {
+            unit.process_replace(l, r);
+        }
+    }
+}
+
+/// Whether every slot in a chain has finished ringing, so the chain can be skipped for a block
+/// whose input is already silent.
+pub fn chain_is_silent(chain: &[InsertSlot]) -> bool {
+    chain.iter().all(InsertSlot::is_silent)
 }
 
 /// Not `Clone`: a hosted plugin instance cannot be duplicated, and nothing copies a live
@@ -75,15 +158,24 @@ pub struct Channel {
     pub instrument: Instrument,
     voice: String,
     is_drum: bool,
-    tone: Biquad,
+    is_audio: bool,
+    /// The track's tone filter. Stereo, because the built-in voices now place themselves from
+    /// each note's pan and the two sides are no longer the same signal.
+    tone: StereoBiquad,
     tone_hz: f32,
     reverb: Reverb,
     gain: f32,
     pan: (f32, f32),
     sample_rate: f32,
-    mono: Vec<f32>,
-    /// Stereo scratch for plugin instruments, which render their own two channels.
+    /// Stereo scratch: the instrument renders here, then the channel strip runs over it.
     stereo: (Vec<f32>, Vec<f32>),
+    /// This track's effect chain, pre-fader. Filled by the engine's insert commands, never by
+    /// [`Channel::apply`]: loading a plugin is far too slow for the audio deadline, so a
+    /// sequence rebuild must leave a live chain exactly where it is.
+    pub inserts: Vec<InsertSlot>,
+    /// Set on an audio track: where its clips and monitored input are rendered. Boxed for the
+    /// same reason as `Instrument::Plugin` — a rig is far larger than the rest of a channel.
+    pub audio: Option<Box<AudioLane>>,
     pub peak: f32,
 }
 
@@ -91,7 +183,9 @@ impl Channel {
     /// The instrument a track gets from its own settings, with no plugin involved. Shared by
     /// channel creation and by the engine when a plugin is cleared.
     pub fn built_in_instrument(track: &SequenceTrack, sample_rate: f32) -> Instrument {
-        if track.is_drum {
+        if track.is_audio {
+            Instrument::Silent
+        } else if track.is_drum {
             Instrument::Drums(DrumKit::new(sample_rate))
         } else {
             Instrument::Synth(PolySynth::new(VoicePreset::named(&track.voice), sample_rate, 12))
@@ -104,14 +198,16 @@ impl Channel {
             instrument,
             voice: track.voice.clone(),
             is_drum: track.is_drum,
-            tone: Biquad::identity(),
+            is_audio: track.is_audio,
+            tone: StereoBiquad::identity(),
             tone_hz: 0.0,
             reverb: Reverb::new(sample_rate),
             gain: 1.0,
             pan: pan_gains(0.0),
             sample_rate,
-            mono: vec![0.0; 8192],
             stereo: (vec![0.0; 8192], vec![0.0; 8192]),
+            inserts: Vec::new(),
+            audio: track.is_audio.then(|| Box::new(AudioLane::new(track.id, sample_rate))),
             peak: 0.0,
         };
         c.apply(track);
@@ -125,71 +221,122 @@ impl Channel {
     /// sequence rebuild must not silently replace it with the track's fallback voice.
     pub fn apply(&mut self, track: &SequenceTrack) {
         let hosts_plugin = matches!(self.instrument, Instrument::Plugin(_));
-        if !hosts_plugin && (track.is_drum != self.is_drum || (!track.is_drum && track.voice != self.voice)) {
-            self.instrument = if track.is_drum {
-                Instrument::Drums(DrumKit::new(self.sample_rate))
-            } else {
-                Instrument::Synth(PolySynth::new(VoicePreset::named(&track.voice), self.sample_rate, 12))
-            };
+        let kind_changed = track.is_drum != self.is_drum || track.is_audio != self.is_audio;
+        if !hosts_plugin && (kind_changed || (!track.is_drum && !track.is_audio && track.voice != self.voice)) {
+            self.instrument = Self::built_in_instrument(track, self.sample_rate);
         }
         self.is_drum = track.is_drum;
+        self.is_audio = track.is_audio;
         self.voice = track.voice.clone();
+        match (track.is_audio, &mut self.audio) {
+            (true, Some(lane)) => lane.apply(track),
+            (true, slot @ None) => {
+                let mut lane = Box::new(AudioLane::new(track.id, self.sample_rate));
+                lane.apply(track);
+                *slot = Some(lane);
+            }
+            (false, slot) => *slot = None,
+        }
         let tone_hz = track.tone.clamp(200.0, 20_000.0) as f32;
         if (tone_hz - self.tone_hz).abs() > 0.5 {
-            self.tone.lowpass(self.sample_rate, tone_hz, 0.707);
+            self.tone.configure(|b| b.lowpass(self.sample_rate, tone_hz, 0.707));
             self.tone_hz = tone_hz;
         }
+        // A note's Mod X is an offset from the track's own voicing, so the voices need to know
+        // what that voicing currently is. Pushed on every apply, including the one that just
+        // built a fresh instrument above.
+        self.instrument.set_tone_hz(self.tone_hz);
         self.reverb.wet = track.reverb_send.clamp(0.0, 1.0) as f32;
         self.gain = track.volume.clamp(0.0, 1.5) as f32;
         self.pan = pan_gains(track.pan as f32);
     }
 
     /// Render `frames` samples and add them into the stereo mix buffers.
-    pub fn render_add(&mut self, mix_l: &mut [f32], mix_r: &mut [f32]) {
+    pub fn render_add(&mut self, mix_l: &mut [f32], mix_r: &mut [f32], ctx: &BlockContext<'_>) {
         let frames = mix_l.len();
-        if self.instrument.is_silent() && self.reverb.wet <= 0.0001 {
+
+        // An audio track's sound comes from its lane, not from an instrument. It takes the
+        // plugin path's treatment — inserts, gain, pan and reverb on both sides, then peak
+        // tracking — so it meters, pans and mutes exactly like any other track.
+        if self.audio.is_some() {
+            self.clear_scratch(frames);
+            let wrote = {
+                let (al, ar) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
+                // `is_some` above, so the lane is there; taking it out of the `if let` keeps the
+                // scratch borrow and the lane borrow from overlapping.
+                match &mut self.audio {
+                    Some(lane) => lane.render_add(al, ar, ctx, self.sample_rate),
+                    None => false,
+                }
+            };
+            // Nothing played, no send tail to flush and no insert still ringing: let the meter
+            // fall and stop.
+            if !wrote && self.reverb.wet <= 0.0001 && chain_is_silent(&self.inserts) {
+                self.hold_peak(0.0, frames);
+                return;
+            }
+            self.strip(frames, mix_l, mix_r);
+            return;
+        }
+
+        if self.instrument.is_silent() && self.reverb.wet <= 0.0001 && chain_is_silent(&self.inserts) {
             // Nothing to render, but the meter still has to fall back to zero — otherwise it
             // freezes at whatever the last audible block measured and the UI stays lit.
             self.hold_peak(0.0, frames);
             return;
         }
-        let (gl, gr) = self.pan;
-        let mut peak = 0.0f32;
+        self.clear_scratch(frames);
         if let Instrument::Plugin(plugin) = &mut self.instrument {
             // A plugin produces its own stereo image, so panning scales the two sides it gives
-            // us rather than placing a mono source. The tone filter is mono-only, so the two
-            // sides are filtered independently and the channel's own filter is left for the
+            // us rather than placing a mono source. The channel's tone filter is left for the
             // built-in voices.
-            if self.stereo.0.len() < frames {
-                self.stereo.0.resize(frames, 0.0);
-                self.stereo.1.resize(frames, 0.0);
-            }
-            let (pl, pr) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
-            pl.fill(0.0);
-            pr.fill(0.0);
-            plugin.render_add(pl, pr);
+            plugin.render_add(&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
+            self.strip(frames, mix_l, mix_r);
+            return;
+        }
+        {
+            let (il, ir) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
+            self.instrument.render_add(il, ir);
+            // Per-note pan has already placed the voice between the two sides; the tone filter
+            // is stereo so the two sides are filtered independently.
             for i in 0..frames {
-                let (l, r) = self.reverb.process(pl[i] * self.gain * gl, pr[i] * self.gain * gr);
+                let (tl, tr) = self.tone.process(il[i], ir[i]);
+                il[i] = tl;
+                ir[i] = tr;
+            }
+        }
+        self.strip(frames, mix_l, mix_r);
+    }
+
+    /// Grow the stereo scratch to `frames` and clear it.
+    fn clear_scratch(&mut self, frames: usize) {
+        if self.stereo.0.len() < frames {
+            self.stereo.0.resize(frames, 0.0);
+            self.stereo.1.resize(frames, 0.0);
+        }
+        self.stereo.0[..frames].fill(0.0);
+        self.stereo.1[..frames].fill(0.0);
+    }
+
+    /// The rest of the channel strip over whatever is in the scratch: inserts → gain → pan →
+    /// reverb send → meter, added into the mix. Inserts sit here, pre-fader, which is what an
+    /// insert means in every other DAW: the chain hears the instrument at its own level.
+    fn strip(&mut self, frames: usize, mix_l: &mut [f32], mix_r: &mut [f32]) {
+        let peak = {
+            let (gl, gr) = self.pan;
+            let gain = self.gain;
+            let (sl, sr) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
+            run_inserts(&mut self.inserts, sl, sr);
+            let reverb = &mut self.reverb;
+            let mut peak = 0.0f32;
+            for i in 0..frames {
+                let (l, r) = reverb.process(sl[i] * gain * gl, sr[i] * gain * gr);
                 mix_l[i] += l;
                 mix_r[i] += r;
                 peak = peak.max(l.abs().max(r.abs()));
             }
-            self.hold_peak(peak, frames);
-            return;
-        }
-        if self.mono.len() < frames {
-            self.mono.resize(frames, 0.0);
-        }
-        let mono = &mut self.mono[..frames];
-        mono.fill(0.0);
-        self.instrument.render_add(mono);
-        for i in 0..frames {
-            let s = self.tone.process(mono[i]) * self.gain;
-            let (l, r) = self.reverb.process(s * gl, s * gr);
-            mix_l[i] += l;
-            mix_r[i] += r;
-            peak = peak.max(l.abs().max(r.abs()));
-        }
+            peak
+        };
         self.hold_peak(peak, frames);
     }
 

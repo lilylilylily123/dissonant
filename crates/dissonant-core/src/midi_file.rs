@@ -2,13 +2,16 @@
 //! track, chord names as markers), and import a file into a pattern as new tracks.
 
 use crate::arrangement::Arrangement;
-use crate::model::{NoteEvent, ProjectModel, Track};
+use crate::model::{NoteEvent, ProjectModel, Track, MIN_NOTE_TICKS};
+use crate::ticks::TICKS_PER_BEAT;
 use midly::num::{u15, u24, u28, u4, u7};
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Ticks per quarter note written and assumed on import when the file says nothing.
+/// Ticks per quarter note written and assumed on import when the file says nothing. This is
+/// the file format's own resolution, not the project's: 960 % 480 == 0, so both directions are
+/// exact and a round trip loses nothing.
 pub const PPQ: u16 = 480;
 
 #[derive(Debug, Error)]
@@ -39,21 +42,27 @@ pub struct ImportedTrack {
     pub notes: Vec<NoteEvent>,
 }
 
-/// Everything an import yields; `length_beats` is the end of the last note rounded up to a bar.
+/// Everything an import yields; `length_ticks` is the end of the last note rounded up to a bar.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedMidi {
     pub tracks: Vec<ImportedTrack>,
     pub tempo_bpm: Option<f64>,
-    pub length_beats: f64,
+    pub length_ticks: i64,
 }
 
-fn ticks(beat: f64) -> u64 {
-    (beat * PPQ as f64).round().max(0.0) as u64
+/// A project tick on the file's own grid.
+fn smf_tick(tick: i64) -> u64 {
+    (tick * PPQ as i64 / TICKS_PER_BEAT).max(0) as u64
+}
+
+/// A file tick (at `ppq`) on the project's grid.
+fn project_tick(tick: u64, ppq: i64) -> i64 {
+    tick as i64 * TICKS_PER_BEAT / ppq
 }
 
 type TrackNotes<'a> = Vec<(&'a Track, Vec<NoteEvent>)>;
-type ChordMarkers = Vec<(f64, String)>;
+type ChordMarkers = Vec<(i64, String)>;
 
 /// Build the SMF (format 1) for a scope. Track 0 carries tempo, time signature and chord
 /// markers; every Dissonant track becomes one MIDI track (drums on channel 10).
@@ -66,7 +75,7 @@ pub fn export(model: &ProjectModel, scope: MidiScope) -> Result<Vec<u8>, MidiErr
             let chords = p.looped_chords();
             (
                 model.tracks.iter().map(|t| (t, p.looped_notes(&t.id))).collect(),
-                chords.chords().iter().filter_map(|c| c.name.clone().map(|n| (c.start_beat, n))).collect(),
+                chords.chords().iter().filter_map(|c| c.name.clone().map(|n| (c.start_tick, n))).collect(),
             )
         }
         MidiScope::Song => (
@@ -78,7 +87,7 @@ pub fn export(model: &ProjectModel, scope: MidiScope) -> Result<Vec<u8>, MidiErr
             Arrangement::flattened_chords(&model.patterns, &model.clips)
                 .chords()
                 .iter()
-                .filter_map(|c| c.name.clone().map(|n| (c.start_beat, n)))
+                .filter_map(|c| c.name.clone().map(|n| (c.start_tick, n)))
                 .collect(),
         ),
     };
@@ -103,19 +112,21 @@ pub fn export(model: &ProjectModel, scope: MidiScope) -> Result<Vec<u8>, MidiErr
             )),
         ),
     ];
-    for ((beat, _), name) in chords.iter().zip(marker_names.iter()) {
-        conductor.push((ticks(*beat), TrackEventKind::Meta(MetaMessage::Marker(name.as_bytes()))));
+    for ((tick, _), name) in chords.iter().zip(marker_names.iter()) {
+        conductor.push((smf_tick(*tick), TrackEventKind::Meta(MetaMessage::Marker(name.as_bytes()))));
     }
     smf.tracks.push(to_deltas(conductor));
 
     for ((track, notes), name) in per_track.iter().zip(names.iter()) {
-        let channel = u4::new(if track.is_drum { 9 } else { 0 });
         let mut events: Vec<(u64, TrackEventKind)> = vec![(0, TrackEventKind::Meta(MetaMessage::TrackName(name.as_bytes())))];
         for n in notes.iter().filter(|n| !n.muted) {
+            // A note's colour group is its MIDI channel, the way FL Studio treats colour.
+            // Drums stay on channel 10 whatever colour they carry.
+            let channel = u4::new(if track.is_drum { 9 } else { n.color.min(15) });
             let key = u7::new(n.pitch.clamp(0, 127) as u8);
             let vel = u7::new(n.velocity.clamp(1, 127) as u8);
-            let on = ticks(n.start_beat);
-            let off = ticks(n.end_beat()).max(on + 1);
+            let on = smf_tick(n.shifted_start());
+            let off = smf_tick(n.shifted_start() + n.length_ticks).max(on + 1);
             events.push((on, TrackEventKind::Midi { channel, message: MidiMessage::NoteOn { key, vel } }));
             events.push((off, TrackEventKind::Midi { channel, message: MidiMessage::NoteOff { key, vel: u7::new(0) } }));
         }
@@ -148,14 +159,22 @@ fn to_deltas(mut events: Vec<(u64, TrackEventKind<'_>)>) -> Vec<TrackEvent<'_>> 
     out
 }
 
+/// The channel a note arrived on becomes its colour group, so an export/import round trip
+/// keeps the grouping. Channel 10 is percussion and carries no colour.
+fn colored(mut note: NoteEvent, channel: u8) -> NoteEvent {
+    note.color = if channel == 9 { 0 } else { channel.min(15) };
+    note
+}
+
 /// Read a MIDI file into tracks of notes. Format 0 files (one track, many channels) are split
 /// by channel; tracks without notes are dropped.
-pub fn import(bytes: &[u8], beats_per_bar: f64) -> Result<ImportedMidi, MidiError> {
+pub fn import(bytes: &[u8], bar_ticks: i64) -> Result<ImportedMidi, MidiError> {
     let smf = Smf::parse(bytes).map_err(|e| MidiError::Parse(e.to_string()))?;
     let ppq = match smf.header.timing {
-        Timing::Metrical(t) => t.as_int() as f64,
-        Timing::Timecode(..) => PPQ as f64,
-    };
+        Timing::Metrical(t) => t.as_int() as i64,
+        Timing::Timecode(..) => PPQ as i64,
+    }
+    .max(1);
     let mut tempo_bpm = None;
     let mut tracks = Vec::new();
     for (ti, track) in smf.tracks.iter().enumerate() {
@@ -179,12 +198,12 @@ pub fn import(bytes: &[u8], beats_per_bar: f64) -> Result<ImportedMidi, MidiErro
                         }
                         MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
                             if let Some((start, vel)) = held.remove(&(ch, key.as_int())) {
-                                let start_beat = start as f64 / ppq;
-                                let len = ((at - start) as f64 / ppq).max(1.0 / 64.0);
-                                per_channel
-                                    .entry(ch)
-                                    .or_default()
-                                    .push(NoteEvent::new(start_beat, len, key.as_int() as i32).with_velocity(vel as i32));
+                                let start_tick = project_tick(start, ppq);
+                                let len = project_tick(at - start, ppq).max(MIN_NOTE_TICKS);
+                                per_channel.entry(ch).or_default().push(
+                                    colored(NoteEvent::new(start_tick, len, key.as_int() as i32), ch)
+                                        .with_velocity(vel as i32),
+                                );
                             }
                         }
                         _ => {}
@@ -195,14 +214,13 @@ pub fn import(bytes: &[u8], beats_per_bar: f64) -> Result<ImportedMidi, MidiErro
         }
         // Anything still held at the end gets a beat.
         for ((ch, key), (start, vel)) in held {
-            per_channel
-                .entry(ch)
-                .or_default()
-                .push(NoteEvent::new(start as f64 / ppq, 1.0, key as i32).with_velocity(vel as i32));
+            per_channel.entry(ch).or_default().push(
+                colored(NoteEvent::new(project_tick(start, ppq), TICKS_PER_BEAT, key as i32), ch).with_velocity(vel as i32),
+            );
         }
         let multi = per_channel.len() > 1;
         for (ch, mut notes) in per_channel {
-            notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat).then(a.pitch.cmp(&b.pitch)));
+            notes.sort_by(|a, b| a.start_tick.cmp(&b.start_tick).then(a.pitch.cmp(&b.pitch)));
             let base = name.clone().unwrap_or_else(|| format!("midi {}", ti + 1));
             tracks.push(ImportedTrack {
                 name: if multi { format!("{base} ch{}", ch + 1) } else { base },
@@ -216,17 +234,21 @@ pub fn import(bytes: &[u8], beats_per_bar: f64) -> Result<ImportedMidi, MidiErro
     }
     let end = tracks
         .iter()
-        .flat_map(|t| t.notes.iter().map(NoteEvent::end_beat))
-        .fold(0.0, f64::max);
-    let bpb = beats_per_bar.max(1.0);
-    let length_beats = ((end / bpb).ceil() * bpb).max(bpb);
-    Ok(ImportedMidi { tracks, tempo_bpm, length_beats })
+        .flat_map(|t| t.notes.iter().map(NoteEvent::end_tick))
+        .max()
+        .unwrap_or(0);
+    let bar = bar_ticks.max(1);
+    let length_ticks = ((end + bar - 1) / bar * bar).max(bar);
+    Ok(ImportedMidi { tracks, tempo_bpm, length_ticks })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Clip;
+
+    const BEAT: i64 = TICKS_PER_BEAT;
+    const BAR: i64 = 4 * BEAT;
 
     #[test]
     fn export_then_import_round_trips_notes_and_names() {
@@ -235,16 +257,20 @@ mod tests {
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         let drums = model.tracks[1].id;
         model.tracks[0].name = "lead".into();
-        let mut muted = NoteEvent::new(3.0, 1.0, 72);
+        let mut muted = NoteEvent::new(3 * BEAT, BEAT, 72);
         muted.muted = true;
         model.patterns[0].notes_by_track.insert(
             tid,
-            vec![NoteEvent::new(0.0, 0.5, 60).with_velocity(90), NoteEvent::new(1.5, 1.0, 67), muted],
+            vec![
+                NoteEvent::new(0, BEAT / 2, 60).with_velocity(90),
+                NoteEvent::new(3 * BEAT / 2, BEAT, 67),
+                muted,
+            ],
         );
-        model.patterns[0].notes_by_track.insert(drums, vec![NoteEvent::new(0.0, 0.25, 36)]);
+        model.patterns[0].notes_by_track.insert(drums, vec![NoteEvent::new(0, BEAT / 4, 36)]);
 
         let bytes = export(&model, MidiScope::Pattern(pid)).unwrap();
-        let back = import(&bytes, 4.0).unwrap();
+        let back = import(&bytes, BAR).unwrap();
         assert_eq!(back.tempo_bpm.map(|t| t.round()), Some(100.0));
         assert_eq!(back.tracks.len(), 2);
         let lead = back.tracks.iter().find(|t| t.name == "lead").unwrap();
@@ -252,27 +278,52 @@ mod tests {
         assert_eq!(lead.notes.len(), 2, "muted notes are not exported");
         assert_eq!(lead.notes[0].pitch, 60);
         assert_eq!(lead.notes[0].velocity, 90);
-        assert!((lead.notes[0].length_beats - 0.5).abs() < 1e-9);
-        assert!((lead.notes[1].start_beat - 1.5).abs() < 1e-9);
+        assert_eq!(lead.notes[0].length_ticks, BEAT / 2, "960 → 480 → 960 is exact");
+        assert_eq!(lead.notes[1].start_tick, 3 * BEAT / 2);
         let kit = back.tracks.iter().find(|t| t.name == "drums").unwrap();
         assert!(kit.is_drum, "channel 10 marks drums");
-        assert_eq!(back.length_beats, 4.0);
+        assert_eq!(back.length_ticks, BAR);
     }
 
     #[test]
     fn song_export_follows_clips_and_empty_is_an_error() {
         let mut model = ProjectModel::starter();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0.0, 1.0, 60)]);
-        model.clips = vec![Clip::new(pid, 0.0, 16.0), Clip::new(pid, 16.0, 16.0)];
-        let back = import(&export(&model, MidiScope::Song).unwrap(), 4.0).unwrap();
+        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0, BEAT, 60)]);
+        model.clips = vec![Clip::new(pid, 0, 16 * BEAT), Clip::new(pid, 16 * BEAT, 16 * BEAT)];
+        let back = import(&export(&model, MidiScope::Song).unwrap(), BAR).unwrap();
         let lead = &back.tracks[0];
         assert_eq!(lead.notes.len(), 2);
-        assert!((lead.notes[1].start_beat - 16.0).abs() < 1e-9);
-        assert_eq!(back.length_beats, 20.0, "last note ends at 17 → rounded up to the bar");
+        assert_eq!(lead.notes[1].start_tick, 16 * BEAT);
+        assert_eq!(back.length_ticks, 20 * BEAT, "last note ends at beat 17 → rounded up to the bar");
 
         let empty = ProjectModel::empty();
         assert!(matches!(export(&empty, MidiScope::Song), Err(MidiError::Empty)));
-        assert!(matches!(import(b"not midi", 4.0), Err(MidiError::Parse(_))));
+        assert!(matches!(import(b"not midi", BAR), Err(MidiError::Parse(_))));
+    }
+
+    #[test]
+    fn colour_groups_round_trip_as_midi_channels_and_shift_moves_the_export() {
+        let mut model = ProjectModel::starter();
+        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        model.tracks[0].name = "lead".into();
+        let mut red = NoteEvent::new(0, BEAT, 60);
+        red.color = 3;
+        let mut late = NoteEvent::new(2 * BEAT, BEAT, 64);
+        late.shift_ticks = BEAT / 4;
+        model.patterns[0].notes_by_track.insert(tid, vec![red, late]);
+        model.patterns[0].notes_by_track.remove(&model.tracks[1].id);
+
+        let back = import(&export(&model, MidiScope::Pattern(pid)).unwrap(), BAR).unwrap();
+        // Two colour groups on one track come back as one track per channel.
+        assert_eq!(back.tracks.len(), 2);
+        let coloured = back.tracks.iter().find(|t| t.notes[0].pitch == 60).unwrap();
+        assert_eq!(coloured.notes[0].color, 3, "channel 4 is colour group 3");
+        let shifted = back.tracks.iter().find(|t| t.notes[0].pitch == 64).unwrap();
+        assert_eq!(
+            shifted.notes[0].start_tick,
+            9 * BEAT / 4,
+            "shift is baked into the exported time, not dropped"
+        );
     }
 }

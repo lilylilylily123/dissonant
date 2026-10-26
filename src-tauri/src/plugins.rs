@@ -26,25 +26,29 @@ type Reply<T> = Sender<T>;
 enum Request {
     /// List what is installed. `rescan` ignores the on-disk cache.
     Scan { rescan: bool, reply: Reply<Vec<PluginDescriptor>> },
-    /// Load `uid` for `track_id`, replacing whatever that track had.
+    /// Load `uid` under `id`, replacing whatever that key had.
     Open {
-        track_id: Uuid,
+        id: Uuid,
         uid: String,
         sample_rate: f64,
         reply: Reply<Result<(PluginAudioUnit, String), String>>,
     },
-    /// Drop the plugin a track was hosting.
-    Close { track_id: Uuid, reply: Reply<()> },
+    /// Drop the plugin held under `id`.
+    Close { id: Uuid, reply: Reply<()> },
     /// Current parameters, with live values.
-    Params { track_id: Uuid, reply: Reply<Vec<ParamInfo>> },
+    Params { id: Uuid, reply: Reply<Vec<ParamInfo>> },
     /// Read the plugin's own state blob, for the undo history and the project file.
-    SaveState { track_id: Uuid, reply: Reply<Option<Vec<u8>>> },
+    SaveState { id: Uuid, reply: Reply<Option<Vec<u8>>> },
     /// Push a state blob back into the plugin (project load, undo, redo).
-    LoadState { track_id: Uuid, state: Vec<u8>, reply: Reply<Result<(), String>> },
+    LoadState { id: Uuid, state: Vec<u8>, reply: Reply<Result<(), String>> },
 }
 
 /// Handle to the plugin main thread. Cheap to clone-free share; every method blocks only as long
 /// as the plugin thread takes to answer.
+///
+/// Everything is keyed by an opaque [`Uuid`], not by a track: a track's instrument is held under
+/// the track's id and an effect under its own insert id, so one track can host an instrument and
+/// a chain of effects at once without the two kinds of key ever colliding.
 pub struct PluginHostThread {
     tx: Mutex<Sender<Request>>,
 }
@@ -73,7 +77,7 @@ impl PluginHostThread {
                             }
                             let _ = reply.send(known.clone());
                         }
-                        Request::Open { track_id, uid, sample_rate, reply } => {
+                        Request::Open { id, uid, sample_rate, reply } => {
                             // A uid the scan has never seen cannot be resolved to a bundle, and
                             // guessing one would load a different plugin under the same name.
                             if known.is_empty() {
@@ -87,8 +91,8 @@ impl PluginHostThread {
                             match HostedPlugin::open(&desc, sample_rate, MAX_BLOCK_FRAMES) {
                                 Ok((hosted, unit)) => {
                                     // Drop the previous plugin only once the new one is live, so
-                                    // a failed load leaves the track playing what it had.
-                                    loaded.insert(track_id, hosted);
+                                    // a failed load leaves the slot playing what it had.
+                                    loaded.insert(id, hosted);
                                     let _ = reply.send(Ok((unit, desc.name.clone())));
                                 }
                                 Err(e) => {
@@ -96,16 +100,16 @@ impl PluginHostThread {
                                 }
                             }
                         }
-                        Request::Close { track_id, reply } => {
-                            loaded.remove(&track_id);
+                        Request::Close { id, reply } => {
+                            loaded.remove(&id);
                             let _ = reply.send(());
                         }
-                        Request::Params { track_id, reply } => {
-                            let params = loaded.get_mut(&track_id).map(|p| p.params().to_vec()).unwrap_or_default();
+                        Request::Params { id, reply } => {
+                            let params = loaded.get_mut(&id).map(|p| p.params().to_vec()).unwrap_or_default();
                             let _ = reply.send(params);
                         }
-                        Request::SaveState { track_id, reply } => {
-                            let state = loaded.get_mut(&track_id).and_then(|p| match p.save_state() {
+                        Request::SaveState { id, reply } => {
+                            let state = loaded.get_mut(&id).and_then(|p| match p.save_state() {
                                 Ok(bytes) => Some(bytes),
                                 Err(e) => {
                                     // A plugin without the state extension is legitimate; the
@@ -116,10 +120,10 @@ impl PluginHostThread {
                             });
                             let _ = reply.send(state);
                         }
-                        Request::LoadState { track_id, state, reply } => {
-                            let result = match loaded.get_mut(&track_id) {
+                        Request::LoadState { id, state, reply } => {
+                            let result = match loaded.get_mut(&id) {
                                 Some(p) => p.load_state(&state).map_err(|e| e.to_string()),
-                                None => Err("track has no plugin".to_string()),
+                                None => Err("nothing is loaded under that id".to_string()),
                             };
                             let _ = reply.send(result);
                         }
@@ -146,26 +150,27 @@ impl PluginHostThread {
         self.ask(|reply| Request::Scan { rescan, reply }).unwrap_or_default()
     }
 
-    /// Load `uid` on `track_id`, returning the audio half for the engine and the plugin's name.
-    pub fn open(&self, track_id: Uuid, uid: &str, sample_rate: f64) -> Result<(PluginAudioUnit, String), String> {
-        self.ask(|reply| Request::Open { track_id, uid: uid.to_string(), sample_rate, reply })
+    /// Load `uid` under `id` — a track id for an instrument, an insert id for an effect —
+    /// returning the audio half for the engine and the plugin's name.
+    pub fn open(&self, id: Uuid, uid: &str, sample_rate: f64) -> Result<(PluginAudioUnit, String), String> {
+        self.ask(|reply| Request::Open { id, uid: uid.to_string(), sample_rate, reply })
             .unwrap_or_else(|| Err("plugin host is not running".into()))
     }
 
-    pub fn close(&self, track_id: Uuid) {
-        self.ask(|reply| Request::Close { track_id, reply });
+    pub fn close(&self, id: Uuid) {
+        self.ask(|reply| Request::Close { id, reply });
     }
 
-    pub fn params(&self, track_id: Uuid) -> Vec<ParamInfo> {
-        self.ask(|reply| Request::Params { track_id, reply }).unwrap_or_default()
+    pub fn params(&self, id: Uuid) -> Vec<ParamInfo> {
+        self.ask(|reply| Request::Params { id, reply }).unwrap_or_default()
     }
 
-    pub fn save_state(&self, track_id: Uuid) -> Option<Vec<u8>> {
-        self.ask(|reply| Request::SaveState { track_id, reply }).flatten()
+    pub fn save_state(&self, id: Uuid) -> Option<Vec<u8>> {
+        self.ask(|reply| Request::SaveState { id, reply }).flatten()
     }
 
-    pub fn load_state(&self, track_id: Uuid, state: Vec<u8>) -> Result<(), String> {
-        self.ask(|reply| Request::LoadState { track_id, state, reply })
+    pub fn load_state(&self, id: Uuid, state: Vec<u8>) -> Result<(), String> {
+        self.ask(|reply| Request::LoadState { id, state, reply })
             .unwrap_or_else(|| Err("plugin host is not running".into()))
     }
 }

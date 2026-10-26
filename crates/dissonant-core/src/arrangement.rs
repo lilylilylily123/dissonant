@@ -1,35 +1,35 @@
 //! Flattens the song's clips into one continuous timeline. A clip plays its pattern looped
-//! from `offset_beats` for `length_beats`, starting at `start_beat`; notes and chords that
+//! from `offset_ticks` for `length_ticks`, starting at `start_tick`; notes and chords that
 //! would run past the clip's end are cut there. Pure and testable; song playback and the
 //! song-mode playhead read from these.
 
 use crate::chord_track::ChordTrack;
-use crate::model::{ChordEvent, Clip, NoteEvent, SongPattern, MIN_NOTE_BEATS};
+use crate::model::{ChordEvent, Clip, NoteEvent, SongPattern, MIN_NOTE_TICKS};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct Arrangement;
 
 impl Arrangement {
-    pub fn total_length(clips: &[Clip]) -> f64 {
-        clips.iter().map(Clip::end_beat).fold(0.0, f64::max)
+    pub fn total_length(clips: &[Clip]) -> i64 {
+        clips.iter().map(Clip::end_tick).max().unwrap_or(0)
     }
 
     /// Visit every (clip, repetition index, pattern, timeline offset of that repetition).
     fn repetitions<'a>(
         patterns: &'a [SongPattern],
         clips: &'a [Clip],
-    ) -> impl Iterator<Item = (&'a Clip, u64, &'a SongPattern, f64)> + 'a {
+    ) -> impl Iterator<Item = (&'a Clip, u64, &'a SongPattern, i64)> + 'a {
         clips.iter().filter(|c| !c.muted).flat_map(move |clip| {
             let pattern = patterns.iter().find(|p| p.id == clip.pattern_id);
             let mut out = Vec::new();
             if let Some(p) = pattern {
-                if p.length_beats > 0.0 {
+                if p.length_ticks > 0 {
                     let mut rep = 0u64;
-                    let mut pos = -clip.offset_beats.rem_euclid(p.length_beats);
-                    while pos < clip.length_beats {
-                        out.push((clip, rep, p, clip.start_beat + pos));
-                        pos += p.length_beats;
+                    let mut pos = -clip.offset_ticks.rem_euclid(p.length_ticks);
+                    while pos < clip.length_ticks {
+                        out.push((clip, rep, p, clip.start_tick + pos));
+                        pos += p.length_ticks;
                         rep += 1;
                     }
                 }
@@ -47,27 +47,24 @@ impl Arrangement {
             patterns.iter().map(|p| (p.id, p.looped_notes(track_id))).collect();
         let mut result = Vec::new();
         for (clip, rep, pattern, base) in Self::repetitions(patterns, clips) {
-            let clip_end = clip.end_beat();
+            let clip_end = clip.end_tick();
             for note in looped.get(&pattern.id).map(Vec::as_slice).unwrap_or_default() {
-                let start = base + note.start_beat;
-                if start < clip.start_beat || start >= clip_end {
+                let start = base + note.start_tick;
+                if start < clip.start_tick || start >= clip_end {
                     continue;
                 }
-                let end = (start + note.length_beats).min(clip_end);
+                let end = (start + note.length_ticks).min(clip_end);
                 let mut salt = clip.id.as_bytes().to_vec();
                 salt.extend_from_slice(&rep.to_le_bytes());
                 result.push(NoteEvent {
                     id: Uuid::new_v5(&note.id, &salt),
-                    start_beat: start,
-                    length_beats: (end - start).max(MIN_NOTE_BEATS),
-                    pitch: note.pitch,
-                    velocity: note.velocity,
-                    intentional: note.intentional,
-                    muted: note.muted,
+                    start_tick: start,
+                    length_ticks: (end - start).max(MIN_NOTE_TICKS),
+                    ..note.clone()
                 });
             }
         }
-        result.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+        result.sort_by_key(|n| n.start_tick);
         result
     }
 
@@ -75,13 +72,13 @@ impl Arrangement {
         let looped: HashMap<Uuid, ChordTrack> = patterns.iter().map(|p| (p.id, p.looped_chords())).collect();
         let mut chords = Vec::new();
         for (clip, rep, pattern, base) in Self::repetitions(patterns, clips) {
-            let clip_end = clip.end_beat();
+            let clip_end = clip.end_tick();
             let source = looped.get(&pattern.id).map(ChordTrack::chords).unwrap_or_default();
             for chord in source {
-                let start = base + chord.start_beat;
-                let end = (start + chord.length_beats).min(clip_end);
+                let start = base + chord.start_tick;
+                let end = (start + chord.length_ticks).min(clip_end);
                 // A chord that started before the clip still counts from the clip's start.
-                let start = start.max(clip.start_beat);
+                let start = start.max(clip.start_tick);
                 if end <= start {
                     continue;
                 }
@@ -89,10 +86,12 @@ impl Arrangement {
                 salt.extend_from_slice(&rep.to_le_bytes());
                 chords.push(ChordEvent {
                     id: Uuid::new_v5(&chord.id, &salt),
-                    start_beat: start,
-                    length_beats: end - start,
+                    start_tick: start,
+                    length_ticks: end - start,
                     pitch_classes: chord.pitch_classes.clone(),
                     name: chord.name.clone(),
+                    legacy_start_beat: None,
+                    legacy_length_beats: None,
                 });
             }
         }
@@ -103,6 +102,9 @@ impl Arrangement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ticks::TICKS_PER_BEAT;
+
+    const BEAT: i64 = TICKS_PER_BEAT;
 
     fn track() -> Uuid {
         Uuid::from_u128(1)
@@ -110,54 +112,58 @@ mod tests {
 
     fn pattern_a() -> SongPattern {
         let mut p = SongPattern::new("A");
-        p.chords = ChordTrack::new(vec![ChordEvent::new(0.0, 8.0, vec![0, 4, 7], Some("C".into()))]);
-        p.notes_by_track.insert(track(), vec![NoteEvent::new(2.0, 1.0, 60)]);
+        p.chords = ChordTrack::new(vec![ChordEvent::new(0, 8 * BEAT, vec![0, 4, 7], Some("C".into()))]);
+        p.notes_by_track.insert(track(), vec![NoteEvent::new(2 * BEAT, BEAT, 60)]);
         p
     }
     fn pattern_b() -> SongPattern {
         let mut p = SongPattern::new("B");
-        p.chords = ChordTrack::new(vec![ChordEvent::new(0.0, 8.0, vec![5, 9, 0], Some("F".into()))]);
-        p.notes_by_track.insert(track(), vec![NoteEvent::new(4.0, 1.0, 64)]);
+        p.chords = ChordTrack::new(vec![ChordEvent::new(0, 8 * BEAT, vec![5, 9, 0], Some("F".into()))]);
+        p.notes_by_track.insert(track(), vec![NoteEvent::new(4 * BEAT, BEAT, 64)]);
         p
     }
 
     #[test]
     fn total_length_is_the_last_clip_end() {
         let (a, b) = (pattern_a(), pattern_b());
-        let clips = vec![Clip::new(a.id, 0.0, 16.0), Clip::new(b.id, 16.0, 16.0), Clip::new(a.id, 40.0, 8.0)];
-        assert_eq!(Arrangement::total_length(&clips), 48.0);
-        assert_eq!(Arrangement::total_length(&[]), 0.0);
+        let clips = vec![
+            Clip::new(a.id, 0, 16 * BEAT),
+            Clip::new(b.id, 16 * BEAT, 16 * BEAT),
+            Clip::new(a.id, 40 * BEAT, 8 * BEAT),
+        ];
+        assert_eq!(Arrangement::total_length(&clips), 48 * BEAT);
+        assert_eq!(Arrangement::total_length(&[]), 0);
     }
 
     #[test]
     fn notes_land_at_clip_positions() {
         let (a, b) = (pattern_a(), pattern_b());
-        let clips = vec![Clip::new(a.id, 0.0, 16.0), Clip::new(b.id, 16.0, 16.0)];
+        let clips = vec![Clip::new(a.id, 0, 16 * BEAT), Clip::new(b.id, 16 * BEAT, 16 * BEAT)];
         let notes = Arrangement::flattened_notes(&track(), &[a.clone(), b.clone()], &clips);
-        assert_eq!(notes.iter().map(|n| n.start_beat).collect::<Vec<_>>(), vec![2.0, 20.0]);
+        assert_eq!(notes.iter().map(|n| n.start_tick).collect::<Vec<_>>(), vec![2 * BEAT, 20 * BEAT]);
     }
 
     #[test]
     fn a_long_clip_loops_its_pattern_and_a_short_one_trims() {
         let a = pattern_a();
-        let long = vec![Clip::new(a.id, 0.0, 40.0)];
+        let long = vec![Clip::new(a.id, 0, 40 * BEAT)];
         let notes = Arrangement::flattened_notes(&track(), std::slice::from_ref(&a), &long);
-        assert_eq!(notes.iter().map(|n| n.start_beat).collect::<Vec<_>>(), vec![2.0, 18.0, 34.0]);
-        let short = vec![Clip::new(a.id, 0.0, 2.5)];
+        assert_eq!(notes.iter().map(|n| n.start_tick).collect::<Vec<_>>(), vec![2 * BEAT, 18 * BEAT, 34 * BEAT]);
+        let short = vec![Clip::new(a.id, 0, 5 * BEAT / 2)];
         let notes = Arrangement::flattened_notes(&track(), std::slice::from_ref(&a), &short);
         assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].length_beats, 0.5, "cut at the clip end");
-        let none = vec![Clip::new(a.id, 0.0, 1.0)];
+        assert_eq!(notes[0].length_ticks, BEAT / 2, "cut at the clip end");
+        let none = vec![Clip::new(a.id, 0, BEAT)];
         assert!(Arrangement::flattened_notes(&track(), std::slice::from_ref(&a), &none).is_empty());
     }
 
     #[test]
     fn offset_starts_mid_pattern_and_muted_clips_are_silent() {
         let a = pattern_a();
-        let mut c = Clip::new(a.id, 0.0, 16.0);
-        c.offset_beats = 2.0; // pattern beat 2 lands at clip start
+        let mut c = Clip::new(a.id, 0, 16 * BEAT);
+        c.offset_ticks = 2 * BEAT; // pattern tick 2·BEAT lands at clip start
         let notes = Arrangement::flattened_notes(&track(), std::slice::from_ref(&a), &[c.clone()]);
-        assert_eq!(notes.iter().map(|n| n.start_beat).collect::<Vec<_>>(), vec![0.0]);
+        assert_eq!(notes.iter().map(|n| n.start_tick).collect::<Vec<_>>(), vec![0]);
         c.muted = true;
         assert!(Arrangement::flattened_notes(&track(), std::slice::from_ref(&a), &[c]).is_empty());
     }
@@ -165,13 +171,13 @@ mod tests {
     #[test]
     fn chords_follow_clips_and_repeats_get_distinct_stable_ids() {
         let (a, b) = (pattern_a(), pattern_b());
-        let clips = vec![Clip::new(a.id, 0.0, 16.0), Clip::new(b.id, 16.0, 16.0)];
+        let clips = vec![Clip::new(a.id, 0, 16 * BEAT), Clip::new(b.id, 16 * BEAT, 16 * BEAT)];
         let chords = Arrangement::flattened_chords(&[a.clone(), b.clone()], &clips);
-        assert_eq!(chords.chord_at(0.0).unwrap().name.as_deref(), Some("C"));
-        assert_eq!(chords.chord_at(16.0).unwrap().name.as_deref(), Some("F"));
-        assert!(chords.chord_at(10.0).is_none(), "the 8-beat chord does not cover beat 10");
+        assert_eq!(chords.chord_at(0).unwrap().name.as_deref(), Some("C"));
+        assert_eq!(chords.chord_at(16 * BEAT).unwrap().name.as_deref(), Some("F"));
+        assert!(chords.chord_at(10 * BEAT).is_none(), "the 8-beat chord does not cover beat 10");
 
-        let twice = vec![Clip::new(a.id, 0.0, 32.0)];
+        let twice = vec![Clip::new(a.id, 0, 32 * BEAT)];
         let notes = Arrangement::flattened_notes(&track(), std::slice::from_ref(&a), &twice);
         assert_eq!(notes.len(), 2);
         assert_ne!(notes[0].id, notes[1].id);

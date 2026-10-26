@@ -119,6 +119,13 @@ function paramText(p: ParamInfo, v: number): string {
 const INLINE_PARAM_LIMIT = 8;
 
 /**
+ * Whose controls these are: a track's instrument, or one effect in an insert chain. Exactly
+ * one of the two ids is given; the pair of backend commands behind them is the only
+ * difference between the two cases.
+ */
+export type ParamTarget = { trackId: string; insertId?: undefined } | { insertId: string; trackId?: undefined };
+
+/**
  * The hosted plugin's own controls. Values come from the backend on every change of plugin or
  * saved state — including undo — so the knobs always show what the plugin actually holds.
  * Dragging writes straight through; releasing commits, which is what makes one undo step.
@@ -126,19 +133,29 @@ const INLINE_PARAM_LIMIT = 8;
  * A plugin with more controls than fit here is summarised instead, with its own window one
  * click away; cramming a hundred knobs into a 300px column is not showing them.
  */
-export function PluginParams({ trackId, uid, state }: { trackId: string; uid: string; state: string | null }) {
+export function PluginParams(target: ParamTarget & { uid: string; state: string | null }) {
+  const { uid, state } = target;
   const pluginParams = useStore((s) => s.pluginParams);
   const setPluginParam = useStore((s) => s.setPluginParam);
+  const insertParams = useStore((s) => s.insertParams);
+  const setInsertParam = useStore((s) => s.setInsertParam);
   const openPluginWindow = useStore((s) => s.openPluginWindow);
   const installed = useStore((s) => s.plugins.some((p) => p.uid === uid));
   const [params, setParams] = useState<ParamInfo[]>([]);
   // The knob's commit callback carries no value, so the last dragged one is kept beside it.
   const dragged = useRef(new Map<number, number>());
+  // The one thing the two cases disagree about, and what a change of owner is recognised by.
+  const owner = target.insertId ?? target.trackId;
+  const read = () => (target.insertId !== undefined ? insertParams(target.insertId) : pluginParams(target.trackId));
+  const write = (paramId: number, value: number, commit: boolean) =>
+    target.insertId !== undefined
+      ? setInsertParam(target.insertId, paramId, value, commit)
+      : setPluginParam(target.trackId, paramId, value, commit);
 
   useEffect(() => {
     if (!installed) return;
     let live = true;
-    void pluginParams(trackId).then((ps) => {
+    void read().then((ps) => {
       if (!live) return;
       setParams(ps);
       dragged.current = new Map(ps.map((p) => [p.id, p.value]));
@@ -146,17 +163,20 @@ export function PluginParams({ trackId, uid, state }: { trackId: string; uid: st
     return () => {
       live = false;
     };
-  }, [pluginParams, trackId, uid, state, installed]);
+  }, [pluginParams, insertParams, owner, uid, state, installed]);
 
   // A plugin named by the project but absent from this computer has nothing loaded behind it,
   // so there are no controls to draw — the picker says why instead.
   if (!installed) return null;
 
-  const openEditor = (
-    <button className="solid" onClick={() => void openPluginWindow(trackId)}>
-      open editor
-    </button>
-  );
+  // An insert has no window of its own: the chain row is where it lives.
+  const trackId = target.trackId;
+  const openEditor =
+    trackId === undefined ? null : (
+      <button className="solid" onClick={() => void openPluginWindow(trackId)}>
+        open editor
+      </button>
+    );
   if (params.length === 0) {
     return <div className="help">this plugin publishes no controls of its own — it is played, not dialled.</div>;
   }
@@ -164,7 +184,7 @@ export function PluginParams({ trackId, uid, state }: { trackId: string; uid: st
     return (
       <div className="pluginparams">
         <div className="help">{params.length} controls — too many for this column</div>
-        <div className="row" style={{ gap: 4 }}>{openEditor}</div>
+        {openEditor && <div className="row" style={{ gap: 4 }}>{openEditor}</div>}
       </div>
     );
   }
@@ -174,7 +194,7 @@ export function PluginParams({ trackId, uid, state }: { trackId: string; uid: st
     const v = p.isStepped ? Math.round(raw) : raw;
     dragged.current.set(p.id, v);
     setParams((ps) => ps.map((x) => (x.id === p.id ? { ...x, value: v } : x)));
-    void setPluginParam(trackId, p.id, v, false);
+    void write(p.id, v, false);
   };
 
   const modules = [...new Set(params.map((p) => p.module))];
@@ -194,13 +214,13 @@ export function PluginParams({ trackId, uid, state }: { trackId: string; uid: st
                   display={paramText(p, p.value)}
                   defaultValue={curveOf(p).to(p.default)}
                   onChange={(norm) => drag(p, norm)}
-                  onCommit={() => void setPluginParam(trackId, p.id, dragged.current.get(p.id) ?? p.value, true)}
+                  onCommit={() => void write(p.id, dragged.current.get(p.id) ?? p.value, true)}
                 />
               ))}
           </div>
         </div>
       ))}
-      <div className="row" style={{ gap: 4 }}>{openEditor}</div>
+      {openEditor && <div className="row" style={{ gap: 4 }}>{openEditor}</div>}
     </div>
   );
 }

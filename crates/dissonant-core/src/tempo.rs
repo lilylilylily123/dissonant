@@ -1,6 +1,12 @@
-//! Beats ⇄ seconds ⇄ samples, for a constant tempo ([`Tempo`]) and for a song with tempo
+//! Ticks ⇄ seconds ⇄ samples, for a constant tempo ([`Tempo`]) and for a song with tempo
 //! changes ([`TempoMap`]).
+//!
+//! Musical time is ticks everywhere else, but the integration here is real-valued — a ramp
+//! spends a non-integral number of seconds in every tick — so the map keeps working in f64
+//! beats internally and converts at its edges. Positions arrive as `f64` ticks because the
+//! playhead sits between ticks within a block.
 
+use crate::ticks::{beats_to_ticks, ticks_to_beats, TICKS_PER_BEAT};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -31,31 +37,44 @@ impl Tempo {
         seconds / self.seconds_per_beat()
     }
 
-    pub fn samples_per_beat(&self, sample_rate: f64) -> f64 {
-        self.seconds_per_beat() * sample_rate
+    pub fn samples_per_tick(&self, sample_rate: f64) -> f64 {
+        self.seconds_per_beat() * sample_rate / TICKS_PER_BEAT as f64
     }
 
-    pub fn beats_for_samples(&self, samples: f64, sample_rate: f64) -> f64 {
-        samples / self.samples_per_beat(sample_rate)
+    pub fn ticks_for_samples(&self, samples: f64, sample_rate: f64) -> f64 {
+        samples / self.samples_per_tick(sample_rate)
     }
 }
 
 /// A tempo change on the song timeline. With `ramp`, the tempo glides linearly from the
-/// previous point's value to this one over the beats in between; otherwise it jumps here.
+/// previous point's value to this one over the ticks in between; otherwise it jumps here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TempoPoint {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
-    pub beat: f64,
+    #[serde(default)]
+    pub tick: i64,
     pub bpm: f64,
     #[serde(default)]
     pub ramp: bool,
+    /// Schema ≤ 8 only; folded into `tick` by [`crate::model::ProjectModel::normalized`].
+    #[serde(default, rename = "beat", skip_serializing)]
+    pub legacy_beat: Option<f64>,
 }
 
 impl TempoPoint {
-    pub fn new(beat: f64, bpm: f64, ramp: bool) -> Self {
-        TempoPoint { id: Uuid::new_v4(), beat, bpm, ramp }
+    pub fn new(tick: i64, bpm: f64, ramp: bool) -> Self {
+        TempoPoint { id: Uuid::new_v4(), tick, bpm, ramp, legacy_beat: None }
+    }
+
+    /// The beat field from an older file folded into `tick`.
+    pub(crate) fn migrated(&mut self) {
+        if let Some(beat) = self.legacy_beat.take() {
+            if self.tick == 0 {
+                self.tick = beats_to_ticks(beat);
+            }
+        }
     }
 }
 
@@ -70,7 +89,7 @@ struct Segment {
     ramp_to: Option<(f64, f64)>,
 }
 
-/// Beats ⇄ seconds over a song with tempo changes. The base tempo holds from beat 0 until
+/// Ticks ⇄ seconds over a song with tempo changes. The base tempo holds from tick 0 until
 /// the first point. Linear-in-bpm ramps integrate exactly (`60·Δb/Δbpm · ln(bpm1/bpm0)`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TempoMap {
@@ -90,16 +109,16 @@ impl TempoMap {
 
     pub fn new(base_bpm: f64, points: &[TempoPoint]) -> Self {
         let clamp = |b: f64| if b.is_finite() { b.clamp(Tempo::MIN_BPM, Tempo::MAX_BPM) } else { 120.0 };
-        let mut pts: Vec<&TempoPoint> = points.iter().filter(|p| p.beat.is_finite() && p.beat >= 0.0).collect();
-        pts.sort_by(|a, b| a.beat.total_cmp(&b.beat));
-        pts.dedup_by(|a, b| a.beat == b.beat);
+        let mut pts: Vec<&TempoPoint> = points.iter().filter(|p| p.tick >= 0).collect();
+        pts.sort_by_key(|p| p.tick);
+        pts.dedup_by(|a, b| a.tick == b.tick);
         // Anchors: (beat, bpm, ramp_into_this_point)
         let mut anchors: Vec<(f64, f64, bool)> = vec![(0.0, clamp(base_bpm), false)];
         for p in pts {
-            if p.beat == 0.0 {
+            if p.tick == 0 {
                 anchors[0] = (0.0, clamp(p.bpm), false);
             } else {
-                anchors.push((p.beat, clamp(p.bpm), p.ramp));
+                anchors.push((ticks_to_beats(p.tick), clamp(p.bpm), p.ramp));
             }
         }
         let mut segments = Vec::with_capacity(anchors.len());
@@ -133,8 +152,9 @@ impl TempoMap {
         &self.segments[i]
     }
 
-    /// Tempo in force at `beat`.
-    pub fn bpm_at(&self, beat: f64) -> f64 {
+    /// Tempo in force at `tick`.
+    pub fn bpm_at_tick(&self, tick: f64) -> f64 {
+        let beat = tick / TICKS_PER_BEAT as f64;
         let s = self.segment_at_beat(beat);
         match s.ramp_to {
             Some((eb, ebpm)) if eb > s.beat => {
@@ -145,9 +165,10 @@ impl TempoMap {
         }
     }
 
-    /// Seconds from beat 0 to `beat`.
-    pub fn seconds_at(&self, beat: f64) -> f64 {
-        let s = self.segment_at_beat(beat.max(0.0));
+    /// Seconds from tick 0 to `tick`.
+    pub fn seconds_at_tick(&self, tick: f64) -> f64 {
+        let beat = (tick / TICKS_PER_BEAT as f64).max(0.0);
+        let s = self.segment_at_beat(beat);
         let end_bpm = match s.ramp_to {
             Some((eb, ebpm)) if eb > s.beat => {
                 let t = ((beat - s.beat) / (eb - s.beat)).clamp(0.0, 1.0);
@@ -155,14 +176,14 @@ impl TempoMap {
             }
             _ => s.bpm,
         };
-        s.seconds + segment_seconds(s.beat, s.bpm, beat.max(0.0), end_bpm)
+        s.seconds + segment_seconds(s.beat, s.bpm, beat, end_bpm)
     }
 
-    /// The beat reached after `seconds` from beat 0.
-    pub fn beat_at(&self, seconds: f64) -> f64 {
+    /// The tick reached after `seconds` from tick 0.
+    pub fn tick_at_seconds(&self, seconds: f64) -> f64 {
         let s = self.segment_at_seconds(seconds.max(0.0));
         let dt = seconds.max(0.0) - s.seconds;
-        match s.ramp_to {
+        let beat = match s.ramp_to {
             Some((eb, ebpm)) if eb > s.beat && (ebpm - s.bpm).abs() > 1e-9 => {
                 // bpm(b) grows linearly in b; seconds(b) = 60·len/Δbpm · ln(bpm(b)/bpm0).
                 let len = eb - s.beat;
@@ -172,11 +193,12 @@ impl TempoMap {
                 b.min(eb).max(s.beat) + if b > eb { (dt - segment_seconds(s.beat, s.bpm, eb, ebpm)) * ebpm / 60.0 } else { 0.0 }
             }
             _ => s.beat + dt * s.bpm / 60.0,
-        }
+        };
+        beat * TICKS_PER_BEAT as f64
     }
 
-    pub fn seconds_for_span(&self, from_beat: f64, to_beat: f64) -> f64 {
-        self.seconds_at(to_beat) - self.seconds_at(from_beat)
+    pub fn seconds_for_span(&self, from_tick: f64, to_tick: f64) -> f64 {
+        self.seconds_at_tick(to_tick) - self.seconds_at_tick(from_tick)
     }
 }
 
@@ -193,18 +215,20 @@ fn segment_seconds(b0: f64, bpm0: f64, b1: f64, bpm1: f64) -> f64 {
     }
 }
 
-/// Swing as a piecewise-linear warp of the beat line. Beats are grouped in pairs of `grid`
-/// (0.5 = eighth-note swing); the second half of each pair is pushed later so that it lands at
-/// `2·grid·swing/100` instead of `grid`. 50 % is straight, 66.7 % the triplet feel, 75 % a hard
-/// shuffle. Monotonic, so note order (and the lengths of notes that straddle a pair) survives.
-pub fn swing_warp(beat: f64, swing_percent: f64, grid: f64) -> f64 {
-    if grid <= 0.0 || !(50.0..=75.0).contains(&swing_percent) || swing_percent == 50.0 {
-        return beat;
+/// Swing as a piecewise-linear warp of the tick line. Ticks are grouped in pairs of
+/// `grid_ticks` (480 = eighth-note swing); the second half of each pair is pushed later so that
+/// it lands at `2·grid·swing/100` instead of `grid`. 50 % is straight, 66.7 % the triplet feel,
+/// 75 % a hard shuffle. Monotonic, so note order (and the lengths of notes that straddle a
+/// pair) survives.
+pub fn swing_warp_ticks(tick: f64, swing_percent: f64, grid_ticks: i64) -> f64 {
+    if grid_ticks <= 0 || !(50.0..=75.0).contains(&swing_percent) || swing_percent == 50.0 {
+        return tick;
     }
+    let grid = grid_ticks as f64;
     let pair = 2.0 * grid;
     let late = pair * swing_percent / 100.0; // where the off-subdivision ends up
-    let base = (beat / pair).floor() * pair;
-    let u = beat - base;
+    let base = (tick / pair).floor() * pair;
+    let u = tick - base;
     let warped = if u <= grid {
         u * (late / grid)
     } else {
@@ -224,64 +248,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn beats_and_seconds() {
+    fn beats_seconds_and_samples() {
         let t = Tempo::new(120.0);
         assert!((t.seconds_for_beats(1.0) - 0.5).abs() < 1e-12);
         assert!((t.beats_for_seconds(2.0) - 4.0).abs() < 1e-12);
-        assert!((t.samples_per_beat(44_100.0) - 22_050.0).abs() < 1e-9);
+        assert!((t.samples_per_tick(44_100.0) - 22_050.0 / TICKS_PER_BEAT as f64).abs() < 1e-9);
+        assert!((t.ticks_for_samples(22_050.0, 44_100.0) - TICKS_PER_BEAT as f64).abs() < 1e-9);
     }
 
     #[test]
     fn swing_warp_moves_offbeats_and_keeps_downbeats() {
+        let eighth = TICKS_PER_BEAT / 2;
+        let sixteenth = TICKS_PER_BEAT / 4;
         // Straight: identity.
-        assert_eq!(swing_warp(0.5, 50.0, 0.5), 0.5);
+        assert_eq!(swing_warp_ticks(480.0, 50.0, eighth), 480.0);
         // Triplet feel on eighths: the "and" lands at 2/3 of the beat.
-        assert!((swing_warp(0.5, 200.0 / 3.0, 0.5) - 2.0 / 3.0).abs() < 1e-9);
+        assert!((swing_warp_ticks(480.0, 200.0 / 3.0, eighth) - 640.0).abs() < 1e-9);
         // Downbeats never move.
-        for b in [0.0, 1.0, 2.0, 7.0] {
-            assert!((swing_warp(b, 66.0, 0.5) - b).abs() < 1e-12);
+        for b in [0, 1, 2, 7] {
+            let tick = (b * TICKS_PER_BEAT) as f64;
+            assert!((swing_warp_ticks(tick, 66.0, eighth) - tick).abs() < 1e-12);
         }
         // Hard shuffle on sixteenths: the second sixteenth of each eighth lands at 3/8 of the beat.
-        assert!((swing_warp(0.25, 75.0, 0.25) - 0.375).abs() < 1e-12);
+        assert!((swing_warp_ticks(240.0, 75.0, sixteenth) - 360.0).abs() < 1e-12);
         // Monotonic.
         let mut last = -1.0;
         for i in 0..400 {
-            let w = swing_warp(i as f64 / 100.0, 70.0, 0.5);
+            let w = swing_warp_ticks((i * 10) as f64, 70.0, eighth);
             assert!(w >= last);
             last = w;
         }
         // Out-of-range swing is ignored.
-        assert_eq!(swing_warp(0.5, 90.0, 0.5), 0.5);
+        assert_eq!(swing_warp_ticks(480.0, 90.0, eighth), 480.0);
     }
 
     #[test]
     fn tempo_map_steps_and_ramps() {
+        let beat = |b: f64| b * TICKS_PER_BEAT as f64;
         let constant = TempoMap::constant(120.0);
         assert!(constant.is_constant());
-        assert!((constant.seconds_at(4.0) - 2.0).abs() < 1e-12);
-        assert!((constant.beat_at(2.0) - 4.0).abs() < 1e-12);
+        assert!((constant.seconds_at_tick(beat(4.0)) - 2.0).abs() < 1e-12);
+        assert!((constant.tick_at_seconds(2.0) - beat(4.0)).abs() < 1e-9);
 
         // 120 for 4 beats, then a jump to 60.
-        let step = TempoMap::new(120.0, &[TempoPoint::new(4.0, 60.0, false)]);
-        assert_eq!(step.bpm_at(3.999), 120.0);
-        assert_eq!(step.bpm_at(4.0), 60.0);
-        assert!((step.seconds_at(8.0) - (2.0 + 4.0)).abs() < 1e-12);
-        assert!((step.beat_at(5.0) - 7.0).abs() < 1e-12);
+        let step = TempoMap::new(120.0, &[TempoPoint::new(4 * TICKS_PER_BEAT, 60.0, false)]);
+        assert_eq!(step.bpm_at_tick(beat(4.0) - 1.0), 120.0);
+        assert_eq!(step.bpm_at_tick(beat(4.0)), 60.0);
+        assert!((step.seconds_at_tick(beat(8.0)) - (2.0 + 4.0)).abs() < 1e-12);
+        assert!((step.tick_at_seconds(5.0) - beat(7.0)).abs() < 1e-9);
 
         // 120 → 60 ramped over 4 beats: exact integral 60·4/(−60)·ln(0.5) = 4·ln 2 s.
-        let ramp = TempoMap::new(120.0, &[TempoPoint::new(4.0, 60.0, true)]);
-        assert!((ramp.bpm_at(2.0) - 90.0).abs() < 1e-12);
+        let ramp = TempoMap::new(120.0, &[TempoPoint::new(4 * TICKS_PER_BEAT, 60.0, true)]);
+        assert!((ramp.bpm_at_tick(beat(2.0)) - 90.0).abs() < 1e-12);
         let expected = 4.0 * std::f64::consts::LN_2;
-        assert!((ramp.seconds_at(4.0) - expected).abs() < 1e-9);
+        assert!((ramp.seconds_at_tick(beat(4.0)) - expected).abs() < 1e-9);
         // Inverse round-trips inside and past the ramp.
         for b in [0.0, 1.0, 2.5, 4.0, 6.0, 9.5] {
-            let t = ramp.seconds_at(b);
-            assert!((ramp.beat_at(t) - b).abs() < 1e-7, "beat {b} → {t} s → {}", ramp.beat_at(t));
+            let t = ramp.seconds_at_tick(beat(b));
+            assert!((ramp.tick_at_seconds(t) - beat(b)).abs() < 1e-4, "tick {} → {t} s", beat(b));
         }
         // Unsorted and duplicate points are tolerated; a point at 0 replaces the base.
-        let messy = TempoMap::new(100.0, &[TempoPoint::new(8.0, 140.0, false), TempoPoint::new(0.0, 90.0, false), TempoPoint::new(8.0, 150.0, false)]);
+        let messy = TempoMap::new(
+            100.0,
+            &[
+                TempoPoint::new(8 * TICKS_PER_BEAT, 140.0, false),
+                TempoPoint::new(0, 90.0, false),
+                TempoPoint::new(8 * TICKS_PER_BEAT, 150.0, false),
+            ],
+        );
         assert_eq!(messy.base_bpm(), 90.0);
-        assert_eq!(messy.bpm_at(9.0), 140.0);
+        assert_eq!(messy.bpm_at_tick(beat(9.0)), 140.0);
     }
 
     #[test]
