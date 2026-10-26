@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { GRID_OPTIONS, useStore } from "../store";
 import { TIER_PRESETS, TIME_SIGNATURES, type Settings as SettingsT } from "../types";
+import { keys } from "../platform";
+import { UI_SCALE_NATIVE } from "../uiScale";
 
 type Tab = "audio" | "midi" | "editing" | "export" | "appearance";
 const TABS: [Tab, string][] = [
@@ -251,7 +253,7 @@ function EditingTab() {
       <Row label="audition on place" hint="sound a note when it is placed or dragged to a new pitch">
         <Toggle on={e.auditionOnPlace} onChange={(v) => upd({ auditionOnPlace: v })} />
       </Row>
-      <Row label="⌥ while dragging" hint="no snap is the usual DAW convention; paint is the original dissonant mapping (⌥-drag on empty paints notes)">
+      <Row label={keys("⌥ while dragging")} hint={keys("no snap is the usual DAW convention; paint is the original dissonant mapping (⌥-drag on empty paints notes)")}>
         <Seg value={e.altKey} options={[["noSnap", "no snap"], ["paint", "paint"]]} onChange={(v) => upd({ altKey: v })} />
       </Row>
       <Row label="snap to chord changes" hint="a note placed within a grid step of a chord boundary lands on it">
@@ -262,8 +264,11 @@ function EditingTab() {
       </Row>
       <div className="sdiv" />
       <div className="scap">new projects</div>
-      <Row label="start from">
-        <Seg value={e.newProject} options={[["starter", "starter (I–IV–V–vi + drums)"], ["empty", "empty"]]} onChange={(v) => upd({ newProject: v })} />
+      <Row label="show on launch" hint="the new-project screen: vibes, starter, recent files">
+        <Toggle on={e.showWelcome} onChange={(v) => upd({ showWelcome: v })} />
+      </Row>
+      <Row label="start from" hint={keys("what ⌘N makes")}>
+        <Seg value={e.newProject} options={[["starter", "starter (I–IV–V–vi, melody + drums)"], ["empty", "empty"]]} onChange={(v) => upd({ newProject: v })} />
       </Row>
       <Row label="tempo">
         <Num value={e.defaultTempo} min={20} max={300} onCommit={(v) => upd({ defaultTempo: v })} />
@@ -284,6 +289,10 @@ function EditingTab() {
       </Row>
       <Row label="pattern length">
         <Seg value={e.defaultPatternBars} options={[[1, "1"], [2, "2"], [4, "4"], [8, "8"]]} onChange={(v) => upd({ defaultPatternBars: v })} />
+        <span className="k">bars</span>
+      </Row>
+      <Row label="song length" hint="where a new song ends; change it per song in SETUP">
+        <Seg value={e.defaultSongBars} options={[[8, "8"], [16, "16"], [32, "32"], [64, "64"]]} onChange={(v) => upd({ defaultSongBars: v })} />
         <span className="k">bars</span>
       </Row>
     </>
@@ -327,6 +336,7 @@ function AppearanceTab() {
     <>
       <Row label="ui scale">
         <Seg value={a.uiScale} options={[[0.9, "90%"], [1, "100%"], [1.1, "110%"], [1.25, "125%"], [1.5, "150%"]]} onChange={(v) => upd({ uiScale: v })} />
+        {!UI_SCALE_NATIVE && <span className="k" style={{ whiteSpace: "nowrap" }}>browser: use its zoom</span>}
       </Row>
       <Row label="roll row height">
         <Seg value={a.rowHeight} options={[[14, "14"], [18, "18"], [22, "22"]]} onChange={(v) => upd({ rowHeight: v })} />

@@ -10,6 +10,7 @@ import {
   resizeNotes,
   snapFloor,
   snapRound,
+  tileGhost,
 } from "./noteEditing";
 import { TICKS_PER_BEAT, type NoteEvent } from "./types";
 
@@ -124,5 +125,26 @@ describe("duplicate / paste", () => {
     const { notes: out } = pasteNotes([], clip, 7680);
     expect(out.map((x) => x.startTick).sort()).toEqual([7680, 8640]);
     expect(out.every((x) => x.id !== "x" && x.id !== "y")).toBe(true);
+  });
+});
+
+describe("tileGhost", () => {
+  it("loops a shorter ghost across the pattern and cuts at the end", () => {
+    const B = TICKS_PER_BEAT;
+    const ghost = [n("a", 0, B, 60), n("b", 3 * B, 2 * B, 62)];
+    const out = tileGhost(ghost, 4 * B, 10 * B);
+    expect(out.map((x) => [x.startTick / B, x.lengthTicks / B])).toEqual([
+      [0, 1],
+      [3, 2],
+      [4, 1],
+      [7, 2],
+      [8, 1],
+    ]);
+    expect(new Set(out.map((x) => x.id)).size).toBe(out.length);
+  });
+  it("leaves muted notes and notes past the ghost's own end out", () => {
+    const B = TICKS_PER_BEAT;
+    const ghost = [n("a", 0, B, 60), { ...n("m", B, B, 61), muted: true }, n("late", 5 * B, B, 64)];
+    expect(tileGhost(ghost, 4 * B, 4 * B).map((x) => x.pitch)).toEqual([60]);
   });
 });

@@ -21,7 +21,6 @@ pub struct RenderOptions {
     pub sample_rate: u32,
     /// Extra seconds after the last beat so releases and reverb tails aren't cut.
     pub tail_seconds: f64,
-    pub hear_chords: bool,
     pub master: MasterSettings,
     /// 16 or 24 (integer PCM) or 32 (float).
     pub bit_depth: u16,
@@ -41,7 +40,6 @@ impl Default for RenderOptions {
         RenderOptions {
             sample_rate: 44_100,
             tail_seconds: 1.5,
-            hear_chords: false,
             master: MasterSettings::default(),
             bit_depth: 16,
             normalize_db: None,
@@ -52,8 +50,12 @@ impl Default for RenderOptions {
     }
 }
 
-/// Render `sequence` once (no looping) plus a tail, as interleaved stereo f32.
-pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Result<Vec<f32>, RenderError> {
+/// Render `sequence` once (no looping) plus a tail, as interleaved stereo f32. The chord bed
+/// is a monitor for writing, never part of the song, so a render never includes it.
+pub fn render_to_buffer(
+    sequence: Arc<Sequence>,
+    options: &RenderOptions,
+) -> Result<Vec<f32>, RenderError> {
     if sequence.length_ticks <= 0 {
         return Err(RenderError::Empty);
     }
@@ -62,11 +64,13 @@ pub fn render_to_buffer(sequence: Arc<Sequence>, options: &RenderOptions) -> Res
     let mut engine = Engine::new(sr, Arc::new(Shared::default()), &options.master);
     // Looping stays on while there are repetitions left; the engine wraps at the sequence end.
     engine.handle(EngineCommand::SetLooping(loops > 1));
-    engine.handle(EngineCommand::SetHearChords(options.hear_chords));
+    engine.handle(EngineCommand::SetHearChords(false));
     if let Some(pool) = &options.audio_pool {
         engine.handle(EngineCommand::SetAudioPool(Arc::clone(pool)));
     }
-    let loop_secs = sequence.tempo_map.seconds_at_tick(sequence.length_ticks as f64);
+    let loop_secs = sequence
+        .tempo_map
+        .seconds_at_tick(sequence.length_ticks as f64);
     let seconds = loop_secs * loops as f64 + options.tail_seconds;
     engine.handle(EngineCommand::SetSequence(sequence));
     engine.handle(EngineCommand::Play);
@@ -105,7 +109,11 @@ pub fn normalize(samples: &mut [f32], target_db: f32) {
 }
 
 /// Render to a stereo WAV file at the options' bit depth.
-pub fn render_wav(sequence: Arc<Sequence>, path: &Path, options: &RenderOptions) -> Result<(), RenderError> {
+pub fn render_wav(
+    sequence: Arc<Sequence>,
+    path: &Path,
+    options: &RenderOptions,
+) -> Result<(), RenderError> {
     let mut samples = render_to_buffer(sequence, options)?;
     if let Some(db) = options.normalize_db {
         normalize(&mut samples, db);
@@ -124,7 +132,11 @@ pub fn write_wav(path: &Path, samples: &[f32], options: &RenderOptions) -> Resul
         channels: 2,
         sample_rate: options.sample_rate,
         bits_per_sample: depth,
-        sample_format: if depth == 32 { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
+        sample_format: if depth == 32 {
+            hound::SampleFormat::Float
+        } else {
+            hound::SampleFormat::Int
+        },
     };
     let mut writer = hound::WavWriter::create(path, spec)?;
     match depth {
@@ -150,8 +162,14 @@ pub fn write_wav(path: &Path, samples: &[f32], options: &RenderOptions) -> Resul
             };
             let scale = i16::MAX as f32;
             for &s in samples {
-                let d = if options.dither { uniform() + uniform() } else { 0.0 };
-                let v = (s.clamp(-1.0, 1.0) * scale + d).round().clamp(i16::MIN as f32, i16::MAX as f32);
+                let d = if options.dither {
+                    uniform() + uniform()
+                } else {
+                    0.0
+                };
+                let v = (s.clamp(-1.0, 1.0) * scale + d)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32);
                 writer.write_sample(v as i16)?;
             }
         }
@@ -168,10 +186,10 @@ mod tests {
     #[test]
     fn renders_a_wav_with_the_expected_length() {
         let mut model = ProjectModel::starter();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = 4 * TICKS_PER_BEAT;
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0, TICKS_PER_BEAT, 60)]);
-        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        model.patterns[0].notes = vec![NoteEvent::new(0, TICKS_PER_BEAT, 60)];
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap());
         let dir = std::env::temp_dir().join(format!("dissonant-render-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.wav");
@@ -183,7 +201,11 @@ mod tests {
         let reader = hound::WavReader::open(&path).unwrap();
         // 4 beats @120 = 2 s + 0.5 s tail = 2.5 s → 110250 frames.
         assert_eq!(reader.duration(), 110_250);
-        let peak = reader.into_samples::<i16>().map(|s| s.unwrap().abs()).max().unwrap();
+        let peak = reader
+            .into_samples::<i16>()
+            .map(|s| s.unwrap().abs())
+            .max()
+            .unwrap();
         assert!(peak > 1000);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -191,19 +213,27 @@ mod tests {
     #[test]
     fn loops_repeat_the_sequence() {
         let mut model = ProjectModel::starter();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.tracks[0].voice = "sine".into();
+        model.tracks[0].reverb_send = 0.0;
         model.patterns[0].length_ticks = 2 * TICKS_PER_BEAT;
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0, TICKS_PER_BEAT / 4, 69)]);
-        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
-        let opts = RenderOptions { tail_seconds: 0.0, loops: 3, ..Default::default() };
+        model.patterns[0].notes = vec![NoteEvent::new(0, TICKS_PER_BEAT / 4, 69)];
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap());
+        let opts = RenderOptions {
+            tail_seconds: 0.0,
+            loops: 3,
+            ..Default::default()
+        };
         let buf = render_to_buffer(seq, &opts).unwrap();
         // 2 beats @120 = 1 s per loop → 3 s total; the note sounds at the start of each loop.
         assert_eq!(buf.len() / 2, 44_100 * 3);
         for k in 0..3 {
             let at = k * 44_100;
             assert!(buf[2 * (at + 100)].abs() > 1e-4, "loop {k} has the note");
-            assert!(buf[2 * (at + 30_000)].abs() < 1e-4, "loop {k} is quiet before its end");
+            assert!(
+                buf[2 * (at + 30_000)].abs() < 1e-4,
+                "loop {k} is quiet before its end"
+            );
         }
     }
 
@@ -221,7 +251,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for depth in [16u16, 24, 32] {
             let path = dir.join(format!("{depth}.wav"));
-            let opts = RenderOptions { bit_depth: depth, dither: false, ..Default::default() };
+            let opts = RenderOptions {
+                bit_depth: depth,
+                dither: false,
+                ..Default::default()
+            };
             write_wav(&path, &[0.5, -0.5, 0.25, -0.25], &opts).unwrap();
             let reader = hound::WavReader::open(&path).unwrap();
             assert_eq!(reader.spec().bits_per_sample, depth);
@@ -230,9 +264,32 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// The chord bed is monitor-only: a project whose only sound would be the bed renders
+    /// silent, even though the sequence carries chords.
+    #[test]
+    fn a_render_never_includes_the_chord_bed() {
+        let mut model = ProjectModel::starter();
+        model.patterns.iter_mut().for_each(|p| p.notes.clear());
+        model.song_length_ticks = 4 * TICKS_PER_BEAT;
+        let seq = Arc::new(Sequence::from_song(&model));
+        assert!(!seq.chords.is_empty());
+        let buf = render_to_buffer(
+            seq,
+            &RenderOptions {
+                tail_seconds: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(buf.iter().all(|s| s.abs() < 1e-6));
+    }
+
     #[test]
     fn empty_sequence_is_an_error() {
         let seq = Arc::new(Sequence::default());
-        assert!(matches!(render_to_buffer(seq, &RenderOptions::default()), Err(RenderError::Empty)));
+        assert!(matches!(
+            render_to_buffer(seq, &RenderOptions::default()),
+            Err(RenderError::Empty)
+        ));
     }
 }

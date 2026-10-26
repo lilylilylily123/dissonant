@@ -2,8 +2,9 @@ import { useEffect } from "react";
 import { MenuBar } from "./components/MenuBar";
 import { Transport } from "./components/Transport";
 import { StatusBar } from "./components/StatusBar";
-import { PatternsPanel } from "./components/PatternsPanel";
+import { TrackTree } from "./components/TrackTree";
 import { Arrangement } from "./components/Arrangement";
+import { Setup } from "./components/Setup";
 import { BottomPanel } from "./components/BottomPanel";
 import { Inspector } from "./components/Inspector";
 import { Editor } from "./components/Editor";
@@ -11,10 +12,11 @@ import { Dialog } from "./components/Dialog";
 import { SettingsWindow } from "./components/Settings";
 import { PluginBrowserWindow } from "./components/PluginBrowser";
 import { ExportDialog, ExportProgressBar } from "./components/ExportDialog";
-import { TemplatePicker } from "./components/TemplatePicker";
+import { NewProjectScreen } from "./components/NewProjectScreen";
 import { GuitarTab } from "./components/GuitarTab";
-import { useStore } from "./store";
+import { selectedPattern, useStore } from "./store";
 import { useLiveKeyboard } from "./liveKeyboard";
+import { splitNotes } from "./noteEditing";
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -49,7 +51,7 @@ export default function App() {
         s.openSettings(!s.settingsOpen);
         return;
       }
-      if (s.settingsOpen || s.templatesOpen) return;
+      if (s.settingsOpen || s.newProjectOpen) return;
       if (s.exportOpen) {
         if (e.key === "Escape") s.openExport(false);
         return;
@@ -76,6 +78,10 @@ export default function App() {
       } else if (mod && k === "n") {
         e.preventDefault();
         void s.newProject();
+      } else if (mod && k === "e" && e.shiftKey) {
+        // Split at the playhead; the roll handles this itself when it has focus.
+        e.preventDefault();
+        if (s.screen === "pattern" && s.selectedNoteIds.length) s.transformSelection((ns, ids) => splitNotes(ns, ids, s.playhead), "split notes");
       } else if (mod && k === "e") {
         e.preventDefault();
         void s.exportWav();
@@ -84,12 +90,15 @@ export default function App() {
         void s.requestClose();
       } else if (!mod && e.key === "Tab") {
         e.preventDefault();
-        // Tab cycles the three screens in the order the transport lists them.
+        // Tab cycles the working screens in the order the transport lists them; from SETUP it
+        // goes to the pattern editor.
         s.setScreen(s.screen === "pattern" ? "song" : s.screen === "song" ? "guitar" : "pattern");
       } else if (!mod && s.liveKeyboard === "off" && k === "l") {
         s.toggleLooping();
       } else if (!mod && s.liveKeyboard === "off" && k === "r") {
-        s.toggleRecord();
+        // Recording lands in the selected pattern, so there has to be one to arm.
+        if (!s.armed && !selectedPattern(s)) s.showToast("pick a pattern to record into first");
+        else s.toggleRecord();
       } else if (!mod && s.liveKeyboard === "off" && k === "m") {
         s.toggleMetronome();
       }
@@ -111,20 +120,25 @@ export default function App() {
       <MenuBar />
       <Transport />
       <div className="content">
-        {screen === "guitar" ? (
+        {screen === "setup" ? (
+          <Setup />
+        ) : screen === "guitar" ? (
           <GuitarTab />
         ) : screen === "song" ? (
           <>
-            <PatternsPanel />
+            <TrackTree />
             <div className="center">
               <Arrangement />
               <BottomPanel />
             </div>
           </>
         ) : (
+          // The tree is the left panel; the inspector sits on the right and folds to a rail,
+          // so the roll keeps most of the width.
           <>
-            <Inspector />
+            <TrackTree />
             <Editor />
+            <Inspector />
           </>
         )}
       </div>
@@ -133,7 +147,7 @@ export default function App() {
       <SettingsWindow />
       <PluginBrowserWindow />
       <ExportDialog />
-      <TemplatePicker />
+      <NewProjectScreen />
       <ExportProgressBar />
       <Dialog />
     </div>

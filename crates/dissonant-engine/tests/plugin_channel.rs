@@ -35,14 +35,13 @@ fn rms(x: &[f32]) -> f64 {
 fn model() -> ProjectModel {
     let mut m = ProjectModel::empty();
     m.patterns[0].length_ticks = 8 * TICKS_PER_BEAT;
-    let id = m.tracks[0].id;
-    m.patterns[0].notes_by_track.insert(id, vec![NoteEvent::new(0, 4 * TICKS_PER_BEAT, 69)]);
+    m.patterns[0].notes = vec![NoteEvent::new(0, 4 * TICKS_PER_BEAT, 69)];
     m
 }
 
 fn engine_for(m: &ProjectModel) -> Engine {
     let mut e = Engine::new(SR, Arc::new(Shared::default()), &m.master);
-    let seq = Sequence::from_pattern(m, &m.patterns[0].id).expect("pattern");
+    let seq = Sequence::from_pattern(m, &m.patterns[0].id, 0).expect("pattern");
     e.handle(EngineCommand::SetSequence(Arc::new(seq)));
     e
 }
@@ -65,7 +64,10 @@ fn a_hosted_plugin_sounds_through_the_mixer_and_stops_when_it_is_cleared() {
 
     // Built on the app thread, exactly as `src-tauri` does it, then handed over.
     let (_hosted, unit) = HostedPlugin::open(&desc, SR as f64, 2048).expect("open plugin");
-    e.handle(EngineCommand::SetInstrument { track_id, instrument: Box::new(Instrument::Plugin(Box::new(unit))) });
+    e.handle(EngineCommand::SetInstrument {
+        track_id,
+        instrument: Box::new(Instrument::Plugin(Box::new(unit))),
+    });
     e.handle(EngineCommand::Play);
 
     let with_plugin = run(&mut e, 22_050);
@@ -83,7 +85,10 @@ fn a_hosted_plugin_sounds_through_the_mixer_and_stops_when_it_is_cleared() {
     e.handle(EngineCommand::ClearInstrument { track_id });
     e.handle(EngineCommand::Play);
     let after = run(&mut e, 22_050);
-    assert!(rms(&after) > 1e-4, "clearing the plugin left the track silent instead of back on its voice");
+    assert!(
+        rms(&after) > 1e-4,
+        "clearing the plugin left the track silent instead of back on its voice"
+    );
 }
 
 #[test]
@@ -97,7 +102,10 @@ fn a_plugin_channel_is_panned_and_gained_like_any_other() {
     let track_id = m.tracks[0].id;
     let mut e = engine_for(&m);
     let (_hosted, unit) = HostedPlugin::open(&desc, SR as f64, 2048).expect("open plugin");
-    e.handle(EngineCommand::SetInstrument { track_id, instrument: Box::new(Instrument::Plugin(Box::new(unit))) });
+    e.handle(EngineCommand::SetInstrument {
+        track_id,
+        instrument: Box::new(Instrument::Plugin(Box::new(unit))),
+    });
     e.handle(EngineCommand::Play);
 
     let out = run(&mut e, 22_050);

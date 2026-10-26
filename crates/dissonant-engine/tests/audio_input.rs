@@ -39,7 +39,10 @@ fn every_listed_input_device_describes_itself() {
     // At most one default, and if there is a default name it is in the list.
     assert!(devices.iter().filter(|d| d.is_default).count() <= 1);
     if let Some(name) = default_input_name() {
-        assert!(devices.iter().any(|d| d.name == name), "the default input {name} is not in the list");
+        assert!(
+            devices.iter().any(|d| d.name == name),
+            "the default input {name} is not in the list"
+        );
     }
 }
 
@@ -66,7 +69,11 @@ fn the_default_device_opens_and_delivers_frames() {
     };
     assert_eq!(input.sample_rate, rate);
     assert!(!input.device_name.trim().is_empty());
-    assert!(input.channel < input.channels.max(1), "channel {} is out of range", input.channel);
+    assert!(
+        input.channel < input.channels.max(1),
+        "channel {} is out of range",
+        input.channel
+    );
 
     // One mono sample per frame must show up without anyone draining in between.
     let started = Instant::now();
@@ -77,12 +84,18 @@ fn the_default_device_opens_and_delivers_frames() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(!input.has_failed(), "the stream reported an error while running");
+    assert!(
+        !input.has_failed(),
+        "the stream reported an error while running"
+    );
     assert!(got > 0, "the input delivered no frames in {SETTLE:?}");
     // Roughly real time: at least a tenth of what the elapsed window should hold, which rules
     // out a stream that fired once and stopped without being anywhere near a timing assertion.
     let expected = rate as f64 * SETTLE.as_secs_f64();
-    assert!(got as f64 > expected * 0.1, "only {got} frames in {SETTLE:?}, expected about {expected:.0}");
+    assert!(
+        got as f64 > expected * 0.1,
+        "only {got} frames in {SETTLE:?}, expected about {expected:.0}"
+    );
 }
 
 #[test]
@@ -94,9 +107,15 @@ fn a_rate_no_device_supports_is_refused_rather_than_resampled() {
     // error the user sees, not something silently resampled behind their back.
     let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(1024);
     let result = AudioInput::start_with(None, 7_777, None, 0, producer);
-    assert!(result.is_err(), "a 7777 Hz input opened, which no device supports");
+    assert!(
+        result.is_err(),
+        "a 7777 Hz input opened, which no device supports"
+    );
     let message = result.err().unwrap().to_string();
-    assert!(message.contains("7777"), "the error does not name the rate it refused: {message}");
+    assert!(
+        message.contains("7777"),
+        "the error does not name the rate it refused: {message}"
+    );
 }
 
 #[test]

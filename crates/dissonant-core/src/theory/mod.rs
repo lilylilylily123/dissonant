@@ -11,4 +11,3 @@ pub mod tier;
 pub fn normalize(pc: i32) -> i32 {
     pc.rem_euclid(12)
 }
-

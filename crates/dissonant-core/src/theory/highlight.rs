@@ -18,10 +18,17 @@ pub struct HighlightEngine {
 }
 
 impl HighlightEngine {
-    pub fn tier_map(&self, tick: i64, chord_track: &ChordTrack, key: &KeyState) -> [Option<Tier>; 12] {
+    pub fn tier_map(
+        &self,
+        tick: i64,
+        chord_track: &ChordTrack,
+        key: &KeyState,
+    ) -> [Option<Tier>; 12] {
         let key_pcs = key.scale_pitch_classes();
         if let Some(chord) = chord_track.chord_at(tick) {
-            let map = self.classifier.tier_map(&chord.pitch_classes, key_pcs.as_deref());
+            let map = self
+                .classifier
+                .tier_map(&chord.pitch_classes, key_pcs.as_deref());
             return map.map(Some);
         }
         if let Some(scale) = key_pcs {
@@ -39,7 +46,13 @@ impl HighlightEngine {
     }
 
     /// Convenience for a single MIDI pitch.
-    pub fn tier(&self, pitch: i32, tick: i64, chord_track: &ChordTrack, key: &KeyState) -> Option<Tier> {
+    pub fn tier(
+        &self,
+        pitch: i32,
+        tick: i64,
+        chord_track: &ChordTrack,
+        key: &KeyState,
+    ) -> Option<Tier> {
         self.tier_map(tick, chord_track, key)[normalize(pitch) as usize]
     }
 }
@@ -64,7 +77,8 @@ mod tests {
         assert_eq!(e.tier(64, BEAT, &track(), &key), Some(Tier::ChordTone)); // E over C
         assert_eq!(e.tier(64, 5 * BEAT, &track(), &key), Some(Tier::Tension)); // E over F = maj7
         assert_eq!(e.tier(65, BEAT, &track(), &key), Some(Tier::Dissonance)); // F over C: avoid note
-        assert_eq!(e.tier(65, 5 * BEAT, &track(), &key), Some(Tier::ChordTone)); // F over F
+        assert_eq!(e.tier(65, 5 * BEAT, &track(), &key), Some(Tier::ChordTone));
+        // F over F
     }
 
     #[test]
@@ -82,7 +96,13 @@ mod tests {
     #[test]
     fn key_filter_applies_in_full_context() {
         let e = HighlightEngine::default();
-        assert_eq!(e.tier(70, BEAT, &track(), &KeyState::NONE), Some(Tier::Tension));
-        assert_eq!(e.tier(70, BEAT, &track(), &KeyState::locked(0, ScaleType::Major)), Some(Tier::Dissonance));
+        assert_eq!(
+            e.tier(70, BEAT, &track(), &KeyState::NONE),
+            Some(Tier::Tension)
+        );
+        assert_eq!(
+            e.tier(70, BEAT, &track(), &KeyState::locked(0, ScaleType::Major)),
+            Some(Tier::Dissonance)
+        );
     }
 }

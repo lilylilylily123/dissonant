@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { selectedPattern, useStore } from "../store";
-import { ticksToBeats, type ExportRequest } from "../types";
+import { songLength, ticksToBeats, type ExportRequest } from "../types";
 
 /**
  * ⌘E — export audio. Starts from the export defaults in Settings; every field can be changed
@@ -12,11 +12,10 @@ export function ExportDialog() {
   const settings = useStore((s) => s.settings.export);
   const update = useStore((s) => s.updateSettings);
   const run = useStore((s) => s.runExport);
-  const hearChords = useStore((s) => s.hearChords);
-  const mode = useStore((s) => s.mode);
+  const screen = useStore((s) => s.screen);
   const model = useStore((s) => s.snapshot?.model);
   const pattern = useStore(selectedPattern);
-  const [scope, setScope] = useState<"song" | "pattern">(mode === "song" && (model?.clips.length ?? 0) > 0 ? "song" : "pattern");
+  const [scope, setScope] = useState<"song" | "pattern">(screen !== "pattern" && (model?.clips.length ?? 0) > 0 ? "song" : "pattern");
   const [rate, setRate] = useState(settings.sampleRate);
   const [depth, setDepth] = useState<16 | 24 | 32>(settings.bitDepth);
   const [dither, setDither] = useState(settings.dither);
@@ -25,12 +24,11 @@ export function ExportDialog() {
   const [tail, setTail] = useState(settings.tailSeconds);
   const [loops, setLoops] = useState(1);
   const [stems, setStems] = useState(false);
-  const [chords, setChords] = useState(hearChords);
   const [saveDefaults, setSaveDefaults] = useState(false);
 
   if (!open || !model) return null;
   const hasSong = model.clips.length > 0;
-  const ticks = scope === "song" ? model.clips.reduce((m, c) => Math.max(m, c.startTick + c.lengthTicks), 0) : (pattern?.lengthTicks ?? 0);
+  const ticks = scope === "song" ? songLength(model) : (pattern?.lengthTicks ?? 0);
   const seconds = (ticksToBeats(ticks * loops) * 60) / model.tempo + tail;
   const mm = Math.floor(seconds / 60);
   const ss = Math.round(seconds - mm * 60);
@@ -46,7 +44,6 @@ export function ExportDialog() {
       tailSeconds: tail,
       loops,
       stems,
-      hearChords: chords,
     };
     void run(req);
   };
@@ -88,12 +85,9 @@ export function ExportDialog() {
             <Seg value={loops} options={[[1, "1"], [2, "2"], [4, "4"], [8, "8"]]} onChange={setLoops} />
             <span className="k mono">{ticks ? `${mm}:${String(ss).padStart(2, "0")} with tail` : "nothing to render"}</span>
           </Row>
-          <Row label="chord bed" hint="include the chord track's pad in the mix">
-            <Toggle on={chords} onChange={setChords} />
-          </Row>
           <Row label="stems" hint="also write one WAV per track (everything else muted) next to the mix">
             <Toggle on={stems} onChange={setStems} />
-            {stems && <span className="k">{model.tracks.length + (chords ? 1 : 0)} files next to the mix</span>}
+            {stems && <span className="k">{model.tracks.length} files next to the mix</span>}
           </Row>
           <div className="sdiv" />
           <Row label="sample rate">

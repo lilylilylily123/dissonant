@@ -10,8 +10,8 @@
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
-import type { AudioClip, AudioSource, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel } from "./types";
-import { chordLoop, defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, TICKS_PER_BEAT, trackLoop } from "./types";
+import type { AudioClip, AudioSource, ChordEvent, Clip, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel } from "./types";
+import { defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, SOUND_PRESETS, soundPresetOf, TICKS_PER_BEAT } from "./types";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
 
@@ -42,10 +42,15 @@ async function freshBridge(): Promise<Bridge> {
 let b: Bridge;
 const model = async (): Promise<ProjectModel> => (await b.getState()).model;
 
-/** The starter project's ids, in the order the UI sees them. */
+/** The starter project's ids, in the order the UI sees them. `pattern` is the melody's. */
 async function ids() {
   const m = await model();
-  return { melody: m.tracks[0].id, drums: m.tracks[1].id, pattern: m.patterns[0].id };
+  return { melody: m.tracks[0].id, drums: m.tracks[1].id, pattern: m.patterns[0].id, drumPattern: m.patterns[1].id };
+}
+
+/** One clip, looked up by id. */
+async function clip(id: string): Promise<Clip> {
+  return (await model()).clips.find((c) => c.id === id)!;
 }
 
 function note(startTick: number, pitch: number, extra: Partial<NoteEvent> = {}): NoteEvent {
@@ -62,6 +67,8 @@ async function rejectsAndKeepsModel(command: Command, reason?: string) {
 }
 
 beforeEach(async () => {
+  // Settings and saved files live in the stubbed storage; each test starts from the defaults.
+  localStorage.clear();
   b = await freshBridge();
 });
 
@@ -70,21 +77,41 @@ beforeEach(async () => {
 describe("newProject", () => {
   it("matches ProjectModel::starter()", async () => {
     const s = await b.newProject(true);
-    expect(s.model.schemaVersion).toBe(9);
-    expect(s.model.tempo).toBe(120);
-    expect(s.model.key).toEqual({ rootPitchClass: null, scale: "major", isLocked: false });
-    expect(s.model.tracks.map((t) => [t.name, t.isDrum])).toEqual([
+    const m = s.model;
+    expect(m.schemaVersion).toBe(10);
+    expect(m.tempo).toBe(120);
+    expect(m.key).toEqual({ rootPitchClass: 0, scale: "major", isLocked: true });
+    expect(m.tracks.map((t) => [t.name, t.isDrum])).toEqual([
       ["melody", false],
       ["drums", true],
     ]);
-    expect(s.model.patterns).toHaveLength(1);
-    expect(s.model.patterns[0].name).toBe("pattern 1");
-    expect(s.model.patterns[0].lengthTicks).toBe(16 * TICKS_PER_BEAT);
-    // I–IV–V–vi over 16 beats at 4 beats a chord.
-    expect(s.model.patterns[0].chords.chords.map((c) => c.startTick)).toEqual([0, 3840, 7680, 11520]);
-    expect(s.model.patterns[0].notesByTrack).toEqual({});
-    expect(s.model.clips.map((c) => c.patternId)).toEqual([s.model.patterns[0].id]);
-    expect(s.model.master).toEqual({ gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 });
+    // One pattern per track.
+    const [melody, drums] = m.tracks;
+    expect(m.patterns.map((p) => [p.name, p.trackId, p.lengthTicks])).toEqual([
+      ["melody 1", melody.id, 16 * TICKS_PER_BEAT],
+      ["drums 1", drums.id, 16 * TICKS_PER_BEAT],
+    ]);
+    // The song is editing.defaultSongBars (32) of 4/4, and I–IV–V–vi is tiled across all of it.
+    expect(m.songLengthTicks).toBe(128 * TICKS_PER_BEAT);
+    expect(m.chords).toHaveLength(32);
+    expect(m.chords.slice(0, 5).map((c) => [c.startTick, c.name])).toEqual([
+      [0, "C"],
+      [4 * TICKS_PER_BEAT, "F"],
+      [8 * TICKS_PER_BEAT, "G"],
+      [12 * TICKS_PER_BEAT, "Am"],
+      [16 * TICKS_PER_BEAT, "C"],
+    ]);
+    // A melody (STARTER_MELODY) and a groove (starter_groove), so space plays music at once.
+    expect(melody.voice).toBe("pluck");
+    expect(m.patterns[0].notes.map((n) => n.pitch)).toEqual([76, 74, 72, 69, 72, 77, 74, 71, 67, 72, 71, 69]);
+    const count = (pitch: number) => m.patterns[1].notes.filter((n) => n.pitch === pitch).length;
+    expect([count(36), count(38), count(42)]).toEqual([8, 8, 32]);
+    // One clip per track, loop-extended from 0 to the song end.
+    expect(m.clips.map((c) => [c.patternId, c.startTick, c.lengthTicks, c.offsetTicks])).toEqual([
+      [m.patterns[0].id, 0, 128 * TICKS_PER_BEAT, 0],
+      [m.patterns[1].id, 0, 128 * TICKS_PER_BEAT, 0],
+    ]);
+    expect(m.master).toEqual({ gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 });
     expect([s.canUndo, s.canRedo, s.dirty, s.path]).toEqual([false, false, false, null]);
   });
 
@@ -92,9 +119,28 @@ describe("newProject", () => {
     const s = await b.newProject(false);
     expect(s.model.tracks.map((t) => t.name)).toEqual(["melody"]);
     expect(s.model.tracks[0].isDrum).toBe(false);
-    expect(s.model.patterns).toHaveLength(1);
-    expect(s.model.patterns[0].chords.chords).toEqual([]);
+    expect(s.model.patterns.map((p) => [p.name, p.trackId])).toEqual([["melody 1", s.model.tracks[0].id]]);
+    expect(s.model.chords).toEqual([]);
     expect(s.model.clips).toEqual([]);
+    expect(s.model.songLengthTicks).toBe(128 * TICKS_PER_BEAT);
+  });
+
+  it("sizes the song from editing.defaultSongBars", async () => {
+    const settings = await b.getSettings();
+    expect(settings.editing.defaultSongBars).toBe(32);
+    await b.setSettings({ ...settings, editing: { ...settings.editing, defaultSongBars: 8 } });
+    const m = (await b.newProject(true)).model;
+    expect(m.songLengthTicks).toBe(32 * TICKS_PER_BEAT);
+    expect(m.chords.at(-1)!.startTick + m.chords.at(-1)!.lengthTicks).toBe(32 * TICKS_PER_BEAT);
+    expect(m.clips.every((c) => c.lengthTicks === 32 * TICKS_PER_BEAT)).toBe(true);
+  });
+
+  it("follows the new-project setting when no choice is passed (new_project's fallback)", async () => {
+    const settings = await b.getSettings();
+    await b.setSettings({ ...settings, editing: { ...settings.editing, newProject: "empty" } });
+    expect((await b.newProject()).model.tracks).toHaveLength(1);
+    await b.setSettings({ ...settings, editing: { ...settings.editing, newProject: "starter" } });
+    expect((await b.newProject()).model.tracks).toHaveLength(2);
   });
 
   it("drops a pending transient gesture (Document::replace clears `pending`)", async () => {
@@ -181,12 +227,22 @@ describe("setTrackColor", () => {
 // ─── tracks ────────────────────────────────────────────────────────────────────────────────
 
 describe("tracks", () => {
-  it("names a new track after its position", async () => {
+  it("names a new track after its position and gives it one empty pattern", async () => {
     await b.apply({ type: "addTrack", isDrum: false });
     const m = await model();
     expect(m.tracks[2]).toMatchObject({ name: "track 3", voice: "saw", isDrum: false, volume: 1, reverbSend: 0, tone: 18000, pan: 0, color: null });
+    expect(m.patterns.filter((p) => p.trackId === m.tracks[2].id).map((p) => [p.name, p.notes])).toEqual([["track 3 1", []]]);
     await b.apply({ type: "addTrack", isDrum: true });
-    expect((await model()).tracks[3]).toMatchObject({ name: "drums", isDrum: true });
+    const m2 = await model();
+    expect(m2.tracks[3]).toMatchObject({ name: "drums", isDrum: true });
+    expect(m2.patterns.filter((p) => p.trackId === m2.tracks[3].id).map((p) => p.name)).toEqual(["drums 1"]);
+  });
+
+  it("adds tracks and their pattern as one undo step", async () => {
+    await b.apply({ type: "addTrack", isDrum: false });
+    const back = (await b.undo()).model;
+    expect(back.tracks).toHaveLength(2);
+    expect(back.patterns).toHaveLength(2);
   });
 
   it("rejects edits to an unknown track", async () => {
@@ -208,14 +264,21 @@ describe("tracks", () => {
     expect((await model()).tracks.map((t) => t.id)).toEqual([drums, melody]);
   });
 
-  it("purges the deleted track's notes from every pattern", async () => {
-    const { melody, drums, pattern } = await ids();
-    await b.apply({ type: "setNotes", patternId: pattern, trackId: melody, notes: [note(0, 60)] });
-    await b.apply({ type: "setNotes", patternId: pattern, trackId: drums, notes: [note(0, 36)] });
+  it("deletes the track's patterns and their clips with it", async () => {
+    const { melody, drums, pattern, drumPattern } = await ids();
+    await b.apply({ type: "addPattern", trackId: melody });
+    const extra = (await model()).patterns.find((p) => p.name === "melody 2")!.id;
+    await b.apply({ type: "addClip", patternId: extra, startTick: 64 * TICKS_PER_BEAT, lengthTicks: null });
     await b.apply({ type: "deleteTrack", id: melody });
     const m = await model();
     expect(m.tracks.map((t) => t.id)).toEqual([drums]);
-    expect(Object.keys(m.patterns[0].notesByTrack)).toEqual([drums]);
+    expect(m.patterns.map((p) => p.id)).toEqual([drumPattern]);
+    expect(m.clips.map((c) => c.patternId)).toEqual([drumPattern]);
+    expect(m.patterns.some((p) => p.id === pattern)).toBe(false);
+    // One undo step brings all of it back.
+    const back = (await b.undo()).model;
+    expect(back.patterns).toHaveLength(3);
+    expect(back.clips).toHaveLength(3);
   });
 
   it("refuses to delete the last track", async () => {
@@ -229,28 +292,34 @@ describe("tracks", () => {
 // ─── patterns ──────────────────────────────────────────────────────────────────────────────
 
 describe("patterns", () => {
-  it("duplicates in place with fresh ids", async () => {
+  it("duplicates in place on the same track with fresh note ids", async () => {
     const { melody, pattern } = await ids();
-    await b.apply({ type: "setNotes", patternId: pattern, trackId: melody, notes: [note(0, 60)] });
-    await b.apply({ type: "addPattern" });
+    await b.apply({ type: "addPattern", trackId: melody });
     await b.apply({ type: "duplicatePattern", id: pattern });
     const m = await model();
-    expect(m.patterns.map((p) => p.name)).toEqual(["pattern 1", "pattern 1 copy", "pattern 2"]);
+    expect(m.patterns.map((p) => p.name)).toEqual(["melody 1", "melody 1 copy", "drums 1", "melody 2"]);
     const [orig, copy] = m.patterns;
     expect(copy.id).not.toBe(orig.id);
-    expect(copy.notesByTrack[melody][0].id).not.toBe(orig.notesByTrack[melody][0].id);
-    expect(copy.chords.chords.map((c) => c.id)).not.toEqual(orig.chords.chords.map((c) => c.id));
-    expect(copy.chords.chords.map((c) => c.pitchClasses)).toEqual(orig.chords.chords.map((c) => c.pitchClasses));
+    expect(copy.trackId).toBe(melody);
+    expect(copy.notes.map((n) => n.pitch)).toEqual(orig.notes.map((n) => n.pitch));
+    expect(copy.notes.some((n, i) => n.id === orig.notes[i].id)).toBe(false);
   });
 
-  it("seeds a new pattern from the project key", async () => {
-    await b.apply({ type: "setKey", key: { rootPitchClass: 2, scale: "minor", isLocked: true } });
-    await b.apply({ type: "addPattern" });
-    const p = (await model()).patterns[1];
-    expect(p.name).toBe("pattern 2");
-    expect(p.lengthTicks).toBe(16 * TICKS_PER_BEAT);
-    expect(p.chords.chords.map((c) => c.startTick)).toEqual([0, 3840, 7680, 11520]);
-    expect(p.chords.chords[0].pitchClasses).toContain(2);
+  it("adds an empty pattern to a track, named after it", async () => {
+    const { drums } = await ids();
+    await b.apply({ type: "addPattern", trackId: drums });
+    await b.apply({ type: "addPattern", trackId: drums });
+    const p = (await model()).patterns.filter((x) => x.trackId === drums);
+    expect(p.map((x) => x.name)).toEqual(["drums 1", "drums 2", "drums 3"]);
+    expect(p[1]).toMatchObject({ lengthTicks: 16 * TICKS_PER_BEAT, notes: [] });
+    await rejectsAndKeepsModel({ type: "addPattern", trackId: FAKE_ID }, "no such track");
+  });
+
+  it("skips a pattern number already taken on that track", async () => {
+    const { melody, pattern } = await ids();
+    await b.apply({ type: "renamePattern", id: pattern, name: "melody 2" });
+    await b.apply({ type: "addPattern", trackId: melody });
+    expect((await model()).patterns.filter((p) => p.trackId === melody).map((p) => p.name)).toEqual(["melody 2", "melody 3"]);
   });
 
   it("refuses a blank rename and an unknown pattern", async () => {
@@ -258,10 +327,6 @@ describe("patterns", () => {
     await rejectsAndKeepsModel({ type: "renamePattern", id: pattern, name: "   " }, "invalid value");
     await rejectsAndKeepsModel({ type: "renamePattern", id: FAKE_ID, name: "verse" }, "no such pattern");
     await rejectsAndKeepsModel({ type: "duplicatePattern", id: FAKE_ID }, "no such pattern");
-    // The last-pattern guard runs before the existence check, so an unknown id only reports
-    // "no such pattern" once there is more than one pattern to delete from.
-    await rejectsAndKeepsModel({ type: "deletePattern", id: FAKE_ID }, "a project needs at least one pattern");
-    await b.apply({ type: "addPattern" });
     await rejectsAndKeepsModel({ type: "deletePattern", id: FAKE_ID }, "no such pattern");
   });
 
@@ -275,70 +340,19 @@ describe("patterns", () => {
     expect((await model()).patterns[0].lengthTicks).toBe(7680);
   });
 
-  it("removes a deleted pattern's clips and guards the last pattern", async () => {
-    const { pattern } = await ids();
-    await b.apply({ type: "addPattern" });
-    const second = (await model()).patterns[1].id;
-    await b.apply({ type: "addClip", patternId: second, startTick: 16 * TICKS_PER_BEAT, lengthTicks: null });
+  it("removes a deleted pattern's clips, and lets a track end up with no patterns", async () => {
+    const { melody, pattern, drumPattern } = await ids();
     await b.apply({ type: "deletePattern", id: pattern });
     const m = await model();
-    expect(m.patterns.map((p) => p.id)).toEqual([second]);
-    expect(m.clips.map((c) => c.patternId)).toEqual([second]);
-    await rejectsAndKeepsModel({ type: "deletePattern", id: second }, "a project needs at least one pattern");
+    expect(m.tracks.map((t) => t.id)).toContain(melody);
+    expect(m.patterns.map((p) => p.id)).toEqual([drumPattern]);
+    expect(m.clips.map((c) => c.patternId)).toEqual([drumPattern]);
+    // Even the last pattern of the project can go.
+    await b.apply({ type: "deletePattern", id: drumPattern });
+    expect((await model()).patterns).toEqual([]);
+    expect((await model()).clips).toEqual([]);
   });
-  it("trims a track and the chord track to a shortened loop, matching apply_to", async () => {
-    const { melody, pattern } = await ids();
-    await b.apply({
-      type: "setNotes",
-      patternId: pattern,
-      trackId: melody,
-      notes: [note(0, 60), note(6 * TICKS_PER_BEAT, 62, { lengthTicks: 4 * TICKS_PER_BEAT }), note(12 * TICKS_PER_BEAT, 64)],
-    });
-    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, ticks: 8 * TICKS_PER_BEAT });
-    const notes = (await model()).patterns[0].notesByTrack[melody];
-    expect(notes.map((n) => [n.startTick, n.lengthTicks])).toEqual([
-      [0, 960],
-      [5760, 1920],
-    ]);
-    await b.apply({ type: "setChordLoop", patternId: pattern, ticks: 8 * TICKS_PER_BEAT });
-    expect((await model()).patterns[0].chords.chords.map((c) => c.startTick)).toEqual([0, 3840]);
-  });
-  it("stores and clears per-track and chord loop lengths", async () => {
-    const { melody, pattern } = await ids();
-    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, ticks: 8 * TICKS_PER_BEAT });
-    await b.apply({ type: "setChordLoop", patternId: pattern, ticks: 4 * TICKS_PER_BEAT });
-    let p = (await model()).patterns[0];
-    expect(p.trackLoopTicks[melody]).toBe(7680);
-    expect(p.chordLoopTicks).toBe(3840);
-    expect(trackLoop(p, melody)).toBe(7680);
-    expect(chordLoop(p)).toBe(3840);
-
-    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, ticks: null });
-    await b.apply({ type: "setChordLoop", patternId: pattern, ticks: null });
-    p = (await model()).patterns[0];
-    expect(p.trackLoopTicks[melody]).toBeUndefined();
-    expect(trackLoop(p, melody)).toBe(p.lengthTicks);
-    expect(chordLoop(p)).toBe(p.lengthTicks);
-  });
-
-  it("rejects a loop shorter than one beat and an unknown track or pattern", async () => {
-    const { melody, pattern } = await ids();
-    await rejectsAndKeepsModel({ type: "setTrackLoop", patternId: pattern, trackId: melody, ticks: 480 }, "invalid value");
-    await rejectsAndKeepsModel({ type: "setTrackLoop", patternId: pattern, trackId: FAKE_ID, ticks: 4 * TICKS_PER_BEAT }, "no such track");
-    await rejectsAndKeepsModel({ type: "setTrackLoop", patternId: FAKE_ID, trackId: melody, ticks: 4 * TICKS_PER_BEAT }, "no such pattern");
-    await rejectsAndKeepsModel({ type: "setChordLoop", patternId: pattern, ticks: Number.NaN }, "invalid value");
-    await rejectsAndKeepsModel({ type: "setChordLoop", patternId: FAKE_ID, ticks: 4 * TICKS_PER_BEAT }, "no such pattern");
-  });
-
-  it("drops a deleted track's loop along with its notes", async () => {
-    const { melody, pattern } = await ids();
-    await b.apply({ type: "setTrackLoop", patternId: pattern, trackId: melody, ticks: 8 * TICKS_PER_BEAT });
-    await b.apply({ type: "addTrack", isDrum: false });
-    await b.apply({ type: "deleteTrack", id: melody });
-    expect((await model()).patterns[0].trackLoopTicks[melody]).toBeUndefined();
-  });
-
-  /// Mirrors `SongPattern::looped_notes`: two turns of a 2-bar loop under a 4-bar pattern.
+  /// Mirrors how a clip longer than its pattern loops it: two turns of a 2-bar loop over 4 bars.
   it("lays a short loop out across the pattern, trimming each turn at its own end", async () => {
     const events = [
       { id: "a", startTick: 0, lengthTicks: TICKS_PER_BEAT },
@@ -360,25 +374,21 @@ describe("patterns", () => {
 // ─── notes ─────────────────────────────────────────────────────────────────────────────────
 
 describe("setNotes", () => {
-  it("requires the track to exist, checked before the pattern", async () => {
-    const { melody, pattern } = await ids();
-    await rejectsAndKeepsModel({ type: "setNotes", patternId: pattern, trackId: FAKE_ID, notes: [note(0, 60)] }, "no such track");
-    await rejectsAndKeepsModel({ type: "setNotes", patternId: FAKE_ID, trackId: FAKE_ID, notes: [note(0, 60)] }, "no such track");
-    await rejectsAndKeepsModel({ type: "setNotes", patternId: FAKE_ID, trackId: melody, notes: [note(0, 60)] }, "no such pattern");
+  it("rejects an unknown pattern", async () => {
+    await rejectsAndKeepsModel({ type: "setNotes", patternId: FAKE_ID, notes: [note(0, 60)] }, "no such pattern");
   });
 
   it("clamps every note into NoteEvent::sanitized's ranges", async () => {
-    const { melody, pattern } = await ids();
+    const { pattern } = await ids();
     await b.apply({
       type: "setNotes",
       patternId: pattern,
-      trackId: melody,
       notes: [
         note(0, 300, { velocity: 999, lengthTicks: 0 }),
         note(-4 * TICKS_PER_BEAT, -9, { velocity: 0, lengthTicks: -1 }),
       ],
     });
-    const notes = (await model()).patterns[0].notesByTrack[melody];
+    const notes = (await model()).patterns[0].notes;
     expect(notes.map((n) => n.pitch)).toEqual([0, 127]);
     expect(notes.map((n) => n.velocity)).toEqual([1, 127]);
     expect(notes.map((n) => n.startTick)).toEqual([0, 0]);
@@ -386,14 +396,13 @@ describe("setNotes", () => {
   });
 
   it("sorts by start tick then pitch", async () => {
-    const { melody, pattern } = await ids();
+    const { pattern } = await ids();
     await b.apply({
       type: "setNotes",
       patternId: pattern,
-      trackId: melody,
       notes: [note(4 * TICKS_PER_BEAT, 60), note(0, 72), note(0, 48), note(2 * TICKS_PER_BEAT, 55)],
     });
-    const notes = (await model()).patterns[0].notesByTrack[melody];
+    const notes = (await model()).patterns[0].notes;
     expect(notes.map((n) => [n.startTick, n.pitch])).toEqual([
       [0, 48],
       [0, 72],
@@ -402,17 +411,17 @@ describe("setNotes", () => {
     ]);
   });
 
-  it("drops the track's entry when the array is empty", async () => {
-    const { melody, pattern } = await ids();
-    await b.apply({ type: "setNotes", patternId: pattern, trackId: melody, notes: [note(0, 60)] });
-    expect(Object.keys((await model()).patterns[0].notesByTrack)).toEqual([melody]);
-    await b.apply({ type: "setNotes", patternId: pattern, trackId: melody, notes: [] });
-    expect((await model()).patterns[0].notesByTrack).toEqual({});
+  it("touches only that pattern", async () => {
+    const { pattern } = await ids();
+    const drumsBefore = (await model()).patterns[1].notes;
+    await b.apply({ type: "setNotes", patternId: pattern, notes: [] });
+    expect((await model()).patterns[0].notes).toEqual([]);
+    expect((await model()).patterns[1].notes).toEqual(drumsBefore);
   });
 
   it("rejects non-finite note fields instead of writing NaN into the model", async () => {
-    const { melody, pattern } = await ids();
-    const bad = (n: NoteEvent) => ({ type: "setNotes" as const, patternId: pattern, trackId: melody, notes: [n] });
+    const { pattern } = await ids();
+    const bad = (n: NoteEvent) => ({ type: "setNotes" as const, patternId: pattern, notes: [n] });
     await rejectsAndKeepsModel(bad(note(0, Number.NaN)));
     await rejectsAndKeepsModel(bad(note(0, 60, { velocity: Number.NaN })));
     await rejectsAndKeepsModel(bad(note(Number.NaN, 60)));
@@ -424,7 +433,7 @@ describe("setNotes", () => {
 // ─── chords and arrangement ────────────────────────────────────────────────────────────────
 
 describe("setChords", () => {
-  const chord = (startTick: number, lengthTicks: number, pitchClasses: number[]) => ({
+  const chord = (startTick: number, lengthTicks: number, pitchClasses: number[]): ChordEvent => ({
     id: FAKE_ID,
     startTick,
     lengthTicks,
@@ -432,21 +441,32 @@ describe("setChords", () => {
     name: null,
   });
 
-  it("drops empty or negatively placed chords and normalizes pitch classes", async () => {
-    const { pattern } = await ids();
+  it("replaces the project progression (song ticks), dropping empty or negatively placed chords", async () => {
     await b.apply({
       type: "setChords",
-      patternId: pattern,
-      chords: [chord(8 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT, [7, 23, -1, 11, 7]), chord(2 * TICKS_PER_BEAT, 0, [0]), chord(-1, 4 * TICKS_PER_BEAT, [0]), chord(0, 4 * TICKS_PER_BEAT, [4, 0, 7])],
+      chords: [
+        chord(40 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT, [7, 23, -1, 11, 7]),
+        chord(2 * TICKS_PER_BEAT, 0, [0]),
+        chord(-1, 4 * TICKS_PER_BEAT, [0]),
+        chord(0, 4 * TICKS_PER_BEAT, [4, 0, 7]),
+      ],
     });
-    const chords = (await model()).patterns[0].chords.chords;
-    expect(chords.map((c) => c.startTick)).toEqual([0, 7680]);
-    expect(chords[0].pitchClasses).toEqual([0, 4, 7]);
+    const chords = (await model()).chords;
+    expect(chords.map((c) => c.startTick)).toEqual([0, 40 * TICKS_PER_BEAT]);
+    // Order is kept so the root stays first, as `tidy_chords` does.
+    expect(chords[0].pitchClasses).toEqual([4, 0, 7]);
     expect(chords[1].pitchClasses).toEqual([7, 11]);
   });
 
-  it("rejects an unknown pattern", async () => {
-    await rejectsAndKeepsModel({ type: "setChords", patternId: FAKE_ID, chords: [] }, "no such pattern");
+  it("cuts each chord at the next one's start", async () => {
+    await b.apply({
+      type: "setChords",
+      chords: [chord(0, 8 * TICKS_PER_BEAT, [0, 4, 7]), chord(4 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT, [5, 9, 0])],
+    });
+    expect((await model()).chords.map((c) => [c.startTick, c.lengthTicks])).toEqual([
+      [0, 4 * TICKS_PER_BEAT],
+      [4 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT],
+    ]);
   });
 });
 
@@ -454,13 +474,104 @@ describe("clips", () => {
   it("places clips in start order and validates like AddClip", async () => {
     const { pattern } = await ids();
     await b.apply({ type: "addClip", patternId: pattern, startTick: 16 * TICKS_PER_BEAT, lengthTicks: null });
-    expect((await model()).clips.map((c) => c.startTick)).toEqual([0, 15360]);
+    expect((await model()).clips.map((c) => c.startTick)).toEqual([0, 0, 16 * TICKS_PER_BEAT]);
     // Clip length defaults to the pattern's own length.
-    expect((await model()).clips[1].lengthTicks).toBe(16 * TICKS_PER_BEAT);
+    expect((await model()).clips[2].lengthTicks).toBe(16 * TICKS_PER_BEAT);
     await rejectsAndKeepsModel({ type: "addClip", patternId: FAKE_ID, startTick: 32 * TICKS_PER_BEAT, lengthTicks: null }, "no such pattern");
     await rejectsAndKeepsModel({ type: "addClip", patternId: pattern, startTick: -1, lengthTicks: null }, "invalid value");
     await rejectsAndKeepsModel({ type: "addClip", patternId: pattern, startTick: 32 * TICKS_PER_BEAT, lengthTicks: 0 }, "invalid value");
     await rejectsAndKeepsModel({ type: "removeClip", id: FAKE_ID }, "no such clip");
+  });
+
+  it("refuses a clip at or past the song end and clamps one running over it", async () => {
+    const { pattern } = await ids();
+    await rejectsAndKeepsModel({ type: "addClip", patternId: pattern, startTick: 128 * TICKS_PER_BEAT, lengthTicks: null }, "that is past the end of the song");
+    await rejectsAndKeepsModel({ type: "addClip", patternId: pattern, startTick: 200 * TICKS_PER_BEAT, lengthTicks: 4 * TICKS_PER_BEAT }, "that is past the end of the song");
+    await b.apply({ type: "addClip", patternId: pattern, startTick: 120 * TICKS_PER_BEAT, lengthTicks: null });
+    const placed = (await model()).clips.find((c) => c.startTick === 120 * TICKS_PER_BEAT)!;
+    expect(placed.lengthTicks).toBe(8 * TICKS_PER_BEAT);
+  });
+
+  it("clamps updateClip the same way and never moves a clip to another pattern", async () => {
+    const { drumPattern } = await ids();
+    const c = (await model()).clips[0];
+    await b.apply({ type: "updateClip", clip: { ...c, startTick: 100 * TICKS_PER_BEAT, lengthTicks: 64 * TICKS_PER_BEAT, patternId: drumPattern } });
+    const moved = await clip(c.id);
+    expect([moved.startTick, moved.lengthTicks, moved.patternId]).toEqual([100 * TICKS_PER_BEAT, 28 * TICKS_PER_BEAT, c.patternId]);
+    await rejectsAndKeepsModel({ type: "updateClip", clip: { ...moved, startTick: 128 * TICKS_PER_BEAT } }, "that is past the end of the song");
+    await rejectsAndKeepsModel({ type: "updateClip", clip: { ...moved, id: FAKE_ID } }, "no such clip");
+    await rejectsAndKeepsModel({ type: "updateClip", clip: { ...moved, lengthTicks: Number.NaN } }, "invalid value");
+  });
+
+  it("moves a group of clips with updateClips as one undo step", async () => {
+    const [a, c] = (await model()).clips;
+    await b.apply({ type: "setSongLength", ticks: 256 * TICKS_PER_BEAT });
+    await b.apply({ type: "updateClips", clips: [{ ...a, startTick: 32 * TICKS_PER_BEAT }, { ...c, startTick: 32 * TICKS_PER_BEAT }] });
+    expect((await model()).clips.map((x) => x.startTick)).toEqual([32 * TICKS_PER_BEAT, 32 * TICKS_PER_BEAT]);
+    const back = (await b.undo()).model;
+    expect(back.clips.map((x) => x.startTick)).toEqual([0, 0]);
+    // One bad clip rejects the whole batch.
+    await rejectsAndKeepsModel({ type: "updateClips", clips: [{ ...a, startTick: 8 * TICKS_PER_BEAT }, { ...c, id: FAKE_ID }] }, "no such clip");
+  });
+
+  it("removes a group of clips with removeClips as one undo step", async () => {
+    const [a, c] = (await model()).clips;
+    // Unknown ids are skipped, as in the Rust document.
+    await b.apply({ type: "removeClips", ids: [a.id, c.id, FAKE_ID] });
+    expect((await model()).clips).toEqual([]);
+    expect((await b.undo()).model.clips).toHaveLength(2);
+  });
+
+  it("makeClipUnique forks the pattern on the same track and repoints just that clip", async () => {
+    const { melody, pattern } = await ids();
+    await b.apply({ type: "addClip", patternId: pattern, startTick: 64 * TICKS_PER_BEAT, lengthTicks: null });
+    const target = (await model()).clips.find((c) => c.startTick === 64 * TICKS_PER_BEAT)!;
+    await b.apply({ type: "makeClipUnique", id: target.id });
+    const m = await model();
+    const fork = m.patterns.find((p) => p.name === "melody 1 copy")!;
+    expect(fork.trackId).toBe(melody);
+    expect(fork.notes.map((n) => n.pitch)).toEqual(m.patterns[0].notes.map((n) => n.pitch));
+    expect((await clip(target.id)).patternId).toBe(fork.id);
+    // The other clip of the original still plays the original.
+    expect(m.clips.filter((c) => c.patternId === pattern)).toHaveLength(1);
+    // One undo step.
+    const back = (await b.undo()).model;
+    expect(back.patterns).toHaveLength(2);
+    expect(back.clips.find((c) => c.id === target.id)!.patternId).toBe(pattern);
+    await rejectsAndKeepsModel({ type: "makeClipUnique", id: FAKE_ID }, "no such clip");
+  });
+});
+
+describe("setSongLength", () => {
+  it("removes clips starting at or past the end and trims clips crossing it", async () => {
+    const { pattern } = await ids();
+    await b.apply({ type: "addClip", patternId: pattern, startTick: 64 * TICKS_PER_BEAT, lengthTicks: 16 * TICKS_PER_BEAT });
+    await b.apply({ type: "addClip", patternId: pattern, startTick: 96 * TICKS_PER_BEAT, lengthTicks: 16 * TICKS_PER_BEAT });
+    await b.apply({ type: "setSongLength", ticks: 72 * TICKS_PER_BEAT });
+    const m = await model();
+    expect(m.songLengthTicks).toBe(72 * TICKS_PER_BEAT);
+    expect(m.clips.map((c) => [c.startTick, c.lengthTicks])).toEqual([
+      [0, 72 * TICKS_PER_BEAT],
+      [0, 72 * TICKS_PER_BEAT],
+      [64 * TICKS_PER_BEAT, 8 * TICKS_PER_BEAT],
+    ]);
+  });
+
+  it("keeps at least one bar and rejects a non-finite length", async () => {
+    await b.apply({ type: "setSongLength", ticks: TICKS_PER_BEAT });
+    expect((await model()).songLengthTicks).toBe(4 * TICKS_PER_BEAT);
+    await b.apply({ type: "setTimeSignature", numerator: 3, denominator: 4 });
+    await b.apply({ type: "setSongLength", ticks: 0 });
+    expect((await model()).songLengthTicks).toBe(3 * TICKS_PER_BEAT);
+    await rejectsAndKeepsModel({ type: "setSongLength", ticks: Number.NaN }, "invalid value");
+  });
+
+  it("grows without touching clips, and undoes in one step", async () => {
+    const before = await model();
+    await b.apply({ type: "setSongLength", ticks: 256 * TICKS_PER_BEAT });
+    expect((await model()).clips).toEqual(before.clips);
+    await b.apply({ type: "setSongLength", ticks: 8 * TICKS_PER_BEAT });
+    expect((await b.undo()).model.clips).toEqual(before.clips);
   });
 });
 
@@ -585,6 +696,118 @@ describe("save and open", () => {
     expect(s.canRedo).toBe(false);
     expect(s.model.tracks[0].name).toBe("lead");
   });
+
+  it("migrates a schema 9 project: one pattern per track, its chords lifted onto the song", async () => {
+    const current = await model();
+    const melody = current.tracks[0].id;
+    // A pre-v10 pattern: every track's notes in one record, with its own looping chord track.
+    const old = {
+      ...current,
+      schemaVersion: 9,
+      // A schema 9 file has no song-level progression: the patterns carried the chords.
+      chords: [],
+      patterns: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "verse",
+          lengthTicks: 4 * TICKS_PER_BEAT,
+          notesByTrack: { [melody]: [note(0, 60)] },
+          chords: { chords: [{ id: FAKE_ID, startTick: 0, lengthTicks: 4 * TICKS_PER_BEAT, pitchClasses: [0, 4, 7], name: "C" }] },
+        },
+      ],
+      clips: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          patternId: "11111111-1111-4111-8111-111111111111",
+          startTick: 0,
+          lengthTicks: 8 * TICKS_PER_BEAT,
+          offsetTicks: 0,
+          muted: false,
+        },
+      ],
+      songLengthTicks: undefined,
+    };
+    localStorage.setItem("dissonant.mock.project", JSON.stringify(old));
+    const m = (await b.openProject("/tmp/old.dissonant")).model;
+    expect(m.schemaVersion).toBe(10);
+    // The melody's notes became its own pattern; the clip follows it.
+    expect(m.patterns.map((p) => [p.name, p.trackId])).toEqual([["verse melody", melody]]);
+    expect(m.patterns[0].notes.map((n) => n.pitch)).toEqual([60]);
+    expect(m.clips.map((c) => [c.patternId, c.startTick, c.lengthTicks])).toEqual([[m.patterns[0].id, 0, 8 * TICKS_PER_BEAT]]);
+    // The pattern's progression looped under the clip, so it is two chords on the song now.
+    expect(m.chords.map((c) => [c.startTick, c.lengthTicks])).toEqual([
+      [0, 4 * TICKS_PER_BEAT],
+      [4 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT],
+    ]);
+    // A pre-v10 file never said how long the song was: it ends with its last clip.
+    expect(m.songLengthTicks).toBe(8 * TICKS_PER_BEAT);
+  });
+
+  it("migrates an old template the same way", async () => {
+    const current = await model();
+    localStorage.setItem("dissonant.mock.templates", JSON.stringify({ old: { ...current, schemaVersion: 9 } }));
+    const m = (await b.newFromTemplate("old")).model;
+    expect(m.schemaVersion).toBe(10);
+    expect(m.patterns.map((p) => p.trackId)).toEqual(current.patterns.map((p) => p.trackId));
+  });
+});
+
+// ─── sound presets ─────────────────────────────────────────────────────────────────────────
+
+describe("sound presets (store.applySoundPreset)", () => {
+  it("voice, tone and reverb as transient edits undo as one labelled step", async () => {
+    const { melody } = await ids();
+    const before = (await model()).tracks[0];
+    const preset = SOUND_PRESETS.find((p) => p.name === "warm pad")!;
+    const label = `sound: ${preset.name}`;
+    await b.apply({ type: "setTrackVoice", id: melody, voice: preset.voice }, true, label);
+    await b.apply({ type: "setTrackParam", id: melody, param: "tone", value: preset.tone }, true, label);
+    await b.apply({ type: "setTrackParam", id: melody, param: "reverbSend", value: preset.reverbSend }, true, label);
+    const s = await b.commitGesture();
+    expect(soundPresetOf(s.model.tracks[0])?.name).toBe("warm pad");
+    expect(s.undoLabel).toBe(label);
+    const back = await b.undo();
+    expect(back.model.tracks[0]).toEqual(before);
+    expect(back.canUndo).toBe(false);
+  });
+});
+
+// ─── vibes ─────────────────────────────────────────────────────────────────────────────────
+
+describe("vibes (ProjectModel::from_vibe)", () => {
+  it("match vibe_values_shared_with_the_ui in crates/dissonant-core/tests/persistence.rs", async () => {
+    const infos = await b.listVibes();
+    const described = [];
+    for (const info of infos) {
+      const s = await b.newFromVibe(info.id);
+      const m = s.model;
+      expect(m.key).toEqual(info.key);
+      expect([s.dirty, s.canUndo, s.path]).toEqual([false, false, null]);
+      // One pattern per track, each placed once from 0 to the song end.
+      expect(m.patterns.map((p) => p.trackId)).toEqual(m.tracks.map((t) => t.id));
+      expect(m.patterns.map((p) => p.name)).toEqual(m.tracks.map((t) => `${t.name} 1`));
+      expect(m.clips.map((c) => [c.patternId, c.startTick, c.lengthTicks])).toEqual(m.patterns.map((p) => [p.id, 0, m.songLengthTicks]));
+      // The progression is tiled across the whole song; the first 16 beats name one pass.
+      expect(m.chords.at(-1)!.startTick + m.chords.at(-1)!.lengthTicks).toBe(m.songLengthTicks);
+      const count = (track: number, pitch?: number) => m.patterns[track].notes.filter((n) => pitch === undefined || n.pitch === pitch).length;
+      described.push(
+        `${info.id}|${info.tempo}|${m.swing}|${m.tracks.map((t) => t.name).join(",")}|${m.chords.filter((c) => c.startTick < 16 * TICKS_PER_BEAT).map((c) => c.name).join(" ")}|${m.tracks[0].voice}|kick ${count(2, 36)}|bass ${count(1)}|${count(2)}`,
+      );
+    }
+    expect(described).toEqual([
+      "lofi|80|60|keys,bass,drums|Gm C F Dm|triangle|kick 12|bass 12|52",
+      "postpunk|148|50|lead,bass,drums|Em C G D|square|kick 12|bass 32|52",
+      "ambient|70|50|pad,bass,drums|D G|pad|kick 4|bass 4|8",
+      "songwriter|96|50|melody,bass,drums|G D Em C|pluck|kick 8|bass 8|48",
+      "club|124|50|lead,bass,drums|Am G F G|square|kick 16|bass 16|40",
+    ]);
+  });
+
+  it("rejects an unknown vibe and keeps the project", async () => {
+    const before = await model();
+    await expect(b.newFromVibe("polka")).rejects.toBeTruthy();
+    expect(await model()).toEqual(before);
+  });
 });
 
 // ─── plugins ───────────────────────────────────────────────────────────────────────────────
@@ -621,12 +844,14 @@ describe("track plugins", () => {
 
   it("goes back to the built-in voice when the plugin is cleared", async () => {
     const { melody } = await ids();
+    const voice = (await model()).tracks[0].voice;
     const p = await anyPlugin();
     await b.setTrackPlugin(melody, p.uid);
     expect((await model()).tracks[0].plugin?.name).toBe(p.name);
     await b.setTrackPlugin(melody, null);
     expect((await model()).tracks[0].plugin).toBeNull();
-    expect((await model()).tracks[0].voice).toBe("saw");
+    // The track's own voice was never touched, so it sounds again.
+    expect((await model()).tracks[0].voice).toBe(voice);
   });
 
   it("reports no parameters for a track with no plugin", async () => {

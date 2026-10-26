@@ -36,7 +36,9 @@ fn device_name(device: &cpal::Device) -> String {
 pub fn list_input_devices() -> Vec<InputDeviceInfo> {
     let host = cpal::default_host();
     let default_name = host.default_input_device().map(|d| device_name(&d));
-    let Ok(devices) = host.input_devices() else { return vec![] };
+    let Ok(devices) = host.input_devices() else {
+        return vec![];
+    };
     devices
         .map(|d| {
             let name = device_name(&d);
@@ -99,7 +101,14 @@ impl AudioInput {
         let thread = std::thread::Builder::new()
             .name("dissonant-input".into())
             .spawn(move || {
-                match build_input(wanted.as_deref(), sample_rate, buffer_size, channel, sink, thread_failed) {
+                match build_input(
+                    wanted.as_deref(),
+                    sample_rate,
+                    buffer_size,
+                    channel,
+                    sink,
+                    thread_failed,
+                ) {
                     Ok((stream, opened)) => {
                         if let Err(e) = stream.play() {
                             let _ = ready_tx.send(Err(DeviceError::Cpal(e.to_string())));
@@ -192,9 +201,20 @@ fn build_input(
         SampleFormat::I16 => capture::<i16>(&device, &stream_config, channels, take, sink, failed),
         SampleFormat::U16 => capture::<u16>(&device, &stream_config, channels, take, sink, failed),
         SampleFormat::I32 => capture::<i32>(&device, &stream_config, channels, take, sink, failed),
-        other => return Err(DeviceError::Cpal(format!("unsupported input sample format {other:?}"))),
+        other => {
+            return Err(DeviceError::Cpal(format!(
+                "unsupported input sample format {other:?}"
+            )))
+        }
     }?;
-    Ok((stream, Opened { name, channels, channel: take }))
+    Ok((
+        stream,
+        Opened {
+            name,
+            channels,
+            channel: take,
+        },
+    ))
 }
 
 fn capture<T>(

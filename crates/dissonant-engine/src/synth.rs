@@ -1,7 +1,9 @@
 //! Polyphonic waveform synth: a pool of oscillator + ADSR voices with velocity, round-robin
 //! allocation and oldest-note stealing. Voice presets mirror the original app's `VoiceKind`.
 
-use crate::dsp::{midi_to_hz, note_filter, note_pan_gains, Adsr, AdsrParams, NoteFilter, Oscillator, Waveform};
+use crate::dsp::{
+    midi_to_hz, note_filter, note_pan_gains, Adsr, AdsrParams, NoteFilter, Oscillator, Waveform,
+};
 use crate::engine::NoteShape;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,32 +19,62 @@ impl VoicePreset {
         match name {
             "square" => VoicePreset {
                 waveform: Waveform::Square,
-                env: AdsrParams { attack: 0.004, decay: 0.12, sustain: 0.45, release: 0.10 },
+                env: AdsrParams {
+                    attack: 0.004,
+                    decay: 0.12,
+                    sustain: 0.45,
+                    release: 0.10,
+                },
                 level: 0.22,
             },
             "triangle" => VoicePreset {
                 waveform: Waveform::Triangle,
-                env: AdsrParams { attack: 0.008, decay: 0.16, sustain: 0.55, release: 0.16 },
+                env: AdsrParams {
+                    attack: 0.008,
+                    decay: 0.16,
+                    sustain: 0.55,
+                    release: 0.16,
+                },
                 level: 0.30,
             },
             "sine" => VoicePreset {
                 waveform: Waveform::Sine,
-                env: AdsrParams { attack: 0.015, decay: 0.18, sustain: 0.65, release: 0.20 },
+                env: AdsrParams {
+                    attack: 0.015,
+                    decay: 0.18,
+                    sustain: 0.65,
+                    release: 0.20,
+                },
                 level: 0.32,
             },
             "pad" => VoicePreset {
                 waveform: Waveform::Saw,
-                env: AdsrParams { attack: 0.45, decay: 0.40, sustain: 0.80, release: 0.90 },
+                env: AdsrParams {
+                    attack: 0.45,
+                    decay: 0.40,
+                    sustain: 0.80,
+                    release: 0.90,
+                },
                 level: 0.18,
             },
             "pluck" => VoicePreset {
                 waveform: Waveform::Triangle,
-                env: AdsrParams { attack: 0.001, decay: 0.16, sustain: 0.0, release: 0.14 },
+                env: AdsrParams {
+                    attack: 0.001,
+                    decay: 0.16,
+                    sustain: 0.0,
+                    release: 0.14,
+                },
                 level: 0.32,
             },
             _ => VoicePreset {
                 waveform: Waveform::Saw,
-                env: AdsrParams { attack: 0.008, decay: 0.10, sustain: 0.65, release: 0.14 },
+                env: AdsrParams {
+                    attack: 0.008,
+                    decay: 0.10,
+                    sustain: 0.65,
+                    release: 0.14,
+                },
                 level: 0.22,
             },
         }
@@ -118,7 +150,11 @@ impl PolySynth {
 
     pub fn note_on(&mut self, pitch: u8, velocity: u8, shape: NoteShape) {
         self.counter += 1;
-        let idx = match self.voices.iter().position(|v| v.pitch.is_none() && !v.env.is_active()) {
+        let idx = match self
+            .voices
+            .iter()
+            .position(|v| v.pitch.is_none() && !v.env.is_active())
+        {
             Some(i) => i,
             None => match self.voices.iter().position(|v| v.pitch.is_none()) {
                 // Releasing voice: reuse the one that started longest ago.
@@ -148,10 +184,15 @@ impl PolySynth {
         // A *stolen* voice keeps its phase and envelope level: slamming either to zero while
         // it is still sounding is a step discontinuity, i.e. an audible click. The attack
         // simply ramps on from wherever the old note had got to.
-        v.osc.set_frequency(midi_to_hz(pitch as f32) * (shape.fine as f32 / 1200.0).exp2(), self.sample_rate);
+        v.osc.set_frequency(
+            midi_to_hz(pitch as f32) * (shape.fine as f32 / 1200.0).exp2(),
+            self.sample_rate,
+        );
         v.amp = (velocity as f32 / 127.0) * self.preset.level;
-        v.env
-            .set_release(self.preset.env.release * ((shape.release.clamp(0.0, 1.0) - 0.5) * 2.0 * RELEASE_OCTAVES).exp2());
+        v.env.set_release(
+            self.preset.env.release
+                * ((shape.release.clamp(0.0, 1.0) - 0.5) * 2.0 * RELEASE_OCTAVES).exp2(),
+        );
         v.gains = note_pan_gains(shape.pan);
         v.filter = note_filter(self.sample_rate, self.tone_hz, shape.mod_x, shape.mod_y);
         v.pitch = Some(pitch);
@@ -244,7 +285,9 @@ mod tests {
     }
 
     fn zero_crossings(xs: &[f32]) -> usize {
-        xs.windows(2).filter(|w| (w[0] <= 0.0) != (w[1] <= 0.0)).count()
+        xs.windows(2)
+            .filter(|w| (w[0] <= 0.0) != (w[1] <= 0.0))
+            .count()
     }
 
     #[test]
@@ -306,23 +349,64 @@ mod tests {
     fn fine_cents_retune_the_voice() {
         let frames = 9600;
         let plain = shaped("sine", 69, NoteShape::neutral(), frames).0;
-        let octave_up = shaped("sine", 69, NoteShape { fine: 1200, ..NoteShape::neutral() }, frames).0;
+        let octave_up = shaped(
+            "sine",
+            69,
+            NoteShape {
+                fine: 1200,
+                ..NoteShape::neutral()
+            },
+            frames,
+        )
+        .0;
         let (a, b) = (zero_crossings(&plain), zero_crossings(&octave_up));
         assert!(a > 100, "the reference note must actually oscillate: {a}");
         let ratio = b as f32 / a as f32;
-        assert!((ratio - 2.0).abs() < 0.05, "+1200 cents gave {b} crossings against {a} ({ratio})");
+        assert!(
+            (ratio - 2.0).abs() < 0.05,
+            "+1200 cents gave {b} crossings against {a} ({ratio})"
+        );
         // And the sign is right: a negative detune goes down, not up.
-        let octave_down = shaped("sine", 69, NoteShape { fine: -1200, ..NoteShape::neutral() }, frames).0;
+        let octave_down = shaped(
+            "sine",
+            69,
+            NoteShape {
+                fine: -1200,
+                ..NoteShape::neutral()
+            },
+            frames,
+        )
+        .0;
         assert!((zero_crossings(&octave_down) as f32 / a as f32 - 0.5).abs() < 0.05);
     }
 
     #[test]
     fn pan_places_the_voice_and_centre_stays_balanced() {
-        let (l, r) = shaped("sine", 69, NoteShape { pan: 0.0, ..NoteShape::neutral() }, 9600);
+        let (l, r) = shaped(
+            "sine",
+            69,
+            NoteShape {
+                pan: 0.0,
+                ..NoteShape::neutral()
+            },
+            9600,
+        );
         assert!(rms(&l) > 0.01, "hard left must still speak");
-        assert!(rms(&r) < rms(&l) * 1e-6, "hard left leaked into the right: {}", rms(&r));
+        assert!(
+            rms(&r) < rms(&l) * 1e-6,
+            "hard left leaked into the right: {}",
+            rms(&r)
+        );
 
-        let (l, r) = shaped("sine", 69, NoteShape { pan: 1.0, ..NoteShape::neutral() }, 9600);
+        let (l, r) = shaped(
+            "sine",
+            69,
+            NoteShape {
+                pan: 1.0,
+                ..NoteShape::neutral()
+            },
+            9600,
+        );
         assert!(rms(&r) > 0.01);
         assert!(rms(&l) < rms(&r) * 1e-6);
 
@@ -334,7 +418,14 @@ mod tests {
     fn release_lengthens_the_tail() {
         let tail_frames = |release: f32| {
             let mut s = PolySynth::new(VoicePreset::named("sine"), SR, 1);
-            s.note_on(69, 100, NoteShape { release, ..NoteShape::neutral() });
+            s.note_on(
+                69,
+                100,
+                NoteShape {
+                    release,
+                    ..NoteShape::neutral()
+                },
+            );
             let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
             s.render_add(&mut l, &mut r);
             s.note_off(69);
@@ -351,7 +442,10 @@ mod tests {
         let short = tail_frames(0.0);
         let long = tail_frames(1.0);
         assert!(short > 0, "even the shortest release has to ring briefly");
-        assert!(long > short * 4, "release 1.0 gave {long} frames against {short} at 0.0");
+        assert!(
+            long > short * 4,
+            "release 1.0 gave {long} frames against {short} at 0.0"
+        );
     }
 
     #[test]
@@ -359,7 +453,14 @@ mod tests {
         let render = |mod_x: f32| {
             let mut s = PolySynth::new(VoicePreset::named("saw"), SR, 1);
             s.set_tone_hz(2_000.0);
-            s.note_on(69, 100, NoteShape { mod_x, ..NoteShape::neutral() });
+            s.note_on(
+                69,
+                100,
+                NoteShape {
+                    mod_x,
+                    ..NoteShape::neutral()
+                },
+            );
             let (mut l, mut r) = (vec![0.0; 9600], vec![0.0; 9600]);
             s.render_add(&mut l, &mut r);
             l
@@ -383,7 +484,15 @@ mod tests {
         let render = |mod_y: f32| {
             let mut s = PolySynth::new(VoicePreset::named("saw"), SR, 1);
             s.set_tone_hz(2_000.0);
-            s.note_on(69, 100, NoteShape { mod_x: 0.4, mod_y, ..NoteShape::neutral() });
+            s.note_on(
+                69,
+                100,
+                NoteShape {
+                    mod_x: 0.4,
+                    mod_y,
+                    ..NoteShape::neutral()
+                },
+            );
             let (mut l, mut r) = (vec![0.0; 9600], vec![0.0; 9600]);
             s.render_add(&mut l, &mut r);
             l

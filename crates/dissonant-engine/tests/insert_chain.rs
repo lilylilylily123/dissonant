@@ -12,7 +12,9 @@
 use dissonant_core::{InsertTarget, NoteEvent, ProjectModel, Sequence, TICKS_PER_BEAT};
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
 use dissonant_engine::InsertSlot;
-use dissonant_plugins::{HostedPlugin, PluginAudioUnit, PluginDescriptor, PluginFormat, PluginKind};
+use dissonant_plugins::{
+    HostedPlugin, PluginAudioUnit, PluginDescriptor, PluginFormat, PluginKind,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -82,7 +84,8 @@ fn trim() -> PluginDescriptor {
 /// test's own stack) and only the audio unit crosses into the engine. The handle must outlive
 /// the unit, which is why every caller holds on to what this returns.
 fn open(desc: &PluginDescriptor) -> (HostedPlugin, Box<PluginAudioUnit>) {
-    let (hosted, unit) = HostedPlugin::open(desc, SR as f64, MAX_FRAMES).expect("open fixture effect");
+    let (hosted, unit) =
+        HostedPlugin::open(desc, SR as f64, MAX_FRAMES).expect("open fixture effect");
     (hosted, Box::new(unit))
 }
 
@@ -91,14 +94,13 @@ fn model() -> ProjectModel {
     let mut m = ProjectModel::empty();
     m.tracks[0].voice = "sine".into();
     m.patterns[0].length_ticks = 8 * TICKS_PER_BEAT;
-    let id = m.tracks[0].id;
-    m.patterns[0].notes_by_track.insert(id, vec![NoteEvent::new(0, 4 * TICKS_PER_BEAT, 69)]);
+    m.patterns[0].notes = vec![NoteEvent::new(0, 4 * TICKS_PER_BEAT, 69)];
     m
 }
 
 fn engine_for(m: &ProjectModel) -> Engine {
     let mut e = Engine::new(SR, Arc::new(Shared::default()), &m.master);
-    let seq = Sequence::from_pattern(m, &m.patterns[0].id).expect("pattern");
+    let seq = Sequence::from_pattern(m, &m.patterns[0].id, 0).expect("pattern");
     e.handle(EngineCommand::SetSequence(Arc::new(seq)));
     e
 }
@@ -120,7 +122,12 @@ fn rms(xs: &[f32]) -> f64 {
 }
 
 /// Adds an effect to a chain and returns the plugin handle to keep alive, plus the slot id.
-fn add(e: &mut Engine, target: InsertTarget, index: usize, desc: &PluginDescriptor) -> (HostedPlugin, Uuid) {
+fn add(
+    e: &mut Engine,
+    target: InsertTarget,
+    index: usize,
+    desc: &PluginDescriptor,
+) -> (HostedPlugin, Uuid) {
     let (hosted, unit) = open(desc);
     let id = Uuid::new_v4();
     e.handle(EngineCommand::AddInsert {
@@ -146,7 +153,11 @@ fn an_insert_changes_what_a_track_renders() {
     let wet = run(&mut wet_engine, 8_192);
 
     // The source has to be worth saturating, or "nothing changed" would prove nothing.
-    assert!(peak(&dry) > 0.05, "the test's own source is too quiet to judge: peak {}", peak(&dry));
+    assert!(
+        peak(&dry) > 0.05,
+        "the test's own source is too quiet to judge: peak {}",
+        peak(&dry)
+    );
     // A saturator driven at 6× lifts the body of the signal and flattens its tops, so the
     // loudness moves a long way, not by a rounding error.
     assert!(
@@ -155,7 +166,10 @@ fn an_insert_changes_what_a_track_renders() {
         rms(&dry),
         rms(&wet)
     );
-    assert!(peak(&wet) > peak(&dry), "saturation should not make the track quieter");
+    assert!(
+        peak(&wet) > peak(&dry),
+        "saturation should not make the track quieter"
+    );
 }
 
 #[test]
@@ -169,20 +183,34 @@ fn a_bypassed_insert_is_bit_identical_to_no_insert() {
 
     let mut bypassed = engine_for(&m);
     let (_hosted, id) = add(&mut bypassed, track, 0, &boost());
-    bypassed.handle(EngineCommand::SetInsertEnabled { target: track, id, on: false });
+    bypassed.handle(EngineCommand::SetInsertEnabled {
+        target: track,
+        id,
+        on: false,
+    });
     bypassed.handle(EngineCommand::Play);
     let with_bypassed = run(&mut bypassed, 8_192);
 
     // Not "close": a bypassed slot is skipped, so the samples must be the same bits. Anything
     // else means the chain is converting or copying the signal on a path that should be inert.
-    assert_eq!(without, with_bypassed, "a bypassed insert altered the output");
+    assert_eq!(
+        without, with_bypassed,
+        "a bypassed insert altered the output"
+    );
 
     // And re-enabling it still works — bypass must not have cost the slot its plugin.
     bypassed.handle(EngineCommand::Seek { tick: 0.0 });
-    bypassed.handle(EngineCommand::SetInsertEnabled { target: track, id, on: true });
+    bypassed.handle(EngineCommand::SetInsertEnabled {
+        target: track,
+        id,
+        on: true,
+    });
     bypassed.handle(EngineCommand::Play);
     let re_enabled = run(&mut bypassed, 8_192);
-    assert!(rms(&re_enabled) > rms(&without) * 1.5, "re-enabling the insert left it bypassed");
+    assert!(
+        rms(&re_enabled) > rms(&without) * 1.5,
+        "re-enabling the insert left it bypassed"
+    );
 }
 
 #[test]
@@ -226,7 +254,11 @@ fn the_order_of_two_effects_is_audible_and_moving_one_changes_it() {
     for e in [&mut first, &mut second] {
         e.handle(EngineCommand::Seek { tick: 0.0 });
     }
-    first.handle(EngineCommand::MoveInsert { target: track, id: boost_id, to: 1 });
+    first.handle(EngineCommand::MoveInsert {
+        target: track,
+        id: boost_id,
+        to: 1,
+    });
     first.handle(EngineCommand::Play);
     second.handle(EngineCommand::Play);
     let moved = run(&mut first, 8_192);
@@ -297,7 +329,15 @@ fn a_master_insert_runs_on_the_mixed_bus() {
     // Bypassing the master chain is the same bit-for-bit promise the tracks make.
     let mut bypassed = engine_for(&m);
     let (_hosted2, bid) = add(&mut bypassed, InsertTarget::Master, 0, &boost());
-    bypassed.handle(EngineCommand::SetInsertEnabled { target: InsertTarget::Master, id: bid, on: false });
+    bypassed.handle(EngineCommand::SetInsertEnabled {
+        target: InsertTarget::Master,
+        id: bid,
+        on: false,
+    });
     bypassed.handle(EngineCommand::Play);
-    assert_eq!(dry, run(&mut bypassed, 8_192), "a bypassed master insert altered the output");
+    assert_eq!(
+        dry,
+        run(&mut bypassed, 8_192),
+        "a bypassed master insert altered the output"
+    );
 }

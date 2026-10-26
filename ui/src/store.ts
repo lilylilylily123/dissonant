@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 import { getBridge } from "./bridge";
 import type {
@@ -5,6 +6,7 @@ import type {
   AudioImportProgress,
   AudioStatus,
   CatalogEntry,
+  ChordEvent,
   Command,
   ExportProgress,
   ExportRequest,
@@ -19,16 +21,21 @@ import type {
   ParamInfo,
   PlayMode,
   PluginDescriptor,
+  ProjectModel,
   RecoveryCandidate,
   Settings,
   Snapshot,
   SongPattern,
+  SoundPreset,
   TemplateInfo,
   Track,
+  ViewMode,
+  VibeInfo,
 } from "./types";
 import {
   barTicks as barTicksOf,
   beatsPerBar as bpbOf,
+  chordsInWindow,
   DEFAULT_SETTINGS,
   fileNameOf,
   insertChain,
@@ -36,6 +43,7 @@ import {
   TIER_COLORS,
   ticksToBeats,
 } from "./types";
+import { applyUiScale } from "./uiScale";
 
 export interface Toast {
   text: string;
@@ -63,18 +71,32 @@ export interface DialogSpec {
 
 export type BottomPanel = "devices" | "mixer";
 /**
- * Which top-level screen is showing. Separate from `mode`: `PlayMode` is a Rust enum that
- * decides what the engine sequences, and the guitar screen plays the song like any other
- * view — a third variant there would be a lie.
+ * Which top-level screen is showing. It is not what the engine sequences: `PlayMode` is a
+ * Rust enum with two variants, and SETUP, SONG and the guitar screen all play the song, so
+ * `playModeOf` folds this down for the bridge.
  */
-export type Screen = "pattern" | "song" | "guitar";
+export type Screen = ViewMode | "guitar";
 export type LiveKeyboard = "off" | "tier" | "chromatic";
+
+/** A pattern being dragged out of the tree, in client coordinates. */
+export interface PatternDrag {
+  patternId: string;
+  clientX: number;
+  clientY: number;
+}
+
+/** What the song view does when a dragged pattern is released over the window. */
+export type PatternDropHandler = (patternId: string, clientX: number, clientY: number) => void;
 
 interface State {
   snapshot: Snapshot | null;
-  mode: PlayMode;
+  /** Invariant: the selected pattern (if any) belongs to the selected track. */
   selectedTrackId: string | null;
   selectedPatternId: string | null;
+  /** The song tick the edited pattern's bar 1 sits on: its chords and section key come from there. */
+  chordOffsetTicks: number;
+  /** Clips selected in the song view. */
+  selectedClipIds: string[];
   selectedNoteIds: string[];
   /** Grid / default note length, in ticks. */
   noteLength: number;
@@ -102,7 +124,11 @@ interface State {
   exportOpen: boolean;
   exporting: ExportProgress | null;
   templates: TemplateInfo[];
-  templatesOpen: boolean;
+  /** The new-project screen (vibes, starter, templates, recent files). */
+  newProjectOpen: boolean;
+  /** It was opened at launch, over the fresh starter the app starts with. */
+  newProjectAtLaunch: boolean;
+  vibes: VibeInfo[];
   looping: boolean;
   /** Loop start/end in ticks. */
   loopRegion: [number, number] | null;
@@ -118,8 +144,16 @@ interface State {
   follow: boolean;
   /** Fold: only rows with notes (or chord tones nearby) are shown. */
   fold: boolean;
-  /** Another track whose notes are drawn as ghosts behind the roll. */
-  ghostTrackId: string | null;
+  /** Another pattern (any track) whose notes are drawn as ghosts behind the roll (heard too while `hearGhost` is on). */
+  ghostPatternId: string | null;
+  /** Play the ghost pattern along in pattern mode (it is always drawn). */
+  hearGhost: boolean;
+  /** How loud the ghost plays: 0…1.5, 1 = its track's own level. */
+  ghostLevel: number;
+  /** A pattern being dragged from the tree; the song view previews the drop from it. */
+  patternDrag: PatternDrag | null;
+  /** Registered by the song view while mounted; the tree calls it on release. */
+  patternDropHandler: PatternDropHandler | null;
   /** Which per-note property the lane under the roll (and the drum graph editor) edits. */
   laneProp: NoteProp;
   /** Something outside the roll (inspector, menu) asked for this selection. */
@@ -153,12 +187,21 @@ interface State {
     label?: string,
   ): Promise<void>;
   commitGesture(): Promise<void>;
+  /** Voice, tone and reverb from a named preset, as one undo step. */
+  applySoundPreset(trackId: string, preset: SoundPreset): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
-  /** Switch screens. The only writer of `screen` and `mode`. */
+  /** Switch screens. PATTERN loops the selected pattern; SETUP, SONG and the guitar screen
+   *  all play the song. The only writer of `screen`. */
   setScreen(screen: Screen): void;
+  /** Also selects that track's first pattern (or keeps the selected one if it's on that track), or none. */
   selectTrack(id: string): void;
+  /** Also selects its track. */
   selectPattern(id: string): void;
+  /** Select, set `chordOffsetTicks` to `atTick` (a clip's start; 0 = song bar 1) and switch to PATTERN. */
+  openPattern(patternId: string, atTick?: number): void;
+  /** Replace the clip selection, or add to it with `additive`. */
+  selectClips(ids: string[], additive?: boolean): void;
   setSelectedNoteIds(ids: string[]): void;
   setNoteLength(ticks: number): void;
   setZoom(zoom: number): void;
@@ -190,10 +233,14 @@ interface State {
   toggleBrush(): void;
   toggleFollow(): void;
   toggleFold(): void;
-  setGhostTrack(id: string | null): void;
+  setGhostPattern(id: string | null): void;
+  toggleHearGhost(): void;
+  setGhostLevel(level: number): void;
+  setPatternDrag(drag: PatternDrag | null): void;
+  setPatternDropHandler(fn: PatternDropHandler | null): void;
   setLaneProp(prop: NoteProp): void;
   requestSelection(ids: string[]): void;
-  /** Apply a pure edit to the selected track's notes in the selected pattern (ids = current selection). */
+  /** Apply a pure edit to the selected pattern's notes (ids = current selection). */
   transformSelection(
     fn: (notes: NoteEvent[], ids: Set<string>) => NoteEvent[],
     label: string,
@@ -220,7 +267,8 @@ interface State {
     okLabel?: string,
     initial?: string,
   ): Promise<string | null>;
-  openTemplates(open?: boolean): void;
+  openNewProject(open?: boolean): void;
+  newFromVibe(id: string): Promise<void>;
   refreshTemplates(): Promise<void>;
   saveAsTemplate(): Promise<void>;
   deleteTemplate(name: string): Promise<void>;
@@ -328,7 +376,7 @@ interface State {
   refreshInputDevices(): Promise<void>;
 }
 
-/** Push the appearance section into CSS variables, the live tier palette and the page zoom. */
+/** Push the appearance section into CSS variables, the live tier palette and the webview zoom. */
 export function applyAppearance(a: Settings["appearance"]) {
   const root = document.documentElement;
   TIER_COLORS.chordTone = a.tierColors.chordTone;
@@ -345,9 +393,7 @@ export function applyAppearance(a: Settings["appearance"]) {
   root.style.setProperty("--accent-rgb", `${r}, ${g}, ${b}`);
   root.style.setProperty("--accent-bg", `rgba(${r}, ${g}, ${b}, 0.16)`);
   root.style.setProperty("--accent-border", `rgba(${r}, ${g}, ${b}, 0.45)`);
-  (root.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(
-    a.uiScale,
-  );
+  void applyUiScale(a.uiScale);
   root.classList.toggle("reduced-motion", a.reducedMotion);
 }
 
@@ -356,11 +402,47 @@ let taps: number[] = [];
 let dialogResolve: ((value: string) => void) | null = null;
 let lastTitle = "";
 
+/** The engine's playback mode for a screen: only PATTERN loops a pattern. */
+export const playModeOf = (screen: Screen): PlayMode => (screen === "pattern" ? "pattern" : "song");
+
+/** A track's patterns, in model order. */
+export function patternsOf(m: ProjectModel, trackId: string): SongPattern[] {
+  return m.patterns.filter((p) => p.trackId === trackId);
+}
+
+/**
+ * The selection invariant over a (new) model: a surviving pattern brings its own track; a lost
+ * pattern falls back to the selected track's first pattern; a lost track to the first track.
+ */
+export function reconcileSelection(m: ProjectModel, trackId: string | null, patternId: string | null): { selectedTrackId: string | null; selectedPatternId: string | null } {
+  const pattern = m.patterns.find((p) => p.id === patternId);
+  if (pattern) return { selectedTrackId: pattern.trackId, selectedPatternId: pattern.id };
+  const track = m.tracks.find((t) => t.id === trackId) ?? m.tracks[0];
+  if (!track) return { selectedTrackId: null, selectedPatternId: null };
+  return { selectedTrackId: track.id, selectedPatternId: patternsOf(m, track.id)[0]?.id ?? null };
+}
+
 export const useStore = create<State>((set, get) => {
   const syncPlayback = async () => {
     const b = await getBridge();
-    const { mode, selectedPatternId } = get();
-    await b.setPlaybackContext(mode, selectedPatternId);
+    const { screen, selectedPatternId, chordOffsetTicks, ghostPatternId, hearGhost, ghostLevel } = get();
+    const ghost = hearGhost && ghostPatternId !== selectedPatternId ? ghostPatternId : null;
+    await b.setPlaybackContext(playModeOf(screen), selectedPatternId, chordOffsetTicks, ghost, ghostLevel);
+  };
+
+  /**
+   * Move the selection to `trackId` / `patternId` (already reconciled). A different pattern
+   * drops the note selection, the loop region and the chord offset; a different track
+   * becomes the live (MIDI / keyboard) track.
+   */
+  const moveSelection = (next: { selectedTrackId: string | null; selectedPatternId: string | null }, chordOffsetTicks?: number) => {
+    const { selectedTrackId, selectedPatternId, chordOffsetTicks: before } = get();
+    const patternChanged = next.selectedPatternId !== selectedPatternId;
+    if (patternChanged && get().loopRegion) get().setLoopRegion(null);
+    const offset = chordOffsetTicks ?? (patternChanged ? 0 : get().chordOffsetTicks);
+    set({ ...next, chordOffsetTicks: offset, ...(patternChanged || next.selectedTrackId !== selectedTrackId ? { selectedNoteIds: [] } : {}) });
+    if (next.selectedTrackId !== selectedTrackId) void getBridge().then((b) => b.setLiveTrack(next.selectedTrackId));
+    return patternChanged || offset !== before;
   };
 
   /** What the user is seeing this insert called, for an undo label. Falls back to the plain
@@ -372,25 +454,45 @@ export const useStore = create<State>((set, get) => {
   };
 
   const applySnapshot = (snapshot: Snapshot) => {
-    const { selectedTrackId, selectedPatternId } = get();
-    const tracks = snapshot.model.tracks;
-    const patterns = snapshot.model.patterns;
-    const trackOk = tracks.some((t) => t.id === selectedTrackId);
-    const patternOk = patterns.some((p) => p.id === selectedPatternId);
+    const m = snapshot.model;
+    const { selectedTrackId, selectedPatternId, selectedClipIds, ghostPatternId } = get();
+    const next = reconcileSelection(m, selectedTrackId, selectedPatternId);
+    const patternLost = next.selectedPatternId !== selectedPatternId;
+    const clipIds = new Set(m.clips.map((c) => c.id));
+    const keptClips = selectedClipIds.filter((id) => clipIds.has(id));
     set({
       snapshot,
-      selectedTrackId: trackOk ? selectedTrackId : (tracks[0]?.id ?? null),
-      selectedPatternId: patternOk
-        ? selectedPatternId
-        : (patterns[0]?.id ?? null),
+      ...(keptClips.length !== selectedClipIds.length ? { selectedClipIds: keptClips } : {}),
+      ...(ghostPatternId && !m.patterns.some((p) => p.id === ghostPatternId) ? { ghostPatternId: null } : {}),
     });
-    if (!patternOk) void syncPlayback();
+    const ghostLost = ghostPatternId !== null && get().ghostPatternId === null;
+    moveSelection(next);
+    if (patternLost || ghostLost) void syncPlayback();
     // OS window title: "song.dissonant • — dissonant"
     const title = `${fileNameOf(snapshot.path)}${snapshot.dirty ? " •" : ""} — dissonant`;
     if (title !== lastTitle) {
       lastTitle = title;
       void getBridge().then((b) => b.setTitle(title));
     }
+  };
+
+  /**
+   * A fresh, untitled starter or vibe also turns the chord bed on, so the first press of space
+   * plays the progression with everything else. A no-op for a project without chords.
+   */
+  const hearBedForFresh = (snapshot: Snapshot) => {
+    if (snapshot.path !== null || snapshot.dirty || get().hearChords) return;
+    if (snapshot.model.chords.length === 0) return;
+    set({ hearChords: true });
+    void getBridge().then((b) => b.setHearChords(true));
+  };
+
+  /** A fresh project (new / starter / vibe / template) opens on SETUP. */
+  const openFresh = async (snapshot: Snapshot) => {
+    set({ screen: "setup", selectedClipIds: [] });
+    applySnapshot(snapshot);
+    await syncPlayback();
+    hearBedForFresh(snapshot);
   };
 
   /** Offer to restore autosaves left by an earlier run, newest first. */
@@ -425,9 +527,10 @@ export const useStore = create<State>((set, get) => {
 
   return {
     snapshot: null,
-    mode: "pattern",
     selectedTrackId: null,
     selectedPatternId: null,
+    chordOffsetTicks: 0,
+    selectedClipIds: [],
     selectedNoteIds: [],
     noteLength: 240,
     zoom: 1,
@@ -453,7 +556,9 @@ export const useStore = create<State>((set, get) => {
     exportOpen: false,
     exporting: null,
     templates: [],
-    templatesOpen: false,
+    newProjectOpen: false,
+    newProjectAtLaunch: false,
+    vibes: [],
     looping: true,
     loopRegion: null,
     armed: false,
@@ -465,7 +570,11 @@ export const useStore = create<State>((set, get) => {
     brush: false,
     follow: true,
     fold: false,
-    ghostTrackId: null,
+    ghostPatternId: null,
+    hearGhost: true,
+    ghostLevel: 1,
+    patternDrag: null,
+    patternDropHandler: null,
     laneProp: "velocity",
     selectionRequest: null,
     plugins: [],
@@ -492,8 +601,12 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         console.warn("settings unavailable", e);
       }
-      applySnapshot(await b.getState());
+      const first = await b.getState();
+      // The project the app launches with is a fresh one unless it came from a file.
+      if (first.path === null && !first.dirty) set({ screen: "setup" });
+      applySnapshot(first);
       await syncPlayback();
+      hearBedForFresh(first);
       await b.setLiveTrack(get().selectedTrackId);
       b.onPlayhead((e) =>
         set({
@@ -541,10 +654,22 @@ export const useStore = create<State>((set, get) => {
       void get().refreshPlugins();
       void get().refreshInputDevices();
       try {
+        set({ vibes: await b.listVibes() });
+      } catch {
+        /* no vibes backend */
+      }
+      let recovering = false;
+      try {
         const candidates = await b.recoveryCandidates();
-        if (candidates.length) void offerRecovery(candidates);
+        recovering = candidates.length > 0;
+        if (recovering) void offerRecovery(candidates);
       } catch {
         /* no recovery backend */
+      }
+      // The new-project screen greets a fresh launch; a recovery offer takes its place.
+      if (!recovering && get().settings.editing.showWelcome) {
+        get().openNewProject(true);
+        set({ newProjectAtLaunch: true });
       }
     },
 
@@ -562,6 +687,15 @@ export const useStore = create<State>((set, get) => {
       applySnapshot(await b.commitGesture());
     },
 
+    async applySoundPreset(trackId, preset) {
+      // Three transient edits folded into one undo step by commitGesture, like a knob drag.
+      const label = `sound: ${preset.name}`;
+      await get().dispatch({ type: "setTrackVoice", id: trackId, voice: preset.voice }, true, label);
+      await get().dispatch({ type: "setTrackParam", id: trackId, param: "tone", value: preset.tone }, true, label);
+      await get().dispatch({ type: "setTrackParam", id: trackId, param: "reverbSend", value: preset.reverbSend }, true, label);
+      await get().commitGesture();
+    },
+
     async undo() {
       const b = await getBridge();
       applySnapshot(await b.undo());
@@ -573,18 +707,35 @@ export const useStore = create<State>((set, get) => {
     },
 
     setScreen(screen) {
-      // The guitar screen plays the song timeline, so it shares song mode with the arrangement.
-      set({ screen, mode: screen === "pattern" ? "pattern" : "song" });
-      void syncPlayback();
+      // SETUP, SONG and the guitar screen all play the song timeline; only PATTERN loops a
+      // pattern, so the engine's mode only has to follow that one step.
+      const before = playModeOf(get().screen);
+      set({ screen });
+      if (playModeOf(screen) !== before) void syncPlayback();
     },
     selectTrack(id) {
-      set({ selectedTrackId: id, selectedNoteIds: [] });
-      void getBridge().then((b) => b.setLiveTrack(id));
+      const m = get().snapshot?.model;
+      if (!m || !m.tracks.some((t) => t.id === id)) return;
+      const current = m.patterns.find((p) => p.id === get().selectedPatternId);
+      const patternId = current?.trackId === id ? current.id : (patternsOf(m, id)[0]?.id ?? null);
+      if (moveSelection({ selectedTrackId: id, selectedPatternId: patternId })) void syncPlayback();
     },
     selectPattern(id) {
-      if (id !== get().selectedPatternId) get().setLoopRegion(null);
-      set({ selectedPatternId: id, selectedNoteIds: [] });
+      const p = get().snapshot?.model.patterns.find((x) => x.id === id);
+      if (!p) return;
+      if (moveSelection({ selectedTrackId: p.trackId, selectedPatternId: p.id })) void syncPlayback();
+    },
+    openPattern(patternId, atTick) {
+      const p = get().snapshot?.model.patterns.find((x) => x.id === patternId);
+      if (!p) return;
+      const offset = Number.isFinite(atTick) ? Math.max(0, atTick!) : 0;
+      if (offset !== get().chordOffsetTicks && get().loopRegion) get().setLoopRegion(null);
+      moveSelection({ selectedTrackId: p.trackId, selectedPatternId: p.id }, offset);
+      set({ screen: "pattern" });
       void syncPlayback();
+    },
+    selectClips(ids, additive = false) {
+      set((s) => ({ selectedClipIds: additive ? [...new Set([...s.selectedClipIds, ...ids])] : [...new Set(ids)] }));
     },
     setSelectedNoteIds(ids) {
       set({ selectedNoteIds: ids });
@@ -732,8 +883,24 @@ export const useStore = create<State>((set, get) => {
     toggleFold() {
       set((s) => ({ fold: !s.fold }));
     },
-    setGhostTrack(id) {
-      set({ ghostTrackId: id });
+    setGhostPattern(id) {
+      set({ ghostPatternId: id });
+      void syncPlayback();
+    },
+    toggleHearGhost() {
+      set((s) => ({ hearGhost: !s.hearGhost }));
+      void syncPlayback();
+    },
+    setGhostLevel(level) {
+      if (!Number.isFinite(level)) return;
+      set({ ghostLevel: Math.min(1.5, Math.max(0, level)) });
+      void syncPlayback();
+    },
+    setPatternDrag(drag) {
+      set({ patternDrag: drag });
+    },
+    setPatternDropHandler(fn) {
+      set({ patternDropHandler: fn });
     },
     setLaneProp(prop) {
       set({ laneProp: prop });
@@ -746,18 +913,12 @@ export const useStore = create<State>((set, get) => {
     transformSelection(fn, label) {
       const st = get();
       const pattern = selectedPattern(st);
-      const track = selectedTrack(st);
-      if (!pattern || !track) return;
-      const notes = pattern.notesByTrack[track.id] ?? [];
+      if (!pattern) return;
+      const notes = pattern.notes;
       const next = fn(notes, new Set(st.selectedNoteIds));
       if (next === notes) return;
       void st.dispatch(
-        {
-          type: "setNotes",
-          patternId: pattern.id,
-          trackId: track.id,
-          notes: next,
-        },
+        { type: "setNotes", patternId: pattern.id, notes: next },
         false,
         label,
       );
@@ -766,8 +927,8 @@ export const useStore = create<State>((set, get) => {
     async newProject() {
       const b = await getBridge();
       if (!(await get().confirmDiscard("creating a new project"))) return;
-      applySnapshot(await b.newProject(true));
-      await syncPlayback();
+      // No explicit choice: the backend follows the "new project opens" setting.
+      await openFresh(await b.newProject());
     },
 
     async openProject() {
@@ -860,7 +1021,7 @@ export const useStore = create<State>((set, get) => {
       const b = await getBridge();
       const st = get();
       const scope =
-        st.mode === "song" && st.snapshot?.model.clips.length
+        st.screen !== "pattern" && st.snapshot?.model.clips.length
           ? "song"
           : "pattern";
       const base = fileNameOf(st.snapshot?.path).replace(/\.dissonant$/, "");
@@ -880,15 +1041,11 @@ export const useStore = create<State>((set, get) => {
     },
     async importMidi() {
       const b = await getBridge();
-      const pattern = selectedPattern(get());
-      if (!pattern) return;
       const path = await b.pickOpenPath(["mid", "midi"], "MIDI file");
       if (!path) return;
       try {
-        applySnapshot(await b.importMidi(path, pattern.id));
-        get().showToast(
-          `imported ${fileNameOf(path)} into ${pattern.name} as new tracks`,
-        );
+        applySnapshot(await b.importMidi(path));
+        get().showToast(`imported ${fileNameOf(path)} as new tracks`);
       } catch (e) {
         get().showToast(String(e), true);
       }
@@ -910,9 +1067,22 @@ export const useStore = create<State>((set, get) => {
       });
       return v === "ok" ? get().dialogText.trim() || null : null;
     },
-    openTemplates(open = true) {
-      set({ templatesOpen: open });
-      if (open) void get().refreshTemplates();
+    openNewProject(open = true) {
+      set({ newProjectOpen: open, newProjectAtLaunch: false });
+      if (open) {
+        void get().refreshTemplates();
+        void get().refreshRecent();
+      }
+    },
+    async newFromVibe(id) {
+      const b = await getBridge();
+      if (!(await get().confirmDiscard("creating a new project"))) return;
+      set({ newProjectOpen: false, newProjectAtLaunch: false });
+      try {
+        await openFresh(await b.newFromVibe(id));
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
     },
     async refreshTemplates() {
       const b = await getBridge();
@@ -960,13 +1130,19 @@ export const useStore = create<State>((set, get) => {
     },
     async newFromTemplate(name) {
       const b = await getBridge();
+      // At launch the open project already is a fresh starter: picking it just gets to work.
+      const snap0 = get().snapshot;
+      if (name === "starter" && get().newProjectAtLaunch && snap0 && snap0.path === null && !snap0.dirty && !snap0.canUndo) {
+        set({ newProjectOpen: false, newProjectAtLaunch: false });
+        get().setScreen("setup");
+        return;
+      }
       if (!(await get().confirmDiscard("creating a new project"))) return;
-      set({ templatesOpen: false });
+      set({ newProjectOpen: false, newProjectAtLaunch: false });
       try {
         if (name === "starter" || name === "empty")
-          applySnapshot(await b.newProject(name === "starter"));
-        else applySnapshot(await b.newFromTemplate(name));
-        await syncPlayback();
+          await openFresh(await b.newProject(name === "starter"));
+        else await openFresh(await b.newFromTemplate(name));
       } catch (e) {
         get().showToast(String(e), true);
       }
@@ -1329,7 +1505,7 @@ export const useStore = create<State>((set, get) => {
       const target = trackId ?? (selected?.isAudio ? selected.id : null);
       try {
         applySnapshot(await b.importAudio(path, target, 0));
-        set({ screen: "guitar", mode: "song", importing: null });
+        set({ screen: "guitar", importing: null });
         await syncPlayback();
         get().showToast(`imported ${fileNameOf(path)}`);
       } catch (e) {
@@ -1365,13 +1541,30 @@ export const useStore = create<State>((set, get) => {
 
 // ─── Selectors / helpers ───────────────────────────────────────────────────────────────────
 
+/** The selected pattern, always on the selected track; null when that track has no patterns. */
 export function selectedPattern(s: State): SongPattern | null {
   const m = s.snapshot?.model;
   if (!m) return null;
-  return (
-    m.patterns.find((p) => p.id === s.selectedPatternId) ??
-    m.patterns[0] ??
-    null
+  return m.patterns.find((p) => p.id === s.selectedPatternId) ?? null;
+}
+
+/** The project chords the selected pattern is heard and tiered against, from
+ *  `chordOffsetTicks` (non-hook). */
+export function patternChords(s: State): ChordEvent[] {
+  const m = s.snapshot?.model;
+  const p = selectedPattern(s);
+  if (!m || !p) return [];
+  return chordsInWindow(m.chords, s.chordOffsetTicks, p.lengthTicks);
+}
+
+/** `patternChords` as a hook, memoized so it is stable between renders (safe in effect deps). */
+export function usePatternChords(): ChordEvent[] {
+  const chords = useStore((s) => s.snapshot?.model.chords);
+  const offset = useStore((s) => s.chordOffsetTicks);
+  const length = useStore((s) => selectedPattern(s)?.lengthTicks ?? null);
+  return useMemo(
+    () => (chords && length !== null ? chordsInWindow(chords, offset, length) : []),
+    [chords, offset, length],
   );
 }
 
@@ -1437,13 +1630,11 @@ export function barTicks(s: State): number {
 }
 
 /**
- * The key the selected pattern is tiered against: if the pattern sits in a section with
- * its own key (its first clip), that key; otherwise the project key.
+ * The key the selected pattern is tiered against: the key of the section at
+ * `chordOffsetTicks` (where the pattern was opened), or the project key.
  */
 export function effectiveKey(s: State): KeyState {
   const m = s.snapshot?.model;
   if (!m) return { rootPitchClass: null, scale: "major", isLocked: false };
-  const p = selectedPattern(s);
-  const clip = p ? m.clips.find((c) => c.patternId === p.id) : undefined;
-  return clip ? keyAt(m, clip.startTick) : m.key;
+  return keyAt(m, s.chordOffsetTicks);
 }

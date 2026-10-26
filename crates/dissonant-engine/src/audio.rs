@@ -26,7 +26,12 @@ impl AudioBuffer {
     pub fn new(sample_rate: u32, channels: u8, data: Vec<f32>) -> Self {
         let ch = channels.max(1) as usize;
         let frames = data.len() / ch;
-        AudioBuffer { sample_rate, channels: channels.max(1), frames, data }
+        AudioBuffer {
+            sample_rate,
+            channels: channels.max(1),
+            frames,
+            data,
+        }
     }
 
     /// One frame's left and right samples. Mono sources feed both sides; anything past stereo
@@ -139,7 +144,13 @@ impl AudioLane {
     /// already run out — so the caller can skip its own per-sample work. The decision is made
     /// here and not by the caller: whether there is anything to play depends on the block's
     /// clips, which only the lane looks at.
-    pub fn render_add(&mut self, l: &mut [f32], r: &mut [f32], ctx: &BlockContext<'_>, sample_rate: f32) -> bool {
+    pub fn render_add(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        ctx: &BlockContext<'_>,
+        sample_rate: f32,
+    ) -> bool {
         let frames = l.len().min(r.len());
         if self.clip_l.len() < frames {
             self.clip_l.resize(frames, 0.0);
@@ -218,8 +229,12 @@ fn mix_clip(
     let gain = clip.gain as f32;
 
     // Which output frames this clip covers in this block.
-    let first = (((clip.start_seconds - block_start) * sample_rate as f64).ceil().max(0.0) as usize).min(frames);
-    let last = (((clip.start_seconds + clip.length_seconds - block_start) * sample_rate as f64).ceil() as i64)
+    let first = (((clip.start_seconds - block_start) * sample_rate as f64)
+        .ceil()
+        .max(0.0) as usize)
+        .min(frames);
+    let last = (((clip.start_seconds + clip.length_seconds - block_start) * sample_rate as f64)
+        .ceil() as i64)
         .clamp(0, frames as i64) as usize;
 
     for i in first..last {

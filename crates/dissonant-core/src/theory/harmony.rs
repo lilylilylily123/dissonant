@@ -5,7 +5,9 @@ use super::normalize;
 use crate::model::{ChordEvent, ScaleType};
 use serde::{Deserialize, Serialize};
 
-pub const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+pub const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
 const MAJOR_STEPS: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 const MINOR_STEPS: [i32; 7] = [0, 2, 3, 5, 7, 8, 10];
 
@@ -19,23 +21,49 @@ pub struct ChordSuggestion {
     pub roman_numeral: String,
 }
 
-/// A known-good progression starter, as scale degrees (0-based).
+/// A known-good progression starter, as scale degrees (0-based). `name` is the roman-numeral
+/// spelling, `mood` says how it feels in plain words, and `scale` is the scale the mood is true
+/// in (the degrees work in either scale, the feeling doesn't).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressionStarter {
     pub name: &'static str,
+    pub mood: &'static str,
+    pub scale: ScaleType,
     pub degrees: Vec<i32>,
 }
 
+/// Every starter, major ones first. The first is the default progression for new patterns.
 pub fn starters() -> Vec<ProgressionStarter> {
+    use ScaleType::{Major, Minor};
+    let s = |name, mood, scale, degrees: &[i32]| ProgressionStarter {
+        name,
+        mood,
+        scale,
+        degrees: degrees.to_vec(),
+    };
     vec![
-        ProgressionStarter { name: "I–IV–V–vi", degrees: vec![0, 3, 4, 5] },
-        ProgressionStarter { name: "I–V–vi–IV", degrees: vec![0, 4, 5, 3] },
-        ProgressionStarter { name: "vi–IV–I–V", degrees: vec![5, 3, 0, 4] },
-        ProgressionStarter { name: "ii–V–I", degrees: vec![1, 4, 0, 0] },
-        ProgressionStarter { name: "I–vi–IV–V", degrees: vec![0, 5, 3, 4] },
-        ProgressionStarter { name: "i–VI–III–VII", degrees: vec![0, 5, 2, 6] },
+        s("I–IV–V–vi", "bright, lifting", Major, &[0, 3, 4, 5]),
+        s("I–V–vi–IV", "big and hopeful", Major, &[0, 4, 5, 3]),
+        s("vi–IV–I–V", "sad but hopeful", Major, &[5, 3, 0, 4]),
+        s("I–vi–IV–V", "old-school, sweet", Major, &[0, 5, 3, 4]),
+        s("ii–V–I", "jazzy, resolved", Major, &[1, 4, 0, 0]),
+        s("I–IV", "open two-chord vamp", Major, &[0, 3]),
+        s("i–VI–III–VII", "dark, driving", Minor, &[0, 5, 2, 6]),
+        s("i–VII–VI–VII", "brooding loop", Minor, &[0, 6, 5, 6]),
+        s("i–v–VI–iv", "sad, cinematic", Minor, &[0, 4, 5, 3]),
+        s("i–iv", "moody two-chord vamp", Minor, &[0, 3]),
+        s("i–VI", "hazy, floating", Minor, &[0, 5]),
+        s("i", "one-chord drone", Minor, &[0]),
     ]
+}
+
+/// The starters whose mood holds in `scale`, in list order.
+pub fn starters_for(scale: ScaleType) -> Vec<ProgressionStarter> {
+    starters()
+        .into_iter()
+        .filter(|s| s.scale == scale)
+        .collect()
 }
 
 pub fn scale_steps(scale: ScaleType) -> &'static [i32; 7] {
@@ -65,7 +93,10 @@ pub fn key_name(root: i32, scale: ScaleType) -> String {
 
 /// The seven pitch classes of a key's scale, in scale order starting from the root.
 pub fn scale_pitch_classes(root: i32, scale: ScaleType) -> Vec<i32> {
-    scale_steps(scale).iter().map(|s| normalize(root + s)).collect()
+    scale_steps(scale)
+        .iter()
+        .map(|s| normalize(root + s))
+        .collect()
 }
 
 /// The seven diatonic triads of a key, built by stacking scale thirds.
@@ -73,7 +104,10 @@ pub fn diatonic_chords(root: i32, scale: ScaleType) -> Vec<ChordSuggestion> {
     let pcs = scale_pitch_classes(root, scale);
     (0..7)
         .map(|degree| {
-            let chord: Vec<i32> = [degree, degree + 2, degree + 4].iter().map(|d| pcs[d % 7]).collect();
+            let chord: Vec<i32> = [degree, degree + 2, degree + 4]
+                .iter()
+                .map(|d| pcs[d % 7])
+                .collect();
             let quality = triad_quality(&chord);
             ChordSuggestion {
                 name: format!("{}{}", note_name(chord[0]), quality.suffix()),
@@ -90,7 +124,13 @@ pub fn diatonic_chords(root: i32, scale: ScaleType) -> Vec<ChordSuggestion> {
 /// The result always fits inside `total_ticks`: on a pattern too short for one pass of the
 /// degrees at `chord_ticks` each, the chords are divided to fit rather than written past the end
 /// (where they would be invisible in the lane, never heard, and still saved into the document).
-pub fn progression(degrees: &[i32], root: i32, scale: ScaleType, total_ticks: i64, chord_ticks: i64) -> Vec<ChordEvent> {
+pub fn progression(
+    degrees: &[i32],
+    root: i32,
+    scale: ScaleType,
+    total_ticks: i64,
+    chord_ticks: i64,
+) -> Vec<ChordEvent> {
     if degrees.is_empty() || chord_ticks <= 0 || total_ticks <= 0 {
         return vec![];
     }
@@ -108,7 +148,11 @@ pub fn progression(degrees: &[i32], root: i32, scale: ScaleType, total_ticks: i6
             let c = &diatonic[degree];
             let start = i as i64 * ticks;
             // The last chord absorbs any remainder so the lane is covered with no gap.
-            let length = if i + 1 == slots { total_ticks - start } else { ticks };
+            let length = if i + 1 == slots {
+                total_ticks - start
+            } else {
+                ticks
+            };
             ChordEvent::new(start, length, c.pitch_classes.clone(), Some(c.name.clone()))
         })
         .collect()
@@ -184,7 +228,10 @@ pub fn chord_name(pitch_classes: &[i32]) -> String {
             }
         }
     }
-    pcs.iter().map(|&p| note_name(p)).collect::<Vec<_>>().join("·")
+    pcs.iter()
+        .map(|&p| note_name(p))
+        .collect::<Vec<_>>()
+        .join("·")
 }
 
 #[cfg(test)]
@@ -193,8 +240,14 @@ mod tests {
 
     #[test]
     fn c_major_scale() {
-        assert_eq!(scale_pitch_classes(0, ScaleType::Major), vec![0, 2, 4, 5, 7, 9, 11]);
-        assert_eq!(scale_pitch_classes(9, ScaleType::Minor), vec![9, 11, 0, 2, 4, 5, 7]);
+        assert_eq!(
+            scale_pitch_classes(0, ScaleType::Major),
+            vec![0, 2, 4, 5, 7, 9, 11]
+        );
+        assert_eq!(
+            scale_pitch_classes(9, ScaleType::Minor),
+            vec![9, 11, 0, 2, 4, 5, 7]
+        );
     }
 
     #[test]
@@ -244,7 +297,10 @@ mod tests {
         let beat = crate::ticks::TICKS_PER_BEAT;
         let chords = progression(&[0, 3, 4, 5], 0, ScaleType::Major, 4 * beat, 4 * beat);
         assert_eq!(chords.len(), 4);
-        assert_eq!(chords[0].length_ticks, beat, "four degrees share the one-bar pattern");
+        assert_eq!(
+            chords[0].length_ticks, beat,
+            "four degrees share the one-bar pattern"
+        );
         assert!(progression(&[], 0, ScaleType::Major, 16 * beat, 4 * beat).is_empty());
     }
 }

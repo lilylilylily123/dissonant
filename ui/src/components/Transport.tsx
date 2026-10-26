@@ -3,6 +3,7 @@ import { peakDb, selectedPattern, useStore } from "../store";
 import { DEFAULT_SWING_GRID_TICKS, tempoMap, TICKS_PER_BEAT, ticksToBeats, TIME_SIGNATURES } from "../types";
 import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
+import { keys } from "../platform";
 
 function pad(n: number, w: number) {
   return String(n).padStart(w, "0");
@@ -11,7 +12,6 @@ function pad(n: number, w: number) {
 export function Transport() {
   const s = useStore();
   const model = s.snapshot!.model;
-  const pattern = useStore(selectedPattern);
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmText, setBpmText] = useState(model.tempo.toFixed(3));
   useEffect(() => setBpmText(model.tempo.toFixed(3)), [model.tempo]);
@@ -26,19 +26,20 @@ export function Transport() {
   const bar = Math.floor(tick / bticks) + 1;
   const bib = Math.floor((tick % bticks) / TICKS_PER_BEAT) + 1;
   const six = Math.floor((tick % TICKS_PER_BEAT) / (TICKS_PER_BEAT / 4)) + 1;
-  const map = s.mode === "song" ? tempoMap(model.tempo, model.tempoPoints) : null;
+  // Only PATTERN runs inside a pattern; SETUP, SONG and the guitar screen run along the song.
+  const map = s.screen !== "pattern" ? tempoMap(model.tempo, model.tempoPoints) : null;
   const secs = map && !map.isConstant ? map.secondsAt(tick) : (ticksToBeats(tick) * 60) / model.tempo;
   const liveBpm = map && !map.isConstant ? map.bpmAt(tick) : null;
   const mm = Math.floor(secs / 60);
   const ss = secs - mm * 60;
 
-  // Key: locked value, or a suggestion from the melodic notes of the selected pattern.
+  // Key: locked value, or a suggestion from the notes of every melodic pattern (each pattern
+  // belongs to one track, so drum patterns are left out by their track; muted notes too).
   const drumIds = new Set(model.tracks.filter((t) => t.isDrum).map((t) => t.id));
-  const pcs = pattern
-    ? Object.entries(pattern.notesByTrack)
-        .filter(([tid]) => !drumIds.has(tid))
-        .flatMap(([, notes]) => notes.map((n) => n.pitch))
-    : [];
+  const pcs = model.patterns.filter((p) => !drumIds.has(p.trackId)).flatMap((p) => p.notes.filter((n) => !n.muted).map((n) => n.pitch));
+  // Record target: the selected pattern, on its track.
+  const recPattern = selectedPattern(s);
+  const recInto = recPattern ? `${model.tracks.find((t) => t.id === recPattern.trackId)?.name ?? "?"} › ${recPattern.name}` : null;
   const detected = detectKey(pcs);
   const suggestion = !model.key.isLocked && detected.isConfident ? detected.candidates[0] : null;
 
@@ -58,9 +59,10 @@ export function Transport() {
       <div className="tgroup">
         <span className="cap">view</span>
         <div className="seg">
-          <div className={s.screen === "pattern" ? "on" : ""} onClick={() => s.setScreen("pattern")}>pat</div>
-          <div className={s.screen === "song" ? "on" : ""} onClick={() => s.setScreen("song")}>song</div>
-          <div className={s.screen === "guitar" ? "on" : ""} onClick={() => s.setScreen("guitar")}>gtr</div>
+          <div className={s.screen === "setup" ? "on" : ""} onClick={() => s.setScreen("setup")} title="setup: chords, sections, tempo, song length">setup</div>
+          <div className={s.screen === "pattern" ? "on" : ""} onClick={() => s.setScreen("pattern")} title="pattern: the piano roll (Tab cycles)">pat</div>
+          <div className={s.screen === "song" ? "on" : ""} onClick={() => s.setScreen("song")} title="song: the arrangement (Tab cycles)">song</div>
+          <div className={s.screen === "guitar" ? "on" : ""} onClick={() => s.setScreen("guitar")} title="guitar: the rig, takes and tab">gtr</div>
         </div>
       </div>
       <div className="tdiv" />
@@ -101,7 +103,8 @@ export function Transport() {
             className="tbtn"
             style={s.armed ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
             onClick={() => s.toggleRecord()}
-            title="record arm (R): played notes land in the selected pattern while playing"
+            disabled={!s.armed && !recInto}
+            title={recInto ? `record arm (R): notes you play land in ${recInto} while playing` : "record arm (R): pick a pattern to record into first"}
           >
             <div style={{ width: 11, height: 11, borderRadius: "50%", background: s.armed ? "#ff3b30" : "#5f5f68", boxShadow: s.armed ? "0 0 8px #ff3b30" : "none" }} />
           </button>
@@ -202,7 +205,7 @@ export function Transport() {
                 e.preventDefault();
                 setTempo(Math.round(model.tempo) + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 10 : 1));
               }}
-              title="click to type (↑↓ ±1, ⇧ ±10) · drag up/down · scroll to nudge · double-click resets"
+              title={keys("click to type (↑↓ ±1, ⇧ ±10) · drag up/down · scroll to nudge · double-click resets")}
             >
               {model.tempo.toFixed(3)}
             </span>

@@ -1,15 +1,15 @@
 import { useRef, useState } from "react";
 import { useStore } from "../store";
 import { tempoMap, ticksToBeats, TICKS_PER_BEAT, type TempoPoint } from "../types";
-
-const H = 40;
+import { keys } from "../platform";
 
 /**
- * SONG mode: the tempo map under the ruler. Double-click adds a point at the tempo in force
- * there; drag a point up/down for bpm (⇧ fine) and sideways to move it (snapped to beats);
- * ⌥-click toggles ramp (a glide from the previous point); right-click removes.
+ * The tempo map along the song (SETUP, under the chords). Double-click adds a point at the
+ * tempo in force there; drag a point up/down for bpm (⇧ fine) and sideways to move it (snapped
+ * to beats); ⌥-click toggles ramp (a glide from the previous point); right-click removes.
  */
-export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number; timelineW: number; pxPerBeat: number; bpb: number }) {
+export function TempoLane({ headW, timelineW, pxPerBeat, bpb, height = 40 }: { headW: number; timelineW: number; pxPerBeat: number; bpb: number; height?: number }) {
+  const H = height;
   const model = useStore((s) => s.snapshot!.model);
   const playhead = useStore((s) => s.playhead);
   const dispatch = useStore((s) => s.dispatch);
@@ -75,7 +75,7 @@ export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number;
 
   const now = map.bpmAt(playhead);
   return (
-    <div className="tempolane" style={{ width: headW + timelineW + 12 }}>
+    <div className="tempolane" style={{ width: headW + timelineW + 12, height }}>
       <div className="head" style={{ width: headW }}>
         <span className="cap">tempo</span>
         <span className="mono" style={{ color: map.isConstant ? "var(--text-5)" : "var(--accent)" }}>{now.toFixed(1)}</span>
@@ -108,7 +108,7 @@ export function TempoLane({ headW, timelineW, pxPerBeat, bpb }: { headW: number;
           <g key={p.id} onPointerDown={(e) => onDown(e, p)} style={{ cursor: "ns-resize" }}>
             <circle cx={p.tick * pxPerTick} cy={yFor(p.bpm)} r={8} fill="transparent" />
             <circle cx={p.tick * pxPerTick} cy={yFor(p.bpm)} r={3.5} fill={p.ramp ? "var(--bg-0)" : "var(--accent)"} stroke="var(--accent)" strokeWidth={1.5} />
-            <title>{`${p.bpm.toFixed(1)} bpm at beat ${ticksToBeats(p.tick)}${p.ramp ? " · ramp" : " · step"} · drag: move (⇧ fine) · ⌥-click: ${p.ramp ? "step" : "ramp"} · right-click: remove`}</title>
+            <title>{keys(`${p.bpm.toFixed(1)} bpm at beat ${ticksToBeats(p.tick)}${p.ramp ? " · ramp" : " · step"} · drag: move (⇧ fine) · ⌥-click: ${p.ramp ? "step" : "ramp"} · right-click: remove`)}</title>
           </g>
         ))}
         {hover !== null && !drag.current && (

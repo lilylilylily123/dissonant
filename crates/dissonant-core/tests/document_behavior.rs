@@ -11,30 +11,26 @@ use uuid::Uuid;
 const BEAT: i64 = TICKS_PER_BEAT;
 
 /// Opaque plugin-layer uids, in the shape the plugin layer mints them.
-const DELAY_UID: &str = "clap:/Library/Audio/Plug-Ins/CLAP/ValhallaDelay.clap:com.valhalladsp.delay";
+const DELAY_UID: &str =
+    "clap:/Library/Audio/Plug-Ins/CLAP/ValhallaDelay.clap:com.valhalladsp.delay";
 const EQ_UID: &str = "clap:/Library/Audio/Plug-Ins/CLAP/FabFilter Pro-Q 3.clap:com.fabfilter.proq3";
 
 // ---------------------------------------------------------------- fixtures
 
-/// Three tracks (melody + drums + guitar), two patterns (16 and 8 beats), notes on the first
-/// pattern, both patterns arranged, one audio take on the guitar track, and effect chains on
-/// the melody track and the master. Rich enough that every `Command` variant has something to
-/// bite on.
+/// Three tracks (melody + drums + guitar), one pattern on each note track (the melody's 16
+/// beats with two notes, the drums' 8 beats and empty), both placed in the starter's 128-beat
+/// song with its chords, one audio take on the guitar track, and effect chains on the melody
+/// track and the master. Rich enough that every `Command` variant has something to bite on.
 fn fixture() -> ProjectModel {
     let mut m = ProjectModel::starter();
-    let mut second = SongPattern::new("pattern 2");
-    second.length_ticks = 8 * BEAT;
-    m.patterns.push(second);
-    let t0 = m.tracks[0].id;
+    m.patterns[0].notes = vec![
+        NoteEvent::new(0, BEAT, 60).with_velocity(90),
+        NoteEvent::new(4 * BEAT, 2 * BEAT, 64).with_velocity(70),
+    ];
+    m.patterns[1].notes.clear(); // the starter's groove
+    m.patterns[1].length_ticks = 8 * BEAT;
     let p0 = m.patterns[0].id;
     let p1 = m.patterns[1].id;
-    m.patterns[0].notes_by_track.insert(
-        t0,
-        vec![
-            NoteEvent::new(0, BEAT, 60).with_velocity(90),
-            NoteEvent::new(4 * BEAT, 2 * BEAT, 64).with_velocity(70),
-        ],
-    );
     // The melody track is plugin-driven, so the plugin commands have something to bite on.
     m.tracks[0].plugin = Some(TrackPlugin {
         uid: "clap:/Library/Audio/Plug-Ins/CLAP/Surge XT.clap:org.surge-synth-team.surge-xt".into(),
@@ -50,10 +46,23 @@ fn fixture() -> ProjectModel {
     m.audio_sources = vec![source];
     // Effect chains on a track and on the master, so the insert commands have something to
     // bite on. Two on the track: one insert cannot be reordered.
-    m.tracks[0].inserts = vec![Insert::new(DELAY_UID, "Valhalla Delay"), Insert::new(EQ_UID, "Pro-Q")];
+    m.tracks[0].inserts = vec![
+        Insert::new(DELAY_UID, "Valhalla Delay"),
+        Insert::new(EQ_UID, "Pro-Q"),
+    ];
     m.master_inserts = vec![Insert::new(EQ_UID, "Pro-Q")];
     m.clips = vec![clip_at(p0, 0, 16 * BEAT), clip_at(p1, 16 * BEAT, 8 * BEAT)];
     m
+}
+
+/// A second pattern on the melody track, so the song can switch melodies over the same beat.
+fn add_melody_pattern(m: &mut ProjectModel, length_ticks: i64, notes: Vec<NoteEvent>) -> Uuid {
+    let mut p = SongPattern::new(m.tracks[0].id, "melody 2");
+    p.length_ticks = length_ticks;
+    p.notes = notes;
+    let id = p.id;
+    m.patterns.push(p);
+    id
 }
 
 /// A clip placing `pattern` on the song timeline.
@@ -65,20 +74,36 @@ fn clip_at(pattern: Uuid, start: i64, length: i64) -> Clip {
 
 /// A one-second 48 kHz mono source, as a recorded take would arrive.
 fn take_source() -> AudioSource {
-    AudioSource { id: Uuid::new_v4(), name: "take 1".into(), frames: 48_000, sample_rate: 48_000, channels: 1 }
+    AudioSource {
+        id: Uuid::new_v4(),
+        name: "take 1".into(),
+        frames: 48_000,
+        sample_rate: 48_000,
+        channels: 1,
+    }
 }
 
 /// The fixture's guitar track.
 fn audio_track(m: &ProjectModel) -> Uuid {
-    m.tracks.iter().find(|t| t.is_audio).expect("fixture has an audio track").id
+    m.tracks
+        .iter()
+        .find(|t| t.is_audio)
+        .expect("fixture has an audio track")
+        .id
 }
 
 fn doc() -> Document {
     Document::new(fixture())
 }
 
+/// (melody track, drum track, melody pattern, drum pattern).
 fn ids(m: &ProjectModel) -> (Uuid, Uuid, Uuid, Uuid) {
-    (m.tracks[0].id, m.tracks[1].id, m.patterns[0].id, m.patterns[1].id)
+    (
+        m.tracks[0].id,
+        m.tracks[1].id,
+        m.patterns[0].id,
+        m.patterns[1].id,
+    )
 }
 
 /// Compile-time exhaustiveness guard: if a `Command` variant is added, this stops compiling
@@ -99,18 +124,20 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::SetTrackColor { .. } => "SetTrackColor",
         Command::SetTrackPlugin { .. } => "SetTrackPlugin",
         Command::SetPluginState { .. } => "SetPluginState",
-        Command::AddPattern => "AddPattern",
+        Command::AddPattern { .. } => "AddPattern",
         Command::DuplicatePattern { .. } => "DuplicatePattern",
         Command::DeletePattern { .. } => "DeletePattern",
         Command::RenamePattern { .. } => "RenamePattern",
         Command::SetPatternLength { .. } => "SetPatternLength",
-        Command::SetTrackLoop { .. } => "SetTrackLoop",
-        Command::SetChordLoop { .. } => "SetChordLoop",
         Command::SetNotes { .. } => "SetNotes",
         Command::SetChords { .. } => "SetChords",
         Command::AddClip { .. } => "AddClip",
         Command::UpdateClip { .. } => "UpdateClip",
+        Command::UpdateClips { .. } => "UpdateClips",
         Command::RemoveClip { .. } => "RemoveClip",
+        Command::RemoveClips { .. } => "RemoveClips",
+        Command::MakeClipUnique { .. } => "MakeClipUnique",
+        Command::SetSongLength { .. } => "SetSongLength",
         Command::AddSection { .. } => "AddSection",
         Command::UpdateSection { .. } => "UpdateSection",
         Command::RemoveSection { .. } => "RemoveSection",
@@ -142,63 +169,208 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
     let existing = m.audio_clips[0].clone();
     let (chain, master) = (InsertTarget::Track(t0), InsertTarget::Master);
     let (first, second) = (m.tracks[0].inserts[0].id, m.tracks[0].inserts[1].id);
+    let (c0, c1) = (m.clips[0].clone(), m.clips[1].clone());
     vec![
         Command::SetTempo { bpm: 90.0 },
-        Command::SetKey { key: KeyState::locked(5, ScaleType::Minor) },
+        Command::SetKey {
+            key: KeyState::locked(5, ScaleType::Minor),
+        },
         Command::AddTrack { is_drum: false },
         Command::AddTrack { is_drum: true },
         Command::DeleteTrack { id: t0 },
-        Command::RenameTrack { id: t0, name: "lead".into() },
-        Command::SetTrackMuted { id: t0, muted: true },
-        Command::SetTrackSoloed { id: t0, soloed: true },
+        Command::RenameTrack {
+            id: t0,
+            name: "lead".into(),
+        },
+        Command::SetTrackMuted {
+            id: t0,
+            muted: true,
+        },
+        Command::SetTrackSoloed {
+            id: t0,
+            soloed: true,
+        },
         Command::MoveTrack { id: t0, up: false },
-        Command::SetTrackVoice { id: t0, voice: "pad".into() },
-        Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: 0.5 },
-        Command::SetTrackParam { id: t0, param: TrackParam::ReverbSend, value: 0.25 },
-        Command::SetTrackParam { id: t0, param: TrackParam::Tone, value: 4_000.0 },
-        Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: -0.75 },
-        Command::SetTrackColor { id: t0, color: Some("#010203".into()) },
+        Command::SetTrackVoice {
+            id: t0,
+            voice: "pad".into(),
+        },
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Volume,
+            value: 0.5,
+        },
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::ReverbSend,
+            value: 0.25,
+        },
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Tone,
+            value: 4_000.0,
+        },
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Pan,
+            value: -0.75,
+        },
+        Command::SetTrackColor {
+            id: t0,
+            color: Some("#010203".into()),
+        },
         Command::SetTrackPlugin {
             id: t0,
-            plugin: Some(TrackPlugin { uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(), name: "Vital".into(), state: None }),
+            plugin: Some(TrackPlugin {
+                uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(),
+                name: "Vital".into(),
+                state: None,
+            }),
         },
-        Command::SetPluginState { id: t0, state: "ZGlmZmVyZW50".into() },
-        Command::AddPattern,
+        Command::SetPluginState {
+            id: t0,
+            state: "ZGlmZmVyZW50".into(),
+        },
+        Command::AddPattern { track_id: t0 },
         Command::DuplicatePattern { id: p0 },
         Command::DeletePattern { id: p1 },
-        Command::RenamePattern { id: p0, name: "verse".into() },
-        Command::SetPatternLength { id: p0, ticks: 32 * BEAT },
-        Command::SetTrackLoop { pattern_id: p0, track_id: t0, ticks: Some(8 * BEAT) },
-        Command::SetChordLoop { pattern_id: p0, ticks: Some(16 * BEAT) },
-        Command::SetNotes { pattern_id: p1, track_id: t0, notes: vec![NoteEvent::new(BEAT, BEAT, 62)] },
-        Command::SetChords {
-            pattern_id: p1,
-            chords: vec![ChordEvent::new(0, 4 * BEAT, vec![2, 5, 9], Some("Dm".into()))],
+        Command::RenamePattern {
+            id: p0,
+            name: "verse".into(),
         },
-        Command::AddClip { pattern_id: p1, start_tick: 16 * BEAT, length_ticks: None },
-        Command::AddSection { name: "chorus".into(), start_tick: 32 * BEAT },
-        Command::SetMaster { master: MasterSettings { gain: 0.5, ..MasterSettings::default() } },
-        Command::SetTimeSignature { numerator: 3, denominator: 4 },
-        Command::SetSwing { swing: 62.0, grid_ticks: BEAT / 4 },
-        Command::AddTempoPoint { tick: 8 * BEAT, bpm: 140.0, ramp: true },
-        Command::AddAudioTrack { name: "gtr 2".into() },
+        Command::SetPatternLength {
+            id: p0,
+            ticks: 32 * BEAT,
+        },
+        Command::SetNotes {
+            pattern_id: p1,
+            notes: vec![NoteEvent::new(BEAT, BEAT, 62)],
+        },
+        Command::SetChords {
+            chords: vec![ChordEvent::new(
+                0,
+                4 * BEAT,
+                vec![2, 5, 9],
+                Some("Dm".into()),
+            )],
+        },
+        Command::AddClip {
+            pattern_id: p1,
+            start_tick: 16 * BEAT,
+            length_ticks: None,
+        },
+        Command::UpdateClip {
+            clip: Clip {
+                start_tick: 32 * BEAT,
+                ..c1.clone()
+            },
+        },
+        Command::UpdateClips {
+            clips: vec![
+                Clip {
+                    start_tick: 4 * BEAT,
+                    ..c0.clone()
+                },
+                Clip {
+                    muted: true,
+                    ..c1.clone()
+                },
+            ],
+        },
+        Command::RemoveClip { id: c0.id },
+        Command::RemoveClips {
+            ids: vec![c0.id, c1.id],
+        },
+        Command::MakeClipUnique { id: c0.id },
+        Command::SetSongLength { ticks: 20 * BEAT },
+        Command::ImportTracks {
+            tracks: vec![ImportedTrack {
+                name: "piano".into(),
+                is_drum: false,
+                notes: vec![NoteEvent::new(0, BEAT, 60)],
+            }],
+            length_ticks: 16 * BEAT,
+        },
+        Command::AddSection {
+            name: "chorus".into(),
+            start_tick: 32 * BEAT,
+        },
+        Command::SetMaster {
+            master: MasterSettings {
+                gain: 0.5,
+                ..MasterSettings::default()
+            },
+        },
+        Command::SetTimeSignature {
+            numerator: 3,
+            denominator: 4,
+        },
+        Command::SetSwing {
+            swing: 62.0,
+            grid_ticks: BEAT / 4,
+        },
+        Command::AddTempoPoint {
+            tick: 8 * BEAT,
+            bpm: 140.0,
+            ramp: true,
+        },
+        Command::AddAudioTrack {
+            name: "gtr 2".into(),
+        },
         Command::SetTrackAmp {
             id: gid,
-            amp: AmpRig { amp: AmpHead { model: AmpModel::Lead, gain: 9.0, ..AmpHead::default() }, ..AmpRig::default() },
+            amp: AmpRig {
+                amp: AmpHead {
+                    model: AmpModel::Lead,
+                    gain: 9.0,
+                    ..AmpHead::default()
+                },
+                ..AmpRig::default()
+            },
         },
         Command::AddAudioTake {
             track_id: gid,
             clip: AudioClip::new(gid, take.id, 8 * BEAT, 1.0),
             source: take,
         },
-        Command::UpdateAudioClip { clip: AudioClip { start_tick: 12 * BEAT, ..existing.clone() } },
+        Command::UpdateAudioClip {
+            clip: AudioClip {
+                start_tick: 12 * BEAT,
+                ..existing.clone()
+            },
+        },
         Command::RemoveAudioClip { id: existing.id },
-        Command::AddInsert { target: chain, uid: EQ_UID.into(), name: "Pro-Q".into(), index: None },
-        Command::AddInsert { target: master, uid: DELAY_UID.into(), name: "Valhalla Delay".into(), index: Some(0) },
-        Command::RemoveInsert { target: chain, insert_id: first },
-        Command::MoveInsert { target: chain, insert_id: first, to_index: 1 },
-        Command::SetInsertEnabled { target: chain, insert_id: second, on: false },
-        Command::SetInsertState { target: master, insert_id: m.master_inserts[0].id, state: "cHJvcQ==".into() },
+        Command::AddInsert {
+            target: chain,
+            uid: EQ_UID.into(),
+            name: "Pro-Q".into(),
+            index: None,
+        },
+        Command::AddInsert {
+            target: master,
+            uid: DELAY_UID.into(),
+            name: "Valhalla Delay".into(),
+            index: Some(0),
+        },
+        Command::RemoveInsert {
+            target: chain,
+            insert_id: first,
+        },
+        Command::MoveInsert {
+            target: chain,
+            insert_id: first,
+            to_index: 1,
+        },
+        Command::SetInsertEnabled {
+            target: chain,
+            insert_id: second,
+            on: false,
+        },
+        Command::SetInsertState {
+            target: master,
+            insert_id: m.master_inserts[0].id,
+            state: "cHJvcQ==".into(),
+        },
     ]
 }
 
@@ -213,13 +385,21 @@ fn every_command_variant_is_undoable_and_redoable() {
         let label = every_variant_is_accounted_for(command.clone());
         let before = d.model().clone();
 
-        d.apply(command.clone(), false).unwrap_or_else(|e| panic!("{label}: refused: {e}"));
+        d.apply(command.clone(), false)
+            .unwrap_or_else(|e| panic!("{label}: refused: {e}"));
         let after = d.model().clone();
-        assert_ne!(after, before, "{label}: command did not change the model; fixture is too weak");
+        assert_ne!(
+            after, before,
+            "{label}: command did not change the model; fixture is too weak"
+        );
         assert!(d.can_undo(), "{label}: no undo step was recorded");
 
         assert!(d.undo(), "{label}: undo refused");
-        assert_eq!(d.model(), &before, "{label}: undo did not restore the exact prior state");
+        assert_eq!(
+            d.model(),
+            &before,
+            "{label}: undo did not restore the exact prior state"
+        );
 
         assert!(d.can_redo(), "{label}: redo unavailable after undo");
         assert!(d.redo(), "{label}: redo refused");
@@ -248,15 +428,29 @@ fn undo_cap_drops_the_oldest_entry_without_corrupting_the_stack() {
     // 250 distinct, individually-undoable edits.
     let edits = MAX_UNDO + 50;
     for i in 0..edits {
-        d.apply(Command::SetTempo { bpm: 21.0 + i as f64 }, false).unwrap();
+        d.apply(
+            Command::SetTempo {
+                bpm: 21.0 + i as f64,
+            },
+            false,
+        )
+        .unwrap();
     }
     assert_eq!(d.model().tempo, 21.0 + (edits - 1) as f64);
 
     // Exactly MAX_UNDO steps are available, and each one lands on the right tempo.
     for i in (0..MAX_UNDO).rev() {
-        assert!(d.undo(), "undo #{} refused while the cap should still allow it", MAX_UNDO - i);
+        assert!(
+            d.undo(),
+            "undo #{} refused while the cap should still allow it",
+            MAX_UNDO - i
+        );
         let expected = 21.0 + (edits - 1 - (MAX_UNDO - i)) as f64;
-        assert_eq!(d.model().tempo, expected, "undo walked to the wrong snapshot");
+        assert_eq!(
+            d.model().tempo,
+            expected,
+            "undo walked to the wrong snapshot"
+        );
     }
     assert!(!d.undo(), "undo stack exceeded the {MAX_UNDO} cap");
     assert!(!d.can_undo());
@@ -288,14 +482,48 @@ fn a_command_that_changes_nothing_records_no_undo_step() {
     let (t0, _, p0, _) = ids(d.model());
     let before = d.model().clone();
 
-    d.apply(Command::SetTempo { bpm: before.tempo }, false).unwrap();
-    d.apply(Command::RenameTrack { id: t0, name: before.tracks[0].name.clone() }, false).unwrap();
-    d.apply(Command::MoveTrack { id: t0, up: true }, false).unwrap(); // already at the top
+    d.apply(Command::SetTempo { bpm: before.tempo }, false)
+        .unwrap();
+    d.apply(
+        Command::RenameTrack {
+            id: t0,
+            name: before.tracks[0].name.clone(),
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(Command::MoveTrack { id: t0, up: true }, false)
+        .unwrap(); // already at the top
     if let Some(clip) = before.clips.first() {
-        d.apply(Command::UpdateClip { clip: clip.clone() }, false).unwrap();
+        d.apply(Command::UpdateClip { clip: clip.clone() }, false)
+            .unwrap();
     }
     d.apply(
-        Command::SetNotes { pattern_id: p0, track_id: t0, notes: before.patterns[0].notes(&t0).to_vec() },
+        Command::SetNotes {
+            pattern_id: p0,
+            notes: before.patterns[0].notes.clone(),
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetChords {
+            chords: before.chords.chords().to_vec(),
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetSongLength {
+            ticks: before.song_length_ticks,
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::RemoveClips {
+            ids: vec![Uuid::new_v4()],
+        },
         false,
     )
     .unwrap();
@@ -331,17 +559,33 @@ fn a_committed_transient_run_is_exactly_one_undo_step() {
     let before = d.model().clone();
 
     for v in [0.95, 0.9, 0.85, 0.8, 0.75, 0.7] {
-        d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: v }, true).unwrap();
+        d.apply(
+            Command::SetTrackParam {
+                id: t0,
+                param: TrackParam::Volume,
+                value: v,
+            },
+            true,
+        )
+        .unwrap();
     }
     d.commit_gesture();
     assert_eq!(d.model().tracks[0].volume, 0.7);
 
     assert!(d.undo());
-    assert_eq!(d.model(), &before, "the gesture did not rewind to the pre-gesture state");
+    assert_eq!(
+        d.model(),
+        &before,
+        "the gesture did not rewind to the pre-gesture state"
+    );
     assert!(!d.undo(), "the gesture produced more than one undo step");
 
     assert!(d.redo());
-    assert_eq!(d.model().tracks[0].volume, 0.7, "redo did not re-apply the whole gesture");
+    assert_eq!(
+        d.model().tracks[0].volume,
+        0.7,
+        "redo did not re-apply the whole gesture"
+    );
     assert!(!d.redo());
 }
 
@@ -352,13 +596,24 @@ fn an_uncommitted_transient_run_is_still_undone_as_one_step() {
     let before = d.model().clone();
 
     for v in [-0.2, -0.4, -0.6] {
-        d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: v }, true).unwrap();
+        d.apply(
+            Command::SetTrackParam {
+                id: t0,
+                param: TrackParam::Pan,
+                value: v,
+            },
+            true,
+        )
+        .unwrap();
     }
     // No commit_gesture() — the user let go of the mouse outside the window, say.
     assert!(d.can_undo());
     assert!(d.undo());
     assert_eq!(d.model(), &before);
-    assert!(!d.undo(), "an uncommitted gesture left extra entries on the undo stack");
+    assert!(
+        !d.undo(),
+        "an uncommitted gesture left extra entries on the undo stack"
+    );
 }
 
 #[test]
@@ -369,10 +624,34 @@ fn a_non_transient_command_mid_gesture_closes_the_gesture_first() {
     let (t0, ..) = ids(d.model());
     let before = d.model().clone();
 
-    d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: -0.3 }, true).unwrap();
-    d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: -0.6 }, true).unwrap();
+    d.apply(
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Pan,
+            value: -0.3,
+        },
+        true,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Pan,
+            value: -0.6,
+        },
+        true,
+    )
+    .unwrap();
     d.apply(Command::SetTempo { bpm: 101.0 }, false).unwrap();
-    d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: -0.9 }, true).unwrap();
+    d.apply(
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Pan,
+            value: -0.9,
+        },
+        true,
+    )
+    .unwrap();
     d.commit_gesture();
 
     assert_eq!(d.model().tracks[0].pan, -0.9);
@@ -412,11 +691,22 @@ fn a_gesture_that_returns_to_its_starting_value_records_no_undo_step() {
     let before = d.model().clone();
 
     for v in [0.8, 0.6, 1.0] {
-        d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: v }, true).unwrap();
+        d.apply(
+            Command::SetTrackParam {
+                id: t0,
+                param: TrackParam::Volume,
+                value: v,
+            },
+            true,
+        )
+        .unwrap();
     }
     d.commit_gesture();
     assert_eq!(d.model(), &before);
-    assert!(!d.can_undo(), "a round-trip gesture left an undo step behind");
+    assert!(
+        !d.can_undo(),
+        "a round-trip gesture left an undo step behind"
+    );
 }
 
 #[test]
@@ -427,14 +717,33 @@ fn can_undo_only_promises_an_undo_that_will_happen() {
     let (t0, ..) = ids(d.model());
 
     for v in [0.8, 0.6, 1.0] {
-        d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: v }, true).unwrap();
+        d.apply(
+            Command::SetTrackParam {
+                id: t0,
+                param: TrackParam::Volume,
+                value: v,
+            },
+            true,
+        )
+        .unwrap();
     }
     // Gesture is still open (never committed) and has returned to its starting value.
-    assert!(!d.can_undo(), "Undo was offered for a gesture that changed nothing");
+    assert!(
+        !d.can_undo(),
+        "Undo was offered for a gesture that changed nothing"
+    );
     assert!(!d.undo());
 
     // An open gesture that *has* moved is undoable, and the promise is kept.
-    d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: 0.4 }, true).unwrap();
+    d.apply(
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Volume,
+            value: 0.4,
+        },
+        true,
+    )
+    .unwrap();
     assert!(d.can_undo());
     assert!(d.undo(), "can_undo() promised an undo that undo() refused");
     assert_eq!(d.model().tracks[0].volume, 1.0);
@@ -443,46 +752,186 @@ fn can_undo_only_promises_an_undo_that_will_happen() {
 // ---------------------------------------------------------------- 3. validation
 
 #[test]
-fn the_last_track_and_the_last_pattern_are_protected() {
+fn the_last_track_is_protected_but_a_project_may_have_no_patterns() {
     let mut d = Document::new(ProjectModel::empty());
     let (t0, p0) = (d.model().tracks[0].id, d.model().patterns[0].id);
-    assert_eq!(d.apply(Command::DeleteTrack { id: t0 }, false), Err(EditError::LastTrack));
-    assert_eq!(d.apply(Command::DeletePattern { id: p0 }, false), Err(EditError::LastPattern));
+    assert_eq!(
+        d.apply(Command::DeleteTrack { id: t0 }, false),
+        Err(EditError::LastTrack)
+    );
     assert_eq!(d.model().tracks.len(), 1);
-    assert_eq!(d.model().patterns.len(), 1);
+    d.apply(Command::DeletePattern { id: p0 }, false).unwrap();
+    assert!(d.model().patterns.is_empty());
+    // Nothing to play in pattern mode, but the song still plays (silence for its length).
+    assert!(Sequence::from_pattern(d.model(), &p0, 0).is_none());
+    assert_eq!(
+        Sequence::from_song(d.model()).length_ticks,
+        d.model().song_length_ticks
+    );
+    // And the track can grow a new one.
+    d.apply(Command::AddPattern { track_id: t0 }, false)
+        .unwrap();
+    assert_eq!(d.model().patterns[0].name, "melody 1");
 }
 
 #[test]
 fn unknown_ids_are_rejected() {
     let mut d = doc();
-    let (t0, _, p0, _) = ids(d.model());
+    let (_, _, p0, _) = ids(d.model());
     let ghost = Uuid::new_v4();
 
     use EditError::*;
-    assert_eq!(d.apply(Command::DeleteTrack { id: ghost }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::RenameTrack { id: ghost, name: "x".into() }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::SetTrackMuted { id: ghost, muted: true }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::SetTrackSoloed { id: ghost, soloed: true }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::MoveTrack { id: ghost, up: true }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::SetTrackVoice { id: ghost, voice: "pad".into() }, false), Err(NoSuchTrack));
     assert_eq!(
-        d.apply(Command::SetTrackParam { id: ghost, param: TrackParam::Pan, value: 0.5 }, false),
+        d.apply(Command::DeleteTrack { id: ghost }, false),
         Err(NoSuchTrack)
     );
-    assert_eq!(d.apply(Command::SetTrackColor { id: ghost, color: None }, false), Err(NoSuchTrack));
-
-    assert_eq!(d.apply(Command::DeletePattern { id: ghost }, false), Err(NoSuchPattern));
-    assert_eq!(d.apply(Command::DuplicatePattern { id: ghost }, false), Err(NoSuchPattern));
-    assert_eq!(d.apply(Command::RenamePattern { id: ghost, name: "x".into() }, false), Err(NoSuchPattern));
-    assert_eq!(d.apply(Command::SetPatternLength { id: ghost, ticks: 8 * BEAT }, false), Err(NoSuchPattern));
-    assert_eq!(d.apply(Command::SetChords { pattern_id: ghost, chords: vec![] }, false), Err(NoSuchPattern));
     assert_eq!(
-        d.apply(Command::SetNotes { pattern_id: ghost, track_id: t0, notes: vec![] }, false),
+        d.apply(
+            Command::RenameTrack {
+                id: ghost,
+                name: "x".into()
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetTrackMuted {
+                id: ghost,
+                muted: true
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetTrackSoloed {
+                id: ghost,
+                soloed: true
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::MoveTrack {
+                id: ghost,
+                up: true
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetTrackVoice {
+                id: ghost,
+                voice: "pad".into()
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetTrackParam {
+                id: ghost,
+                param: TrackParam::Pan,
+                value: 0.5
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetTrackColor {
+                id: ghost,
+                color: None
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+
+    assert_eq!(
+        d.apply(Command::DeletePattern { id: ghost }, false),
         Err(NoSuchPattern)
     );
     assert_eq!(
-        d.apply(Command::SetNotes { pattern_id: p0, track_id: ghost, notes: vec![] }, false),
+        d.apply(Command::DuplicatePattern { id: ghost }, false),
+        Err(NoSuchPattern)
+    );
+    assert_eq!(
+        d.apply(
+            Command::RenamePattern {
+                id: ghost,
+                name: "x".into()
+            },
+            false
+        ),
+        Err(NoSuchPattern)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetPatternLength {
+                id: ghost,
+                ticks: 8 * BEAT
+            },
+            false
+        ),
+        Err(NoSuchPattern)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetNotes {
+                pattern_id: ghost,
+                notes: vec![]
+            },
+            false
+        ),
+        Err(NoSuchPattern)
+    );
+    assert_eq!(
+        d.apply(Command::AddPattern { track_id: ghost }, false),
         Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::AddClip {
+                pattern_id: ghost,
+                start_tick: 0,
+                length_ticks: None
+            },
+            false
+        ),
+        Err(NoSuchPattern)
+    );
+
+    let stray = Clip::new(p0, 0, 4 * BEAT);
+    assert_eq!(
+        d.apply(
+            Command::UpdateClip {
+                clip: stray.clone()
+            },
+            false
+        ),
+        Err(NoSuchClip)
+    );
+    assert_eq!(
+        d.apply(Command::UpdateClips { clips: vec![stray] }, false),
+        Err(NoSuchClip)
+    );
+    assert_eq!(
+        d.apply(Command::RemoveClip { id: ghost }, false),
+        Err(NoSuchClip)
+    );
+    assert_eq!(
+        d.apply(Command::MakeClipUnique { id: ghost }, false),
+        Err(NoSuchClip)
     );
 }
 
@@ -493,15 +942,39 @@ fn non_finite_and_out_of_range_values_are_rejected() {
     use EditError::InvalidValue;
 
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert_eq!(d.apply(Command::SetTempo { bpm: bad }, false), Err(InvalidValue));
         assert_eq!(
-            d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: bad }, false),
+            d.apply(Command::SetTempo { bpm: bad }, false),
             Err(InvalidValue)
         );
-        assert_eq!(d.apply(Command::SetSwing { swing: bad, grid_ticks: BEAT / 2 }, false), Err(InvalidValue));
         assert_eq!(
             d.apply(
-                Command::SetMaster { master: MasterSettings { gain: bad, ..MasterSettings::default() } },
+                Command::SetTrackParam {
+                    id: t0,
+                    param: TrackParam::Volume,
+                    value: bad
+                },
+                false
+            ),
+            Err(InvalidValue)
+        );
+        assert_eq!(
+            d.apply(
+                Command::SetSwing {
+                    swing: bad,
+                    grid_ticks: BEAT / 2
+                },
+                false
+            ),
+            Err(InvalidValue)
+        );
+        assert_eq!(
+            d.apply(
+                Command::SetMaster {
+                    master: MasterSettings {
+                        gain: bad,
+                        ..MasterSettings::default()
+                    }
+                },
                 false
             ),
             Err(InvalidValue)
@@ -509,14 +982,41 @@ fn non_finite_and_out_of_range_values_are_rejected() {
     }
 
     // A pattern shorter than one beat is not a pattern.
-    assert_eq!(d.apply(Command::SetPatternLength { id: p0, ticks: 0 }, false), Err(InvalidValue));
-    assert_eq!(d.apply(Command::SetPatternLength { id: p0, ticks: -4 * BEAT }, false), Err(InvalidValue));
-    assert_eq!(d.apply(Command::SetPatternLength { id: p0, ticks: BEAT - 1 }, false), Err(InvalidValue));
+    assert_eq!(
+        d.apply(Command::SetPatternLength { id: p0, ticks: 0 }, false),
+        Err(InvalidValue)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetPatternLength {
+                id: p0,
+                ticks: -4 * BEAT
+            },
+            false
+        ),
+        Err(InvalidValue)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetPatternLength {
+                id: p0,
+                ticks: BEAT - 1
+            },
+            false
+        ),
+        Err(InvalidValue)
+    );
 
     // Colors must be `#rrggbb`.
     for bad in ["red", "#fff", "#ggghhh", "", "#1234567"] {
         assert_eq!(
-            d.apply(Command::SetTrackColor { id: t0, color: Some(bad.into()) }, false),
+            d.apply(
+                Command::SetTrackColor {
+                    id: t0,
+                    color: Some(bad.into())
+                },
+                false
+            ),
             Err(InvalidValue),
             "color {bad:?} was accepted"
         );
@@ -529,12 +1029,18 @@ fn blank_pattern_names_are_rejected() {
     let (_, _, p0, _) = ids(d.model());
     for blank in ["", "   ", "\t\n"] {
         assert_eq!(
-            d.apply(Command::RenamePattern { id: p0, name: blank.into() }, false),
+            d.apply(
+                Command::RenamePattern {
+                    id: p0,
+                    name: blank.into()
+                },
+                false
+            ),
             Err(EditError::InvalidValue),
             "pattern accepted the blank name {blank:?}"
         );
     }
-    assert_eq!(d.model().patterns[0].name, "pattern 1");
+    assert_eq!(d.model().patterns[0].name, "melody 1");
 }
 
 #[test]
@@ -546,7 +1052,13 @@ fn blank_track_names_are_rejected() {
     let original = d.model().tracks[0].name.clone();
     for blank in ["", "   ", "\t\n"] {
         assert_eq!(
-            d.apply(Command::RenameTrack { id: t0, name: blank.into() }, false),
+            d.apply(
+                Command::RenameTrack {
+                    id: t0,
+                    name: blank.into()
+                },
+                false
+            ),
             Err(EditError::InvalidValue),
             "track accepted the blank name {blank:?}"
         );
@@ -554,7 +1066,14 @@ fn blank_track_names_are_rejected() {
     }
     assert!(!d.can_undo(), "a refused rename recorded an undo step");
     // A real name still goes through, including one with surrounding whitespace.
-    d.apply(Command::RenameTrack { id: t0, name: " lead ".into() }, false).unwrap();
+    d.apply(
+        Command::RenameTrack {
+            id: t0,
+            name: " lead ".into(),
+        },
+        false,
+    )
+    .unwrap();
     assert_eq!(d.model().tracks[0].name, " lead ");
 }
 
@@ -579,7 +1098,15 @@ fn out_of_range_values_that_are_accepted_are_clamped_not_stored_raw() {
         (TrackParam::Pan, 9.0, 1.0),
     ];
     for (param, value, expected) in clamps {
-        d.apply(Command::SetTrackParam { id: t0, param, value }, false).unwrap();
+        d.apply(
+            Command::SetTrackParam {
+                id: t0,
+                param,
+                value,
+            },
+            false,
+        )
+        .unwrap();
         let t = &d.model().tracks[0];
         let got = match param {
             TrackParam::Volume => t.volume,
@@ -627,20 +1154,75 @@ fn a_refused_command_mutates_nothing_and_records_no_undo_step() {
     let refusals: Vec<Command> = vec![
         Command::SetTempo { bpm: f64::NAN },
         Command::DeleteTrack { id: ghost },
-        Command::RenameTrack { id: ghost, name: "x".into() },
-        Command::RenamePattern { id: p0, name: "   ".into() },
-        Command::SetPatternLength { id: p0, ticks: BEAT / 2 },
-        Command::SetTrackColor { id: t0, color: Some("nope".into()) },
-        Command::SetTrackParam { id: t0, param: TrackParam::Tone, value: f64::NAN },
+        Command::RenameTrack {
+            id: ghost,
+            name: "x".into(),
+        },
+        Command::RenamePattern {
+            id: p0,
+            name: "   ".into(),
+        },
+        Command::SetPatternLength {
+            id: p0,
+            ticks: BEAT / 2,
+        },
+        Command::SetTrackColor {
+            id: t0,
+            color: Some("nope".into()),
+        },
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Tone,
+            value: f64::NAN,
+        },
         Command::DuplicatePattern { id: ghost },
-        Command::SetNotes { pattern_id: ghost, track_id: t0, notes: vec![NoteEvent::new(0, BEAT, 60)] },
-        Command::SetMaster { master: MasterSettings { high_eq: f64::NAN, ..MasterSettings::default() } },
+        Command::SetNotes {
+            pattern_id: ghost,
+            notes: vec![NoteEvent::new(0, BEAT, 60)],
+        },
+        Command::SetMaster {
+            master: MasterSettings {
+                high_eq: f64::NAN,
+                ..MasterSettings::default()
+            },
+        },
+        Command::AddClip {
+            pattern_id: p0,
+            start_tick: 500 * BEAT,
+            length_ticks: None,
+        },
+        Command::UpdateClips {
+            clips: vec![
+                Clip {
+                    start_tick: 4 * BEAT,
+                    ..baseline.clips[0].clone()
+                },
+                Clip::new(p0, 0, 4 * BEAT),
+            ],
+        },
+        Command::ImportTracks {
+            tracks: vec![],
+            length_ticks: 16 * BEAT,
+        },
     ];
     for command in refusals {
-        assert!(d.apply(command.clone(), false).is_err(), "{command:?} was expected to be refused");
-        assert_eq!(d.model(), &baseline, "{command:?} mutated the model despite being refused");
-        assert!(d.can_redo(), "{command:?} cleared the redo stack despite being refused");
-        assert!(!d.is_dirty(), "{command:?} marked the document dirty despite being refused");
+        assert!(
+            d.apply(command.clone(), false).is_err(),
+            "{command:?} was expected to be refused"
+        );
+        assert_eq!(
+            d.model(),
+            &baseline,
+            "{command:?} mutated the model despite being refused"
+        );
+        assert!(
+            d.can_redo(),
+            "{command:?} cleared the redo stack despite being refused"
+        );
+        assert!(
+            !d.is_dirty(),
+            "{command:?} marked the document dirty despite being refused"
+        );
     }
     assert!(!d.can_undo(), "refused commands pushed undo entries");
 }
@@ -650,7 +1232,14 @@ fn a_refused_transient_command_does_not_open_a_gesture() {
     let mut d = doc();
     let (t0, ..) = ids(d.model());
     assert!(d
-        .apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: f64::NAN }, true)
+        .apply(
+            Command::SetTrackParam {
+                id: t0,
+                param: TrackParam::Volume,
+                value: f64::NAN
+            },
+            true
+        )
         .is_err());
     assert!(!d.can_undo());
     d.commit_gesture();
@@ -660,32 +1249,52 @@ fn a_refused_transient_command_does_not_open_a_gesture() {
 // ---------------------------------------------------------------- 4. referential integrity
 
 #[test]
-fn deleting_a_track_purges_its_notes_from_every_pattern() {
+fn deleting_a_track_purges_its_patterns_and_their_clips() {
     let mut d = doc();
-    let (t0, t1, p0, p1) = ids(d.model());
-    for pattern_id in [p0, p1] {
-        for track_id in [t0, t1] {
-            d.apply(
-                Command::SetNotes { pattern_id, track_id, notes: vec![NoteEvent::new(0, BEAT, 60)] },
-                false,
-            )
-            .unwrap();
-        }
-    }
-    assert_eq!(d.model().patterns[0].notes_by_track.len(), 2);
-    assert_eq!(d.model().patterns[1].notes_by_track.len(), 2);
+    let (t0, _, p0, p1) = ids(d.model());
+    d.apply(Command::AddPattern { track_id: t0 }, false)
+        .unwrap();
+    let second = d.model().patterns_of(&t0).nth(1).unwrap().id;
+    d.apply(
+        Command::AddClip {
+            pattern_id: second,
+            start_tick: 32 * BEAT,
+            length_ticks: None,
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetNotes {
+            pattern_id: p1,
+            notes: vec![NoteEvent::new(0, BEAT / 4, 36)],
+        },
+        false,
+    )
+    .unwrap();
+    let before = d.model().clone();
 
     d.apply(Command::DeleteTrack { id: t0 }, false).unwrap();
-    for p in &d.model().patterns {
-        assert!(p.notes(&t0).is_empty(), "pattern {} kept notes for the deleted track", p.name);
-        assert!(!p.notes_by_track.contains_key(&t0), "pattern {} kept an orphan note bucket", p.name);
-        assert_eq!(p.notes(&t1).len(), 1, "pattern {} lost the surviving track's notes", p.name);
-    }
+    let m = d.model();
+    assert!(
+        m.patterns.iter().all(|p| p.track_id != t0),
+        "a pattern of the deleted track survived"
+    );
+    assert!(m.pattern(&p0).is_none() && m.pattern(&second).is_none());
+    assert!(
+        m.clips.iter().all(|c| c.pattern_id == p1),
+        "a clip of the deleted track survived"
+    );
+    assert_eq!(m.clips.len(), 1);
+    assert_eq!(
+        m.pattern(&p1).unwrap().notes.len(),
+        1,
+        "the surviving track lost its notes"
+    );
 
-    // And undo brings every note back.
+    // And undo brings every pattern and clip back.
     assert!(d.undo());
-    assert_eq!(d.model().patterns[0].notes(&t0).len(), 1);
-    assert_eq!(d.model().patterns[1].notes(&t0).len(), 1);
+    assert_eq!(d.model(), &before);
 }
 
 #[test]
@@ -696,12 +1305,30 @@ fn deleting_a_pattern_purges_every_clip_of_it_from_the_song() {
     for id in d.model().clips.iter().map(|c| c.id).collect::<Vec<_>>() {
         d.apply(Command::RemoveClip { id }, false).unwrap();
     }
-    for (pattern_id, start) in [(p0, 0), (p1, 16 * BEAT), (p0, 32 * BEAT), (p0, 48 * BEAT), (p1, 64 * BEAT)] {
-        d.apply(Command::AddClip { pattern_id, start_tick: start, length_ticks: None }, false).unwrap();
+    for (pattern_id, start) in [
+        (p0, 0),
+        (p1, 16 * BEAT),
+        (p0, 32 * BEAT),
+        (p0, 48 * BEAT),
+        (p1, 64 * BEAT),
+    ] {
+        d.apply(
+            Command::AddClip {
+                pattern_id,
+                start_tick: start,
+                length_ticks: None,
+            },
+            false,
+        )
+        .unwrap();
     }
     d.apply(Command::DeletePattern { id: p0 }, false).unwrap();
     assert_eq!(
-        d.model().clips.iter().map(|c| c.pattern_id).collect::<Vec<_>>(),
+        d.model()
+            .clips
+            .iter()
+            .map(|c| c.pattern_id)
+            .collect::<Vec<_>>(),
         vec![p1, p1],
         "clips of the deleted pattern survived"
     );
@@ -709,76 +1336,106 @@ fn deleting_a_pattern_purges_every_clip_of_it_from_the_song() {
 }
 
 #[test]
-fn duplicating_a_pattern_deep_copies_notes_and_chords_with_fresh_ids() {
+fn duplicating_a_pattern_deep_copies_its_notes_on_the_same_track_with_fresh_ids() {
     let mut d = doc();
-    let (t0, t1, p0, _) = ids(d.model());
-    d.apply(
-        Command::SetNotes {
-            pattern_id: p0,
-            track_id: t1,
-            notes: vec![NoteEvent::new(2 * BEAT, BEAT, 48), NoteEvent::new(3 * BEAT, BEAT, 50)],
-        },
-        false,
-    )
-    .unwrap();
-    d.apply(Command::DuplicatePattern { id: p0 }, false).unwrap();
+    let (t0, _, p0, _) = ids(d.model());
+    d.apply(Command::DuplicatePattern { id: p0 }, false)
+        .unwrap();
 
     let original = d.model().patterns[0].clone();
     let copy = d.model().patterns[1].clone();
     assert_ne!(original.id, copy.id);
+    assert_eq!(copy.track_id, t0, "the copy belongs to the same track");
     assert_eq!(copy.name, format!("{} copy", original.name));
     assert_eq!(copy.length_ticks, original.length_ticks);
 
-    let note_ids = |p: &SongPattern| {
-        let mut v: Vec<Uuid> = p.notes_by_track.values().flatten().map(|n| n.id).collect();
-        v.sort();
-        v
-    };
-    let a = note_ids(&original);
-    let b = note_ids(&copy);
-    assert_eq!(a.len(), 4, "fixture should have four notes across two tracks");
-    assert_eq!(a.len(), b.len(), "the copy lost notes");
-    for id in &b {
-        assert!(!a.contains(id), "copy shares note id {id} with the original");
-    }
-    // Musical content is identical even though the ids are not.
-    for track_id in [t0, t1] {
-        let orig: Vec<_> = original.notes(&track_id).iter().map(|n| (n.start_tick, n.pitch, n.velocity)).collect();
-        let dup: Vec<_> = copy.notes(&track_id).iter().map(|n| (n.start_tick, n.pitch, n.velocity)).collect();
-        assert_eq!(orig, dup, "duplicated notes differ musically");
-    }
-
-    assert!(!copy.chords.is_empty());
-    assert_eq!(copy.chords.chords().len(), original.chords.chords().len());
-    for c in copy.chords.chords() {
+    assert_eq!(
+        original.notes.len(),
+        2,
+        "fixture should have two melody notes"
+    );
+    assert_eq!(
+        copy.notes.len(),
+        original.notes.len(),
+        "the copy lost notes"
+    );
+    for n in &copy.notes {
         assert!(
-            !original.chords.chords().iter().any(|o| o.id == c.id),
-            "copy shares chord id {} with the original",
-            c.id
+            !original.notes.iter().any(|o| o.id == n.id),
+            "copy shares note id {} with the original",
+            n.id
         );
     }
+    // Musical content is identical even though the ids are not.
+    let musical = |p: &SongPattern| {
+        p.notes
+            .iter()
+            .map(|n| (n.start_tick, n.pitch, n.velocity))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        musical(&original),
+        musical(&copy),
+        "duplicated notes differ musically"
+    );
 
     // Editing the copy must not reach back into the original.
-    let copy_id = copy.id;
-    d.apply(Command::SetNotes { pattern_id: copy_id, track_id: t1, notes: vec![] }, false).unwrap();
-    assert_eq!(d.model().patterns[0].notes(&t1).len(), 2, "editing the copy mutated the original");
+    d.apply(
+        Command::SetNotes {
+            pattern_id: copy.id,
+            notes: vec![],
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        d.model().patterns[0].notes.len(),
+        2,
+        "editing the copy mutated the original"
+    );
 }
 
 #[test]
 fn the_song_only_ever_holds_clips_of_live_patterns() {
     let mut d = doc();
     let (.., p0, p1) = ids(d.model());
-    d.apply(Command::AddClip { pattern_id: p0, start_tick: 0, length_ticks: None }, false).unwrap();
-    d.apply(Command::AddClip { pattern_id: p1, start_tick: 16 * BEAT, length_ticks: None }, false).unwrap();
+    d.apply(
+        Command::AddClip {
+            pattern_id: p0,
+            start_tick: 0,
+            length_ticks: None,
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::AddClip {
+            pattern_id: p1,
+            start_tick: 16 * BEAT,
+            length_ticks: None,
+        },
+        false,
+    )
+    .unwrap();
     // A clip can only be placed for a pattern that exists.
     assert_eq!(
-        d.apply(Command::AddClip { pattern_id: Uuid::new_v4(), start_tick: 32 * BEAT, length_ticks: None }, false),
+        d.apply(
+            Command::AddClip {
+                pattern_id: Uuid::new_v4(),
+                start_tick: 32 * BEAT,
+                length_ticks: None
+            },
+            false
+        ),
         Err(EditError::NoSuchPattern)
     );
 
     let live: Vec<Uuid> = d.model().patterns.iter().map(|p| p.id).collect();
     for clip in &d.model().clips {
-        assert!(live.contains(&clip.pattern_id), "clip points at a pattern that is gone");
+        assert!(
+            live.contains(&clip.pattern_id),
+            "clip points at a pattern that is gone"
+        );
     }
 }
 
@@ -789,89 +1446,172 @@ fn from_pattern_uses_pattern_local_positions_and_honours_pattern_length() {
     let m = fixture();
     let (t0, t1, p0, p1) = ids(&m);
 
-    let seq = Sequence::from_pattern(&m, &p0).expect("pattern 1 exists");
+    let seq = Sequence::from_pattern(&m, &p0, 0).expect("pattern 1 exists");
     assert_eq!(seq.length_ticks, 16 * BEAT);
     assert_eq!(seq.tempo_bpm, m.tempo);
     assert_eq!(seq.tracks.len(), m.tracks.len());
     assert_eq!(seq.tracks[0].id, t0);
     let starts: Vec<i64> = seq.tracks[0].notes.iter().map(|n| n.start_tick).collect();
-    assert_eq!(starts, vec![0, 4 * BEAT], "pattern-mode notes must keep their pattern-local ticks");
-    assert!(seq.tracks[1].notes.is_empty(), "track {t1} has no notes in pattern 1");
-    assert!(!seq.chords.is_empty());
+    assert_eq!(
+        starts,
+        vec![0, 4 * BEAT],
+        "pattern-mode notes must keep their pattern-local ticks"
+    );
+    assert!(
+        seq.tracks[1].notes.is_empty(),
+        "track {t1} is not this pattern's track"
+    );
+    assert_eq!(
+        seq.chords.chords().len(),
+        4,
+        "the progression's first 16 beats"
+    );
 
-    let short = Sequence::from_pattern(&m, &p1).unwrap();
+    let short = Sequence::from_pattern(&m, &p1, 0).unwrap();
     assert_eq!(short.length_ticks, 8 * BEAT);
     assert!(short.tracks.iter().all(|t| t.notes.is_empty()));
+    assert_eq!(
+        short.chords.end_tick(),
+        8 * BEAT,
+        "chords are cut at the pattern end"
+    );
 
-    assert!(Sequence::from_pattern(&m, &Uuid::new_v4()).is_none(), "unknown pattern id must be None");
+    assert!(
+        Sequence::from_pattern(&m, &Uuid::new_v4(), 0).is_none(),
+        "unknown pattern id must be None"
+    );
+}
+
+/// Pattern mode tiers against the bar the pattern was opened at: a clip at song beat 8 sees
+/// the song's chords from beat 8, starting at its own beat 0.
+#[test]
+fn pattern_mode_chords_follow_the_chord_offset() {
+    let mut m = fixture();
+    let (_, _, p0, _) = ids(&m);
+    m.chords = ChordTrack::new(vec![
+        ChordEvent::new(0, 8 * BEAT, vec![0, 4, 7], Some("C".into())),
+        ChordEvent::new(8 * BEAT, 8 * BEAT, vec![9, 0, 4], Some("Am".into())),
+        ChordEvent::new(16 * BEAT, 16 * BEAT, vec![5, 9, 0], Some("F".into())),
+    ]);
+    let names = |offset: i64| -> Vec<(i64, i64, String)> {
+        let seq = Sequence::from_pattern(&m, &p0, offset).unwrap();
+        seq.chords
+            .chords()
+            .iter()
+            .map(|c| (c.start_tick, c.length_ticks, c.name.clone().unwrap()))
+            .collect()
+    };
+    assert_eq!(
+        names(0),
+        vec![(0, 8 * BEAT, "C".into()), (8 * BEAT, 8 * BEAT, "Am".into())]
+    );
+    assert_eq!(
+        names(8 * BEAT),
+        vec![(0, 8 * BEAT, "Am".into()), (8 * BEAT, 8 * BEAT, "F".into())]
+    );
+    assert_eq!(
+        names(20 * BEAT),
+        vec![(0, 12 * BEAT, "F".into())],
+        "mid-chord offset, cut at the progression end"
+    );
+    // The notes do not move with the offset; only the harmony under them does.
+    let notes = |offset: i64| {
+        Sequence::from_pattern(&m, &p0, offset).unwrap().tracks[0]
+            .notes
+            .clone()
+    };
+    assert_eq!(notes(0), notes(8 * BEAT));
 }
 
 #[test]
 fn song_flattening_produces_absolute_tick_positions() {
     let mut m = fixture();
-    let (t0, _, p0, p1) = ids(&m);
-    // p0 is 16 beats with notes at 0 and 4; p1 is 8 beats with a note at 2.
-    m.patterns[1].notes_by_track.insert(t0, vec![NoteEvent::new(2 * BEAT, BEAT, 67)]);
-    m.clips = vec![clip_at(p0, 0, 16 * BEAT), clip_at(p1, 16 * BEAT, 8 * BEAT), clip_at(p0, 24 * BEAT, 16 * BEAT)];
+    let (_, t1, p0, p1) = ids(&m);
+    // p0 is 16 beats with notes at 0 and 4; melody 2 is 8 beats with a note at 2; the drums
+    // play under all of it from their own pattern.
+    let p2 = add_melody_pattern(&mut m, 8 * BEAT, vec![NoteEvent::new(2 * BEAT, BEAT, 67)]);
+    m.patterns[1].notes = vec![NoteEvent::new(0, BEAT / 4, 36)];
+    m.clips = vec![
+        clip_at(p0, 0, 16 * BEAT),
+        clip_at(p2, 16 * BEAT, 8 * BEAT),
+        clip_at(p0, 24 * BEAT, 16 * BEAT),
+        clip_at(p1, 0, 40 * BEAT),
+    ];
 
     let seq = Sequence::from_song(&m);
-    assert_eq!(seq.length_ticks, (16 + 8 + 16) * BEAT);
+    assert_eq!(
+        seq.length_ticks, m.song_length_ticks,
+        "the song ends at its explicit length"
+    );
 
-    let mut starts: Vec<i64> = seq.tracks[0].notes.iter().map(|n| n.start_tick).collect();
-    starts.sort();
-    // p0 @0 → 0,4 ; p1 @16 → 18 ; p0 @24 → 24,28
+    let starts: Vec<i64> = seq.tracks[0].notes.iter().map(|n| n.start_tick).collect();
+    // p0 @0 → 0,4 ; melody 2 @16 → 18 ; p0 @24 → 24,28
     assert_eq!(starts, vec![0, 4 * BEAT, 18 * BEAT, 24 * BEAT, 28 * BEAT]);
+    let drums: Vec<i64> = seq.tracks[1].notes.iter().map(|n| n.start_tick).collect();
+    assert_eq!(
+        drums,
+        vec![0, 8 * BEAT, 16 * BEAT, 24 * BEAT, 32 * BEAT],
+        "track {t1} loops its own 8-beat pattern"
+    );
 
     // Repeated occurrences get distinct but deterministic ids.
     let ids: Vec<Uuid> = seq.tracks[0].notes.iter().map(|n| n.id).collect();
     let mut unique = ids.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(unique.len(), ids.len(), "repeated pattern occurrences reused note ids");
-    assert_eq!(ids, Sequence::from_song(&m).tracks[0].notes.iter().map(|n| n.id).collect::<Vec<_>>());
+    assert_eq!(
+        unique.len(),
+        ids.len(),
+        "repeated pattern occurrences reused note ids"
+    );
+    assert_eq!(
+        ids,
+        Sequence::from_song(&m).tracks[0]
+            .notes
+            .iter()
+            .map(|n| n.id)
+            .collect::<Vec<_>>()
+    );
 
-    // Chords are offset the same way.
-    let first = seq.chords.chord_at(0).unwrap().name.clone();
-    assert_eq!(seq.chords.chord_at(24 * BEAT).unwrap().name, first, "the third occurrence lost its chords");
+    // The chords are the project's own, in song ticks.
+    assert_eq!(seq.chords, m.chords);
 }
 
 #[test]
 fn a_song_sequence_always_has_a_playable_loop_length() {
-    // `SetPatternLength` refuses anything below 1 beat, but nothing clamps `lengthBeats` when a
-    // project is *loaded*, so a hand-edited or third-party file can carry 0 or a negative
-    // length. `Sequence::from_pattern` already guards this with `.max(1.0)`; `from_song` must
-    // give the same guarantee, otherwise song mode never loops (engine.rs:370 requires
-    // `len > 0.0`) and "Export" fails outright with `RenderError::Empty` (render.rs:40).
+    // `SetPatternLength` refuses anything below 1 beat, but nothing clamps a pattern's
+    // `lengthBeats` when a project is *loaded*, so a hand-edited or third-party file can carry 0
+    // or a negative length. `Sequence::from_pattern` guards this with `.max(1.0)`, and the song
+    // length is held to at least one bar on load; otherwise song mode never loops
+    // (`len > 0.0` in the engine) and "Export" fails outright with `RenderError::Empty`.
     let base = r#"{
+      "schemaVersion": 6,
+      "songLengthBeats": SONG,
       "tracks": [ { "id": "11111111-1111-1111-1111-111111111111", "name": "lead" } ],
-      "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "name": "p", "lengthBeats": LEN } ],
+      "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "trackId": "11111111-1111-1111-1111-111111111111", "name": "p", "lengthBeats": LEN } ],
       "clips": [ { "patternId": "22222222-2222-2222-2222-222222222222", "startBeat": 0, "lengthBeats": 16 } ]
     }"#;
     for len in ["0", "-8", "0.25"] {
-        let m = ProjectModel::from_json(&base.replace("LEN", len)).unwrap();
+        let m = ProjectModel::from_json(&base.replace("LEN", len).replace("SONG", len)).unwrap();
         let pid = m.patterns[0].id;
         assert!(
-            Sequence::from_pattern(&m, &pid).unwrap().length_ticks >= BEAT,
+            Sequence::from_pattern(&m, &pid, 0).unwrap().length_ticks >= BEAT,
             "pattern mode produced an unplayable loop for lengthBeats {len}"
         );
         assert!(
-            Sequence::from_song(&m).length_ticks >= BEAT,
-            "song mode produced an unplayable loop ({}) for lengthBeats {len}",
+            Sequence::from_song(&m).length_ticks >= 4 * BEAT,
+            "song mode produced an unplayable loop ({}) for songLengthBeats {len}",
             Sequence::from_song(&m).length_ticks
         );
     }
-
-    // Same guarantee when the arrangement is empty and the fallback pattern is degenerate.
-    let m = ProjectModel::from_json(&base.replace("LEN", "0").replace(r#""clips": [ { "patternId": "22222222-2222-2222-2222-222222222222", "startBeat": 0, "lengthBeats": 16 } ]"#, r#""clips": []"#)).unwrap();
-    assert!(Sequence::from_song(&m).length_ticks >= BEAT, "empty-arrangement fallback is unplayable");
 }
 
 #[test]
 fn a_song_that_is_nothing_but_audio_loops_over_the_audio() {
-    // Without this the loop would fall back to the first pattern's length, cutting off a take
-    // longer than it and repeating one shorter than it.
+    // Without this the loop would stop at the song's end, cutting off a take that runs past it.
     let mut m = fixture();
     m.clips = vec![];
+    m.song_length_ticks = 4 * BEAT;
     m.tempo = 120.0;
     let gid = audio_track(&m);
     let source = m.audio_sources[0].id;
@@ -882,8 +1622,8 @@ fn a_song_that_is_nothing_but_audio_loops_over_the_audio() {
     assert_eq!(seq.audio.len(), 1);
     assert_eq!(seq.audio[0].start_seconds, 0.0);
 
-    // Pattern clips and audio coexist: the longer of the two sets the loop.
-    m.clips = vec![clip_at(m.patterns[0].id, 0, 16 * BEAT)];
+    // The song's own length wins once it is the longer of the two.
+    m.song_length_ticks = 16 * BEAT;
     assert_eq!(Sequence::from_song(&m).length_ticks, 16 * BEAT);
 
     // A muted clip is left out of the sequence entirely rather than rendered silently.
@@ -892,50 +1632,53 @@ fn a_song_that_is_nothing_but_audio_loops_over_the_audio() {
 
     // Pattern mode never carries audio: audio lives on the song timeline.
     m.audio_clips[0].muted = false;
-    let pattern = Sequence::from_pattern(&m, &m.patterns[0].id).unwrap();
+    let pattern = Sequence::from_pattern(&m, &m.patterns[0].id, 0).unwrap();
     assert!(pattern.audio.is_empty());
 }
 
 #[test]
 fn song_flattening_survives_empty_and_degenerate_input() {
-    // Empty song: no notes, no audio, length falls back to the first pattern.
+    // Empty song: no notes, but the song is still as long as it says and keeps its chords.
     let mut m = fixture();
     m.clips = vec![];
     m.audio_clips = vec![];
     let seq = Sequence::from_song(&m);
     assert!(seq.tracks.iter().all(|t| t.notes.is_empty()));
-    assert!(seq.chords.is_empty());
-    assert_eq!(seq.length_ticks, 16 * BEAT);
+    assert_eq!(seq.chords, m.chords);
+    assert_eq!(seq.length_ticks, m.song_length_ticks);
 
-    // Clips of patterns that are gone: loading drops them, so the song falls back to the first
-    // pattern's length rather than stretching over clips that can never play.
-    m.clips = vec![clip_at(Uuid::new_v4(), 0, 16 * BEAT), clip_at(Uuid::new_v4(), 16 * BEAT, 16 * BEAT)];
+    // Clips of patterns that are gone: loading drops them.
+    m.clips = vec![
+        clip_at(Uuid::new_v4(), 0, 16 * BEAT),
+        clip_at(Uuid::new_v4(), 16 * BEAT, 16 * BEAT),
+    ];
     let m = ProjectModel::from_json(&m.to_json().unwrap()).unwrap();
-    assert!(m.clips.is_empty(), "clips of deleted patterns survived loading");
+    assert!(
+        m.clips.is_empty(),
+        "clips of deleted patterns survived loading"
+    );
     let seq = Sequence::from_song(&m);
-    assert_eq!(seq.length_ticks, 16 * BEAT);
     assert!(seq.tracks.iter().all(|t| t.notes.is_empty()));
     let mut m = m;
 
     // A dead id in the middle must not shift the patterns after it.
-    let (t0, _, p0, p1) = ids(&m);
-    m.patterns[1].notes_by_track.insert(t0, vec![NoteEvent::new(0, BEAT, 67)]);
-    m.clips = vec![clip_at(p0, 0, 16 * BEAT), clip_at(p1, 16 * BEAT, 16 * BEAT)];
+    let (_, _, p0, _) = ids(&m);
+    let p2 = add_melody_pattern(&mut m, 16 * BEAT, vec![NoteEvent::new(0, BEAT, 67)]);
+    m.clips = vec![clip_at(p0, 0, 16 * BEAT), clip_at(p2, 16 * BEAT, 16 * BEAT)];
     let seq = Sequence::from_song(&m);
     let starts: Vec<i64> = seq.tracks[0].notes.iter().map(|n| n.start_tick).collect();
-    assert_eq!(
-        Arrangement::total_length(&m.clips),
-        seq.length_ticks,
-        "total_length and the flattened timeline disagree"
+    assert_eq!(Arrangement::total_length(&m.clips), 32 * BEAT);
+    assert!(
+        starts.contains(&(16 * BEAT)),
+        "the pattern after a dead id was misplaced: {starts:?}"
     );
-    assert!(starts.contains(&(16 * BEAT)), "the pattern after a dead id was misplaced: {starts:?}");
 
-    // A pattern with no notes and no chords: empty, not a panic.
+    // A pattern with no notes and a project with no chords: empty, not a panic.
     let mut bare = ProjectModel::empty();
     let bare_p = bare.patterns[0].id;
     bare.clips = vec![clip_at(bare_p, 0, 16 * BEAT)];
     let seq = Sequence::from_song(&bare);
-    assert_eq!(seq.length_ticks, 16 * BEAT);
+    assert_eq!(seq.length_ticks, bare.song_length_ticks);
     assert!(seq.chords.is_empty());
     assert!(seq.tracks.iter().all(|t| t.notes.is_empty()));
     assert!(!seq.any_solo());
@@ -945,14 +1688,31 @@ fn song_flattening_survives_empty_and_degenerate_input() {
 fn sequence_carries_mute_and_solo_so_audibility_is_decidable() {
     let mut d = doc();
     let (t0, t1, p0, _) = ids(d.model());
-    d.apply(Command::SetTrackMuted { id: t0, muted: true }, false).unwrap();
-    let seq = Sequence::from_pattern(d.model(), &p0).unwrap();
+    d.apply(
+        Command::SetTrackMuted {
+            id: t0,
+            muted: true,
+        },
+        false,
+    )
+    .unwrap();
+    let seq = Sequence::from_pattern(d.model(), &p0, 0).unwrap();
     assert!(!seq.any_solo());
-    assert!(!seq.tracks[0].audible(false), "a muted track must not be audible");
+    assert!(
+        !seq.tracks[0].audible(false),
+        "a muted track must not be audible"
+    );
     assert!(seq.tracks[1].audible(false));
 
-    d.apply(Command::SetTrackSoloed { id: t1, soloed: true }, false).unwrap();
-    let seq = Sequence::from_pattern(d.model(), &p0).unwrap();
+    d.apply(
+        Command::SetTrackSoloed {
+            id: t1,
+            soloed: true,
+        },
+        false,
+    )
+    .unwrap();
+    let seq = Sequence::from_pattern(d.model(), &p0, 0).unwrap();
     assert!(seq.any_solo());
     assert!(!seq.tracks[0].audible(true));
     assert!(seq.tracks[1].audible(true));
@@ -965,31 +1725,103 @@ fn save_load_round_trip_preserves_every_edit() {
     let mut d = doc();
     let (t0, t1, p0, p1) = ids(d.model());
     d.apply(Command::SetTempo { bpm: 143.0 }, false).unwrap();
-    d.apply(Command::SetKey { key: KeyState::locked(9, ScaleType::Minor) }, false).unwrap();
-    d.apply(Command::RenameTrack { id: t0, name: "lead".into() }, false).unwrap();
-    d.apply(Command::SetTrackVoice { id: t0, voice: "pluck".into() }, false).unwrap();
-    d.apply(Command::SetTrackColor { id: t0, color: Some("#AABBCC".into()) }, false).unwrap();
-    d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Pan, value: -0.42 }, false).unwrap();
-    d.apply(Command::SetTrackMuted { id: t1, muted: true }, false).unwrap();
-    d.apply(Command::SetPatternLength { id: p1, ticks: 12 * BEAT + BEAT / 2 }, false).unwrap();
-    d.apply(Command::RenamePattern { id: p1, name: "chorus".into() }, false).unwrap();
     d.apply(
-        Command::SetNotes {
-            pattern_id: p1,
-            track_id: t1,
-            notes: vec![NoteEvent::new(3 * BEAT / 2, BEAT / 4, 36).with_velocity(1), NoteEvent::new(2 * BEAT, BEAT / 2, 42)],
+        Command::SetKey {
+            key: KeyState::locked(9, ScaleType::Minor),
         },
         false,
     )
     .unwrap();
     d.apply(
-        Command::SetChords { pattern_id: p1, chords: vec![ChordEvent::new(0, 4 * BEAT, vec![9, 0, 4], None)] },
+        Command::RenameTrack {
+            id: t0,
+            name: "lead".into(),
+        },
         false,
     )
     .unwrap();
+    d.apply(
+        Command::SetTrackVoice {
+            id: t0,
+            voice: "pluck".into(),
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetTrackColor {
+            id: t0,
+            color: Some("#AABBCC".into()),
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetTrackParam {
+            id: t0,
+            param: TrackParam::Pan,
+            value: -0.42,
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetTrackMuted {
+            id: t1,
+            muted: true,
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetPatternLength {
+            id: p1,
+            ticks: 12 * BEAT + BEAT / 2,
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::RenamePattern {
+            id: p1,
+            name: "chorus".into(),
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetNotes {
+            pattern_id: p1,
+            notes: vec![
+                NoteEvent::new(3 * BEAT / 2, BEAT / 4, 36).with_velocity(1),
+                NoteEvent::new(2 * BEAT, BEAT / 2, 42),
+            ],
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(
+        Command::SetChords {
+            chords: vec![ChordEvent::new(0, 4 * BEAT, vec![9, 0, 4], None)],
+        },
+        false,
+    )
+    .unwrap();
+    d.apply(Command::SetSongLength { ticks: 96 * BEAT }, false)
+        .unwrap();
     for (pattern_id, start) in [(p1, 0), (p0, 16 * BEAT), (p1, 32 * BEAT)] {
-        d.apply(Command::AddClip { pattern_id, start_tick: start, length_ticks: None }, false).unwrap();
+        d.apply(
+            Command::AddClip {
+                pattern_id,
+                start_tick: start,
+                length_ticks: None,
+            },
+            false,
+        )
+        .unwrap();
     }
+    d.apply(Command::AddPattern { track_id: t0 }, false)
+        .unwrap();
     d.apply(
         Command::SetMaster {
             master: MasterSettings {
@@ -1012,7 +1844,10 @@ fn save_load_round_trip_preserves_every_edit() {
     assert_eq!(loaded, saved, "round trip lost or changed state");
 
     // And it is stable: saving the loaded project yields the same project again.
-    assert_eq!(ProjectModel::from_json(&loaded.to_json().unwrap()).unwrap(), saved);
+    assert_eq!(
+        ProjectModel::from_json(&loaded.to_json().unwrap()).unwrap(),
+        saved
+    );
 
     // The flattened song is identical too, ids included.
     assert_eq!(Sequence::from_song(&loaded), Sequence::from_song(&saved));
@@ -1022,25 +1857,32 @@ fn save_load_round_trip_preserves_every_edit() {
 fn a_file_missing_newer_optional_fields_opens_with_documented_defaults() {
     let track = "11111111-1111-1111-1111-111111111111";
     let pattern = "22222222-2222-2222-2222-222222222222";
-    // A minimal "v2-era" file: no velocity, no master, no voice/tone/pan, no schemaVersion.
+    // A minimal schema-6 file: no velocity, no master, no voice/tone/pan, no chords, no song
+    // length.
     let json = format!(
         r#"{{
+          "schemaVersion": 6,
           "tempo": 128,
           "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
-          "patterns": [ {{ "id": "{pattern}", "name": "verse",
-            "notesByTrack": {{ "{track}": [ {{ "startBeat": 0, "lengthBeats": 1, "pitch": 60 }} ] }}
+          "patterns": [ {{ "id": "{pattern}", "trackId": "{track}", "name": "verse",
+            "notes": [ {{ "startBeat": 0, "lengthBeats": 1, "pitch": 60 }} ]
           }} ]
         }}"#
     );
-    let m = ProjectModel::from_json(&json).expect("an older file must still open");
+    let m = ProjectModel::from_json(&json).expect("a minimal file must still open");
 
-    assert_eq!(m.schema_version, SCHEMA_VERSION, "schema was not bumped on load");
+    assert_eq!(m.schema_version, SCHEMA_VERSION);
     assert_eq!(m.tempo, 128.0);
     assert_eq!(m.key, KeyState::NONE);
-    assert_eq!(m.arrangement, Vec::<Uuid>::new());
     assert_eq!(m.master, MasterSettings::default());
     assert_eq!(m.master.low_cut_hz, 20.0);
     assert_eq!(m.master.high_cut_hz, 18_000.0);
+    assert!(m.chords.is_empty());
+    assert_eq!(
+        m.song_length_ticks,
+        DEFAULT_SONG_BARS as i64 * 4 * BEAT,
+        "missing songLengthTicks is the default song"
+    );
 
     let t = &m.tracks[0];
     assert_eq!(t.voice, "saw");
@@ -1051,27 +1893,53 @@ fn a_file_missing_newer_optional_fields_opens_with_documented_defaults() {
     assert_eq!(t.color, None);
 
     let p = &m.patterns[0];
-    assert_eq!(p.length_ticks, 16 * BEAT, "missing lengthBeats must default to 16 beats of ticks");
-    assert!(p.chords.is_empty());
+    assert_eq!(
+        p.length_ticks,
+        16 * BEAT,
+        "missing lengthBeats must default to 16 beats of ticks"
+    );
+    assert_eq!(p.track_id, t.id);
 
     // A note with no velocity plays at the documented default, and gets a real id.
-    let note = &p.notes(&t.id)[0];
-    assert_eq!(note.velocity, 100, "a note without velocity must default to 100");
-    assert_ne!(note.id, Uuid::nil(), "a note without an id must get a fresh one");
+    let note = &p.notes[0];
+    assert_eq!(
+        note.velocity, 100,
+        "a note without velocity must default to 100"
+    );
+    assert_ne!(
+        note.id,
+        Uuid::nil(),
+        "a note without an id must get a fresh one"
+    );
 }
 
 #[test]
 fn an_empty_or_stub_file_still_opens_as_a_usable_project() {
-    for json in ["{}", r#"{"tracks": []}"#, r#"{"patterns": []}"#, r#"{"tracks": [], "patterns": []}"#] {
-        let m = ProjectModel::from_json(json).unwrap_or_else(|e| panic!("{json} failed to open: {e}"));
-        assert!(!m.tracks.is_empty(), "{json} produced a project with no tracks");
-        assert!(!m.patterns.is_empty(), "{json} produced a project with no patterns");
+    for json in [
+        r#"{"schemaVersion": 6}"#,
+        r#"{"schemaVersion": 6, "tracks": []}"#,
+        r#"{"schemaVersion": 6, "patterns": []}"#,
+        r#"{"schemaVersion": 6, "tracks": [], "patterns": []}"#,
+    ] {
+        let m =
+            ProjectModel::from_json(json).unwrap_or_else(|e| panic!("{json} failed to open: {e}"));
+        assert!(
+            !m.tracks.is_empty(),
+            "{json} produced a project with no tracks"
+        );
+        assert!(
+            !m.patterns.is_empty(),
+            "{json} produced a project with nothing to write into"
+        );
         // And a usable project is one you can immediately play and edit.
-        assert!(Sequence::from_pattern(&m, &m.patterns[0].id).is_some());
+        assert!(Sequence::from_pattern(&m, &m.patterns[0].id, 0).is_some());
         let mut d = Document::new(m);
-        let (t0, p0) = (d.model().tracks[0].id, d.model().patterns[0].id);
+        let p0 = d.model().patterns[0].id;
         d.apply(
-            Command::SetNotes { pattern_id: p0, track_id: t0, notes: vec![NoteEvent::new(0, BEAT, 60)] },
+            Command::SetNotes {
+                pattern_id: p0,
+                notes: vec![NoteEvent::new(0, BEAT, 60)],
+            },
             false,
         )
         .unwrap();
@@ -1089,19 +1957,24 @@ fn garbage_input_produces_an_error_not_a_panic() {
         "\"a string\"",
         "{",
         "{ \"tempo\": }",
-        r#"{ "tempo": "fast" }"#,
-        r#"{ "tempo": null }"#,
-        r#"{ "tracks": "nope" }"#,
-        r#"{ "tracks": [ { "voice": "saw" } ] }"#, // track with no name
-        r#"{ "patterns": [ { "name": "p", "lengthBeats": "long" } ] }"#,
-        r#"{ "tracks": [ { "id": "not-a-uuid", "name": "x" } ] }"#,
-        r#"{ "patterns": [ { "name": "p", "notesByTrack": { "nope": [] } } ] }"#,
+        r#"{ "schemaVersion": 6, "tempo": "fast" }"#,
+        r#"{ "schemaVersion": 6, "tempo": null }"#,
+        r#"{ "schemaVersion": 6, "tracks": "nope" }"#,
+        r#"{ "schemaVersion": 6, "tracks": [ { "voice": "saw" } ] }"#, // track with no name
+        r#"{ "schemaVersion": 6, "patterns": [ { "name": "p", "trackId": "11111111-1111-1111-1111-111111111111", "lengthBeats": "long" } ] }"#,
+        r#"{ "schemaVersion": 6, "tracks": [ { "id": "not-a-uuid", "name": "x" } ] }"#,
+        r#"{ "schemaVersion": 6, "patterns": [ { "name": "p", "trackId": "nope" } ] }"#,
+        r#"{ "schemaVersion": 6, "chords": [ { "startBeat": 0 } ] }"#,
+        r#"{ "schemaVersion": 6, "songLengthTicks": "long" }"#,
         "\u{feff}{}",
         deep.as_str(),
     ];
     for json in garbage {
         let short: String = json.chars().take(40).collect();
-        assert!(ProjectModel::from_json(json).is_err(), "{short:?} was accepted as a project file");
+        assert!(
+            ProjectModel::from_json(json).is_err(),
+            "{short:?} was accepted as a project file"
+        );
     }
 }
 
@@ -1118,60 +1991,108 @@ fn a_bare_json_array_is_not_a_project() {
         );
     }
     // An object still opens, including the minimal one.
-    assert_eq!(ProjectModel::from_json("{}").unwrap().tempo, 120.0);
+    assert_eq!(
+        ProjectModel::from_json(r#"{"schemaVersion": 6}"#)
+            .unwrap()
+            .tempo,
+        120.0
+    );
 }
 
 #[test]
-fn a_file_from_a_newer_schema_is_refused_rather_than_downgraded() {
+fn files_from_another_schema_are_refused_rather_than_converted() {
     // Opening a future file here would drop every field this build doesn't know, and the next
     // Save would overwrite the user's richer project with the lossy version. Refuse instead.
     let future = SCHEMA_VERSION + 96;
-    let json = format!(r#"{{ "schemaVersion": {future}, "tempo": 100, "unknownFutureField": [1,2,3] }}"#);
+    let json =
+        format!(r#"{{ "schemaVersion": {future}, "tempo": 100, "unknownFutureField": [1,2,3] }}"#);
     let err = ProjectModel::from_json(&json).expect_err("a file from the future was opened anyway");
     assert!(
         err.to_string().contains("newer version"),
         "the error should tell the user why: {err}"
     );
-    // The current schema, and anything older, still opens and is normalized forward.
-    for version in [0, 1, SCHEMA_VERSION] {
+    // Anything older opens: a pre-v10 file whose patterns held every track's notes is split
+    // into one pattern per track instead of being refused.
+    for version in [0, 1, 2, 3, 4, 5] {
         let json = format!(r#"{{ "schemaVersion": {version}, "tempo": 100 }}"#);
-        assert_eq!(ProjectModel::from_json(&json).unwrap().schema_version, SCHEMA_VERSION);
+        let m = ProjectModel::from_json(&json).expect("an old file must still open");
+        assert_eq!(m.schema_version, SCHEMA_VERSION);
     }
+    let json = format!(r#"{{ "schemaVersion": {SCHEMA_VERSION}, "tempo": 100 }}"#);
+    assert_eq!(
+        ProjectModel::from_json(&json).unwrap().schema_version,
+        SCHEMA_VERSION
+    );
 }
 
 #[test]
-fn loading_drops_notes_attached_to_tracks_that_do_not_exist() {
-    // Note buckets keyed by a track that is not in the project are invisible in the UI and never
-    // played, but would otherwise survive every load/save cycle and grow the file forever.
+fn loading_drops_patterns_of_tracks_that_do_not_exist() {
+    // A pattern of a track that is not in the project is invisible in the UI and never played,
+    // but would otherwise survive every load/save cycle and grow the file forever. Its clips go
+    // with it.
     let ghost = "33333333-3333-3333-3333-333333333333";
     let track = "11111111-1111-1111-1111-111111111111";
     let json = format!(
         r#"{{
+          "schemaVersion": 6,
           "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
-          "patterns": [ {{ "name": "p", "notesByTrack": {{
-            "{track}": [ {{ "startBeat": 0, "lengthBeats": 1, "pitch": 60 }} ],
-            "{ghost}": [ {{ "startBeat": 0, "lengthBeats": 1, "pitch": 72 }} ]
-          }} }} ]
+          "patterns": [
+            {{ "id": "44444444-4444-4444-4444-444444444444", "trackId": "{track}", "name": "p",
+               "notes": [ {{ "startBeat": 0, "lengthBeats": 1, "pitch": 60 }} ] }},
+            {{ "id": "55555555-5555-5555-5555-555555555555", "trackId": "{ghost}", "name": "orphan",
+               "notes": [ {{ "startBeat": 0, "lengthBeats": 1, "pitch": 72 }} ] }}
+          ],
+          "clips": [
+            {{ "patternId": "44444444-4444-4444-4444-444444444444", "startBeat": 0, "lengthBeats": 16 }},
+            {{ "patternId": "55555555-5555-5555-5555-555555555555", "startBeat": 0, "lengthBeats": 16 }}
+          ]
         }}"#
     );
     let m = ProjectModel::from_json(&json).unwrap();
-    let live: Vec<Uuid> = m.tracks.iter().map(|t| t.id).collect();
-    let orphans: Vec<Uuid> = m.patterns[0].notes_by_track.keys().copied().filter(|k| !live.contains(k)).collect();
-    assert!(orphans.is_empty(), "notes survived for tracks that no longer exist: {orphans:?}");
-    // The live track's notes are untouched.
-    assert_eq!(m.patterns[0].notes_by_track[&live[0]].len(), 1);
-    assert_eq!(m.patterns[0].notes_by_track[&live[0]][0].pitch, 60);
+    assert_eq!(m.patterns.len(), 1, "the orphan pattern survived loading");
+    assert_eq!(m.patterns[0].name, "p");
+    assert_eq!(
+        m.patterns[0].notes[0].pitch, 60,
+        "the live track's notes are untouched"
+    );
+    assert_eq!(m.clips.len(), 1, "the orphan's clip survived loading");
 }
 
 #[test]
 fn json_is_camel_case_on_every_nested_field() {
     let json = fixture().to_json().unwrap();
-    for key in ["schemaVersion", "notesByTrack", "lengthTicks", "startTick", "pitchClasses", "isDrum"] {
-        assert!(json.contains(&format!("\"{key}\"")), "missing camelCase key {key}");
+    for key in [
+        "schemaVersion",
+        "trackId",
+        "lengthTicks",
+        "startTick",
+        "pitchClasses",
+        "isDrum",
+        "songLengthTicks",
+    ] {
+        assert!(
+            json.contains(&format!("\"{key}\"")),
+            "missing camelCase key {key}"
+        );
     }
-    for snake in ["length_ticks", "start_tick", "notes_by_track", "pitch_classes", "is_drum", "reverb_send"] {
-        assert!(!json.contains(snake), "snake_case key {snake} leaked into the file");
+    for snake in [
+        "length_ticks",
+        "start_tick",
+        "track_id",
+        "pitch_classes",
+        "is_drum",
+        "reverb_send",
+        "song_length_ticks",
+    ] {
+        assert!(
+            !json.contains(snake),
+            "snake_case key {snake} leaked into the file"
+        );
     }
+    assert!(
+        !json.contains("notesByTrack"),
+        "the schema-5 layout leaked into the file"
+    );
 }
 
 // ---------------------------------------------------------------- dirty / path tracking
@@ -1189,7 +2110,10 @@ fn dirty_tracking_follows_edits_and_saves() {
     assert!(!d.is_dirty());
 
     assert!(d.undo());
-    assert!(d.is_dirty(), "undoing past the save point must mark the document dirty");
+    assert!(
+        d.is_dirty(),
+        "undoing past the save point must mark the document dirty"
+    );
 }
 
 #[test]
@@ -1202,18 +2126,39 @@ fn returning_to_the_saved_state_reports_no_unsaved_changes() {
     let on_disk = d.model().clone();
 
     assert!(d.undo());
-    assert!(d.is_dirty(), "undoing away from the saved state is an unsaved change");
+    assert!(
+        d.is_dirty(),
+        "undoing away from the saved state is an unsaved change"
+    );
     assert!(d.redo());
-    assert_eq!(d.model(), &on_disk, "undo+redo did not return to the saved state");
-    assert!(!d.is_dirty(), "the document matches the file on disk but still reports changes");
+    assert_eq!(
+        d.model(),
+        &on_disk,
+        "undo+redo did not return to the saved state"
+    );
+    assert!(
+        !d.is_dirty(),
+        "the document matches the file on disk but still reports changes"
+    );
 
     // A gesture that lands back on its starting value is likewise not an unsaved change.
     let t0 = d.model().tracks[0].id;
     for v in [0.5, 0.2, 1.0] {
-        d.apply(Command::SetTrackParam { id: t0, param: TrackParam::Volume, value: v }, true).unwrap();
+        d.apply(
+            Command::SetTrackParam {
+                id: t0,
+                param: TrackParam::Volume,
+                value: v,
+            },
+            true,
+        )
+        .unwrap();
     }
     d.commit_gesture();
-    assert!(!d.is_dirty(), "a round-trip slider drag reported unsaved changes");
+    assert!(
+        !d.is_dirty(),
+        "a round-trip slider drag reported unsaved changes"
+    );
 }
 
 // ---------------------------------------------------------------- 7. track plugins
@@ -1224,21 +2169,43 @@ fn fixture_uid() -> String {
 }
 
 fn vital() -> TrackPlugin {
-    TrackPlugin { uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(), name: "Vital".into(), state: None }
+    TrackPlugin {
+        uid: "clap:/CLAP/Vital.clap:audio.vital.synth".into(),
+        name: "Vital".into(),
+        state: None,
+    }
 }
 
 #[test]
 fn a_track_plugin_survives_a_save_and_load_with_its_state_blob() {
     let mut d = doc();
     let t0 = d.model().tracks[0].id;
-    d.apply(Command::SetPluginState { id: t0, state: "QUJDRA==".into() }, false).unwrap();
+    d.apply(
+        Command::SetPluginState {
+            id: t0,
+            state: "QUJDRA==".into(),
+        },
+        false,
+    )
+    .unwrap();
 
     let saved = d.model().clone();
-    let loaded = ProjectModel::from_json(&saved.to_json().unwrap()).expect("a file we just wrote must load");
-    let plugin = loaded.tracks[0].plugin.as_ref().expect("the track lost its plugin on reload");
+    let loaded =
+        ProjectModel::from_json(&saved.to_json().unwrap()).expect("a file we just wrote must load");
+    let plugin = loaded.tracks[0]
+        .plugin
+        .as_ref()
+        .expect("the track lost its plugin on reload");
     assert_eq!(plugin.uid, fixture_uid());
-    assert_eq!(plugin.name, "Surge XT", "the cached name must survive, so a missing plugin is still nameable");
-    assert_eq!(plugin.state.as_deref(), Some("QUJDRA=="), "the plugin's own state did not survive the file");
+    assert_eq!(
+        plugin.name, "Surge XT",
+        "the cached name must survive, so a missing plugin is still nameable"
+    );
+    assert_eq!(
+        plugin.state.as_deref(),
+        Some("QUJDRA=="),
+        "the plugin's own state did not survive the file"
+    );
     assert_eq!(loaded, saved);
 }
 
@@ -1257,8 +2224,14 @@ fn a_file_written_before_plugins_existed_opens_with_no_plugin() {
     );
     let m = ProjectModel::from_json(&json).expect("a pre-plugin file must still open");
     assert_eq!(m.schema_version, SCHEMA_VERSION);
-    assert_eq!(m.tracks[0].plugin, None, "a file with no plugin key must decode as no plugin");
-    assert_eq!(m.tracks[0].voice, "pluck", "the built-in voice must be left alone");
+    assert_eq!(
+        m.tracks[0].plugin, None,
+        "a file with no plugin key must decode as no plugin"
+    );
+    assert_eq!(
+        m.tracks[0].voice, "pluck",
+        "the built-in voice must be left alone"
+    );
 }
 
 #[test]
@@ -1268,16 +2241,33 @@ fn switching_to_a_different_plugin_drops_the_previous_plugins_state() {
     let mut d = doc();
     let t0 = d.model().tracks[0].id;
     let before = d.model().tracks[0].plugin.clone().unwrap();
-    assert!(before.state.is_some(), "fixture must start with a state blob for this to mean anything");
+    assert!(
+        before.state.is_some(),
+        "fixture must start with a state blob for this to mean anything"
+    );
 
-    d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(vital()) }, false).unwrap();
+    d.apply(
+        Command::SetTrackPlugin {
+            id: t0,
+            plugin: Some(vital()),
+        },
+        false,
+    )
+    .unwrap();
     let now = d.model().tracks[0].plugin.as_ref().unwrap();
     assert_eq!(now.uid, vital().uid);
-    assert_eq!(now.state, None, "the previous plugin's state was carried over to a different plugin");
+    assert_eq!(
+        now.state, None,
+        "the previous plugin's state was carried over to a different plugin"
+    );
 
     // Undo restores the old plugin *and* the state it had.
     assert!(d.undo());
-    assert_eq!(d.model().tracks[0].plugin.as_ref(), Some(&before), "undo did not restore the plugin and its state");
+    assert_eq!(
+        d.model().tracks[0].plugin.as_ref(),
+        Some(&before),
+        "undo did not restore the plugin and its state"
+    );
     assert!(d.redo());
     assert_eq!(d.model().tracks[0].plugin.as_ref().unwrap().state, None);
 }
@@ -1288,9 +2278,20 @@ fn reloading_the_same_plugin_keeps_its_state() {
     // user's patch.
     let mut d = doc();
     let t0 = d.model().tracks[0].id;
-    let same = TrackPlugin { uid: fixture_uid(), name: "Surge XT".into(), state: Some("c3VyZ2U=".into()) };
+    let same = TrackPlugin {
+        uid: fixture_uid(),
+        name: "Surge XT".into(),
+        state: Some("c3VyZ2U=".into()),
+    };
 
-    d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(same.clone()) }, false).unwrap();
+    d.apply(
+        Command::SetTrackPlugin {
+            id: t0,
+            plugin: Some(same.clone()),
+        },
+        false,
+    )
+    .unwrap();
     assert_eq!(d.model().tracks[0].plugin.as_ref(), Some(&same));
 }
 
@@ -1300,13 +2301,30 @@ fn clearing_a_tracks_plugin_restores_the_built_in_voice() {
     let t0 = d.model().tracks[0].id;
     let voice = d.model().tracks[0].voice.clone();
 
-    d.apply(Command::SetTrackPlugin { id: t0, plugin: None }, false).unwrap();
+    d.apply(
+        Command::SetTrackPlugin {
+            id: t0,
+            plugin: None,
+        },
+        false,
+    )
+    .unwrap();
     assert_eq!(d.model().tracks[0].plugin, None);
-    assert_eq!(d.model().tracks[0].voice, voice, "clearing a plugin must not disturb the voice it falls back to");
+    assert_eq!(
+        d.model().tracks[0].voice,
+        voice,
+        "clearing a plugin must not disturb the voice it falls back to"
+    );
 
     // And with no plugin to own it, there is nothing for a state blob to attach to.
     assert_eq!(
-        d.apply(Command::SetPluginState { id: t0, state: "QUJDRA==".into() }, false),
+        d.apply(
+            Command::SetPluginState {
+                id: t0,
+                state: "QUJDRA==".into()
+            },
+            false
+        ),
         Err(EditError::NoPluginOnTrack)
     );
 }
@@ -1322,7 +2340,16 @@ fn a_plugin_without_a_uid_or_with_a_malformed_state_is_refused() {
     // A uid is the only thing that can find the plugin again on the next load.
     for blank in ["", "   ", "\t\n"] {
         assert_eq!(
-            d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(TrackPlugin { uid: blank.into(), ..vital() }) }, false),
+            d.apply(
+                Command::SetTrackPlugin {
+                    id: t0,
+                    plugin: Some(TrackPlugin {
+                        uid: blank.into(),
+                        ..vital()
+                    })
+                },
+                false
+            ),
             Err(InvalidValue),
             "a plugin with the uid {blank:?} was accepted"
         );
@@ -1331,28 +2358,80 @@ fn a_plugin_without_a_uid_or_with_a_malformed_state_is_refused() {
     // Shapes that cannot be base64, so they could never be handed back to a plugin.
     for bad in ["not base64!", "ab*d", "QQ=", "====", "=QUJ", "QUJDRA==="] {
         assert_eq!(
-            d.apply(Command::SetPluginState { id: t0, state: bad.into() }, false),
+            d.apply(
+                Command::SetPluginState {
+                    id: t0,
+                    state: bad.into()
+                },
+                false
+            ),
             Err(InvalidValue),
             "state {bad:?} was accepted"
         );
         assert_eq!(
-            d.apply(Command::SetTrackPlugin { id: t0, plugin: Some(TrackPlugin { state: Some(bad.into()), ..vital() }) }, false),
+            d.apply(
+                Command::SetTrackPlugin {
+                    id: t0,
+                    plugin: Some(TrackPlugin {
+                        state: Some(bad.into()),
+                        ..vital()
+                    })
+                },
+                false
+            ),
             Err(InvalidValue),
             "a plugin carrying state {bad:?} was accepted"
         );
     }
 
-    assert_eq!(d.apply(Command::SetTrackPlugin { id: ghost, plugin: Some(vital()) }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::SetTrackPlugin { id: ghost, plugin: None }, false), Err(NoSuchTrack));
-    assert_eq!(d.apply(Command::SetPluginState { id: ghost, state: "QUJDRA==".into() }, false), Err(NoSuchTrack));
+    assert_eq!(
+        d.apply(
+            Command::SetTrackPlugin {
+                id: ghost,
+                plugin: Some(vital())
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetTrackPlugin {
+                id: ghost,
+                plugin: None
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
+    assert_eq!(
+        d.apply(
+            Command::SetPluginState {
+                id: ghost,
+                state: "QUJDRA==".into()
+            },
+            false
+        ),
+        Err(NoSuchTrack)
+    );
 
-    assert_eq!(d.model(), &before, "a refused plugin edit changed the project");
+    assert_eq!(
+        d.model(),
+        &before,
+        "a refused plugin edit changed the project"
+    );
     assert!(!d.can_undo(), "a refused plugin edit recorded an undo step");
 
     // Well-formed blobs of every padding length still go through.
     for good in ["", "QUJD", "ZGlmZmVyZW50", "QQ==", "QUI=", "a+/9"] {
-        d.apply(Command::SetPluginState { id: t0, state: good.into() }, false)
-            .unwrap_or_else(|e| panic!("valid base64 {good:?} was refused: {e}"));
+        d.apply(
+            Command::SetPluginState {
+                id: t0,
+                state: good.into(),
+            },
+            false,
+        )
+        .unwrap_or_else(|e| panic!("valid base64 {good:?} was refused: {e}"));
     }
 }
 
@@ -1364,16 +2443,25 @@ fn the_sequence_carries_each_tracks_plugin_through_from_the_model() {
     let expected = m.tracks[0].plugin.clone();
     assert!(expected.is_some());
 
-    for sequence in [Sequence::from_pattern(&m, &m.patterns[0].id).unwrap(), Sequence::from_song(&m)] {
-        assert_eq!(sequence.tracks[0].plugin, expected, "the sequence dropped the track's plugin");
-        assert_eq!(sequence.tracks[1].plugin, None, "a track with no plugin gained one");
+    for sequence in [
+        Sequence::from_pattern(&m, &m.patterns[0].id, 0).unwrap(),
+        Sequence::from_song(&m),
+    ] {
+        assert_eq!(
+            sequence.tracks[0].plugin, expected,
+            "the sequence dropped the track's plugin"
+        );
+        assert_eq!(
+            sequence.tracks[1].plugin, None,
+            "a track with no plugin gained one"
+        );
     }
 }
 
 #[test]
 fn out_of_range_note_properties_are_clamped_on_the_way_in() {
     let m = fixture();
-    let (p0, t0) = (m.patterns[0].id, m.tracks[0].id);
+    let p0 = m.patterns[0].id;
     let mut doc = Document::new(m);
 
     let mut wild = NoteEvent::new(BEAT, BEAT, 60);
@@ -1385,15 +2473,31 @@ fn out_of_range_note_properties_are_clamped_on_the_way_in() {
     wild.shift_ticks = 99 * BEAT;
     wild.repeats = 200;
     wild.color = 99;
-    doc.apply(Command::SetNotes { pattern_id: p0, track_id: t0, notes: vec![wild] }, false).unwrap();
+    doc.apply(
+        Command::SetNotes {
+            pattern_id: p0,
+            notes: vec![wild],
+        },
+        false,
+    )
+    .unwrap();
 
-    let got = &doc.model().patterns[0].notes_by_track[&t0][0];
+    let got = &doc.model().patterns[0].notes[0];
     assert_eq!(got.pan, 1.0, "pan clamps to the top of its range");
-    assert_eq!(got.release, 0.0, "release clamps to the bottom of its range");
-    assert_eq!(got.mod_x, 0.5, "a non-finite property falls back to neutral");
+    assert_eq!(
+        got.release, 0.0,
+        "release clamps to the bottom of its range"
+    );
+    assert_eq!(
+        got.mod_x, 0.5,
+        "a non-finite property falls back to neutral"
+    );
     assert_eq!(got.mod_y, 0.25, "a valid property is left alone");
     assert_eq!(got.fine, 1200, "fine pitch clamps to one octave");
-    assert_eq!(got.shift_ticks, MAX_SHIFT_TICKS, "an out-of-range shift clamps to four beats");
+    assert_eq!(
+        got.shift_ticks, MAX_SHIFT_TICKS,
+        "an out-of-range shift clamps to four beats"
+    );
     assert_eq!(got.repeats, 14, "repeats clamp to FL's range");
     assert_eq!(got.color, 15, "colour clamps to the 16 groups");
 }
@@ -1403,14 +2507,29 @@ fn a_neutral_note_serialises_without_the_performance_properties() {
     // Projects written before these properties existed must round trip byte-identically, and a
     // note nobody has touched must not bloat the file.
     let json = serde_json::to_string(&NoteEvent::new(0, BEAT, 60)).unwrap();
-    for absent in ["pan", "release", "fine", "modX", "modY", "shiftTicks", "repeats", "color"] {
-        assert!(!json.contains(absent), "neutral note serialised {absent}: {json}");
+    for absent in [
+        "pan",
+        "release",
+        "fine",
+        "modX",
+        "modY",
+        "shiftTicks",
+        "repeats",
+        "color",
+    ] {
+        assert!(
+            !json.contains(absent),
+            "neutral note serialised {absent}: {json}"
+        );
     }
 
     let mut touched = NoteEvent::new(0, BEAT, 60);
     touched.pan = 0.0;
     let json = serde_json::to_string(&touched).unwrap();
-    assert!(json.contains("\"pan\":0.0"), "a set property must survive the round trip: {json}");
+    assert!(
+        json.contains("\"pan\":0.0"),
+        "a set property must survive the round trip: {json}"
+    );
 }
 
 // ---------------------------------------------------------------- 8. effect inserts
@@ -1421,7 +2540,16 @@ fn chain(m: &ProjectModel, target: InsertTarget) -> Vec<String> {
         InsertTarget::Track(id) => &m.track(&id).expect("no such track").inserts,
         InsertTarget::Master => &m.master_inserts,
     };
-    inserts.iter().map(|i| if i.enabled { i.name.clone() } else { format!("{}*", i.name) }).collect()
+    inserts
+        .iter()
+        .map(|i| {
+            if i.enabled {
+                i.name.clone()
+            } else {
+                format!("{}*", i.name)
+            }
+        })
+        .collect()
 }
 
 #[test]
@@ -1429,28 +2557,96 @@ fn an_effect_chain_adds_reorders_bypasses_and_removes_one_undo_step_at_a_time() 
     let mut d = Document::new(ProjectModel::starter());
     let t0 = d.model().tracks[0].id;
     let target = InsertTarget::Track(t0);
-    assert!(d.model().tracks[0].inserts.is_empty(), "a new track starts with no effects");
+    assert!(
+        d.model().tracks[0].inserts.is_empty(),
+        "a new track starts with no effects"
+    );
 
     // Appended in the order they are added, then one squeezed in at the front.
     for (uid, name) in [(DELAY_UID, "Valhalla Delay"), (EQ_UID, "Pro-Q")] {
-        d.apply(Command::AddInsert { target, uid: uid.into(), name: name.into(), index: None }, false).unwrap();
+        d.apply(
+            Command::AddInsert {
+                target,
+                uid: uid.into(),
+                name: name.into(),
+                index: None,
+            },
+            false,
+        )
+        .unwrap();
     }
-    d.apply(Command::AddInsert { target, uid: EQ_UID.into(), name: "gate".into(), index: Some(0) }, false).unwrap();
-    assert_eq!(chain(d.model(), target), ["gate", "Valhalla Delay", "Pro-Q"]);
+    d.apply(
+        Command::AddInsert {
+            target,
+            uid: EQ_UID.into(),
+            name: "gate".into(),
+            index: Some(0),
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        chain(d.model(), target),
+        ["gate", "Valhalla Delay", "Pro-Q"]
+    );
 
     // Order is the whole point of a chain: moving a slot keeps its identity and its state.
     let delay = d.model().tracks[0].inserts[1].id;
-    d.apply(Command::MoveInsert { target, insert_id: delay, to_index: 2 }, false).unwrap();
-    assert_eq!(chain(d.model(), target), ["gate", "Pro-Q", "Valhalla Delay"]);
+    d.apply(
+        Command::MoveInsert {
+            target,
+            insert_id: delay,
+            to_index: 2,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        chain(d.model(), target),
+        ["gate", "Pro-Q", "Valhalla Delay"]
+    );
 
-    d.apply(Command::SetInsertEnabled { target, insert_id: delay, on: false }, false).unwrap();
-    assert_eq!(chain(d.model(), target), ["gate", "Pro-Q", "Valhalla Delay*"]);
-    assert_eq!(d.model().tracks[0].inserts.len(), 3, "a bypassed insert stays in the chain");
+    d.apply(
+        Command::SetInsertEnabled {
+            target,
+            insert_id: delay,
+            on: false,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        chain(d.model(), target),
+        ["gate", "Pro-Q", "Valhalla Delay*"]
+    );
+    assert_eq!(
+        d.model().tracks[0].inserts.len(),
+        3,
+        "a bypassed insert stays in the chain"
+    );
 
-    d.apply(Command::SetInsertState { target, insert_id: delay, state: "ZGVsYXk=".into() }, false).unwrap();
-    assert_eq!(d.model().tracks[0].inserts[2].state.as_deref(), Some("ZGVsYXk="));
+    d.apply(
+        Command::SetInsertState {
+            target,
+            insert_id: delay,
+            state: "ZGVsYXk=".into(),
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        d.model().tracks[0].inserts[2].state.as_deref(),
+        Some("ZGVsYXk=")
+    );
 
-    d.apply(Command::RemoveInsert { target, insert_id: delay }, false).unwrap();
+    d.apply(
+        Command::RemoveInsert {
+            target,
+            insert_id: delay,
+        },
+        false,
+    )
+    .unwrap();
     assert_eq!(chain(d.model(), target), ["gate", "Pro-Q"]);
 
     // Six edits, six undo steps, walking back to an empty chain and forward again.
@@ -1478,16 +2674,33 @@ fn the_master_has_its_own_chain_independent_of_every_track() {
     let before = chain(d.model(), InsertTarget::Track(t0));
 
     d.apply(
-        Command::AddInsert { target: InsertTarget::Master, uid: DELAY_UID.into(), name: "glue".into(), index: Some(0) },
+        Command::AddInsert {
+            target: InsertTarget::Master,
+            uid: DELAY_UID.into(),
+            name: "glue".into(),
+            index: Some(0),
+        },
         false,
     )
     .unwrap();
     assert_eq!(chain(d.model(), InsertTarget::Master), ["glue", "Pro-Q"]);
-    assert_eq!(chain(d.model(), InsertTarget::Track(t0)), before, "a master insert leaked onto a track");
+    assert_eq!(
+        chain(d.model(), InsertTarget::Track(t0)),
+        before,
+        "a master insert leaked onto a track"
+    );
 
     // Deleting every track leaves the master chain alone: it belongs to the project.
     let master_id = d.model().master_inserts[0].id;
-    d.apply(Command::SetInsertEnabled { target: InsertTarget::Master, insert_id: master_id, on: false }, false).unwrap();
+    d.apply(
+        Command::SetInsertEnabled {
+            target: InsertTarget::Master,
+            insert_id: master_id,
+            on: false,
+        },
+        false,
+    )
+    .unwrap();
     assert_eq!(chain(d.model(), InsertTarget::Master), ["glue*", "Pro-Q"]);
 }
 
@@ -1496,12 +2709,28 @@ fn a_chain_is_capped_at_max_inserts() {
     let mut d = Document::new(ProjectModel::starter());
     let target = InsertTarget::Track(d.model().tracks[0].id);
     for i in 0..MAX_INSERTS {
-        d.apply(Command::AddInsert { target, uid: EQ_UID.into(), name: format!("eq {i}"), index: None }, false)
-            .unwrap_or_else(|e| panic!("insert {i} refused: {e}"));
+        d.apply(
+            Command::AddInsert {
+                target,
+                uid: EQ_UID.into(),
+                name: format!("eq {i}"),
+                index: None,
+            },
+            false,
+        )
+        .unwrap_or_else(|e| panic!("insert {i} refused: {e}"));
     }
     let full = d.model().clone();
     assert_eq!(
-        d.apply(Command::AddInsert { target, uid: EQ_UID.into(), name: "one too many".into(), index: None }, false),
+        d.apply(
+            Command::AddInsert {
+                target,
+                uid: EQ_UID.into(),
+                name: "one too many".into(),
+                index: None
+            },
+            false
+        ),
         Err(EditError::TooManyInserts)
     );
     assert_eq!(d.model(), &full, "a refused insert changed the chain");
@@ -1509,14 +2738,24 @@ fn a_chain_is_capped_at_max_inserts() {
     // The master chain has the same ceiling, counted separately.
     for i in 0..MAX_INSERTS {
         d.apply(
-            Command::AddInsert { target: InsertTarget::Master, uid: EQ_UID.into(), name: format!("m {i}"), index: None },
+            Command::AddInsert {
+                target: InsertTarget::Master,
+                uid: EQ_UID.into(),
+                name: format!("m {i}"),
+                index: None,
+            },
             false,
         )
         .unwrap_or_else(|e| panic!("master insert {i} refused: {e}"));
     }
     assert_eq!(
         d.apply(
-            Command::AddInsert { target: InsertTarget::Master, uid: EQ_UID.into(), name: "nope".into(), index: None },
+            Command::AddInsert {
+                target: InsertTarget::Master,
+                uid: EQ_UID.into(),
+                name: "nope".into(),
+                index: None
+            },
             false
         ),
         Err(EditError::TooManyInserts)
@@ -1533,7 +2772,15 @@ fn an_insert_without_a_uid_is_refused() {
     for blank in ["", "   ", "\t\n"] {
         for t in [target, InsertTarget::Master] {
             assert_eq!(
-                d.apply(Command::AddInsert { target: t, uid: blank.into(), name: "ghost".into(), index: None }, false),
+                d.apply(
+                    Command::AddInsert {
+                        target: t,
+                        uid: blank.into(),
+                        name: "ghost".into(),
+                        index: None
+                    },
+                    false
+                ),
                 Err(EditError::InvalidValue),
                 "an insert with the uid {blank:?} was accepted"
             );
@@ -1551,18 +2798,61 @@ fn insert_positions_are_clamped_rather_than_refused() {
     let target = InsertTarget::Track(d.model().tracks[0].id);
     let first = d.model().tracks[0].inserts[0].id;
 
-    d.apply(Command::AddInsert { target, uid: EQ_UID.into(), name: "tail".into(), index: Some(99) }, false).unwrap();
-    assert_eq!(chain(d.model(), target), ["Valhalla Delay", "Pro-Q", "tail"], "an out-of-range index must append");
+    d.apply(
+        Command::AddInsert {
+            target,
+            uid: EQ_UID.into(),
+            name: "tail".into(),
+            index: Some(99),
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        chain(d.model(), target),
+        ["Valhalla Delay", "Pro-Q", "tail"],
+        "an out-of-range index must append"
+    );
 
-    d.apply(Command::MoveInsert { target, insert_id: first, to_index: 99 }, false).unwrap();
-    assert_eq!(chain(d.model(), target), ["Pro-Q", "tail", "Valhalla Delay"]);
+    d.apply(
+        Command::MoveInsert {
+            target,
+            insert_id: first,
+            to_index: 99,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        chain(d.model(), target),
+        ["Pro-Q", "tail", "Valhalla Delay"]
+    );
 
-    d.apply(Command::MoveInsert { target, insert_id: first, to_index: 0 }, false).unwrap();
-    assert_eq!(chain(d.model(), target), ["Valhalla Delay", "Pro-Q", "tail"]);
+    d.apply(
+        Command::MoveInsert {
+            target,
+            insert_id: first,
+            to_index: 0,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        chain(d.model(), target),
+        ["Valhalla Delay", "Pro-Q", "tail"]
+    );
 
     // A move onto its own position changes nothing, so it costs no undo step.
     let steps = d.model().clone();
-    d.apply(Command::MoveInsert { target, insert_id: first, to_index: 0 }, false).unwrap();
+    d.apply(
+        Command::MoveInsert {
+            target,
+            insert_id: first,
+            to_index: 0,
+        },
+        false,
+    )
+    .unwrap();
     assert_eq!(d.model(), &steps);
 }
 
@@ -1575,7 +2865,14 @@ fn insert_state_is_base64_checked_and_coalesces_like_a_knob_drag() {
 
     for bad in ["not base64!", "ab*d", "QQ=", "====", "=QUJ", "QUJDRA==="] {
         assert_eq!(
-            d.apply(Command::SetInsertState { target, insert_id: id, state: bad.into() }, false),
+            d.apply(
+                Command::SetInsertState {
+                    target,
+                    insert_id: id,
+                    state: bad.into()
+                },
+                false
+            ),
             Err(EditError::InvalidValue),
             "insert state {bad:?} was accepted"
         );
@@ -1585,12 +2882,27 @@ fn insert_state_is_base64_checked_and_coalesces_like_a_knob_drag() {
     // A plugin window streaming state while the user drags a knob is one undo step, exactly
     // like `SetTrackParam`.
     for state in ["QUJD", "ZGlmZmVyZW50", "QQ==", "a+/9"] {
-        d.apply(Command::SetInsertState { target, insert_id: id, state: state.into() }, true).unwrap();
+        d.apply(
+            Command::SetInsertState {
+                target,
+                insert_id: id,
+                state: state.into(),
+            },
+            true,
+        )
+        .unwrap();
     }
     d.commit_gesture();
-    assert_eq!(d.model().tracks[0].inserts[0].state.as_deref(), Some("a+/9"));
+    assert_eq!(
+        d.model().tracks[0].inserts[0].state.as_deref(),
+        Some("a+/9")
+    );
     assert!(d.undo());
-    assert_eq!(d.model(), &before, "a run of transient state edits was not one undo step");
+    assert_eq!(
+        d.model(),
+        &before,
+        "a run of transient state edits was not one undo step"
+    );
     assert!(!d.can_undo());
 }
 
@@ -1603,20 +2915,70 @@ fn insert_commands_reject_unknown_tracks_and_unknown_slots() {
     let before = d.model().clone();
 
     assert_eq!(
-        d.apply(Command::AddInsert { target: ghost_track, uid: EQ_UID.into(), name: "eq".into(), index: None }, false),
+        d.apply(
+            Command::AddInsert {
+                target: ghost_track,
+                uid: EQ_UID.into(),
+                name: "eq".into(),
+                index: None
+            },
+            false
+        ),
         Err(EditError::NoSuchTrack)
     );
-    assert_eq!(d.apply(Command::RemoveInsert { target: ghost_track, insert_id: ghost }, false), Err(EditError::NoSuchTrack));
+    assert_eq!(
+        d.apply(
+            Command::RemoveInsert {
+                target: ghost_track,
+                insert_id: ghost
+            },
+            false
+        ),
+        Err(EditError::NoSuchTrack)
+    );
 
     for target in [target, InsertTarget::Master] {
-        assert_eq!(d.apply(Command::RemoveInsert { target, insert_id: ghost }, false), Err(EditError::NoSuchInsert));
-        assert_eq!(d.apply(Command::MoveInsert { target, insert_id: ghost, to_index: 0 }, false), Err(EditError::NoSuchInsert));
         assert_eq!(
-            d.apply(Command::SetInsertEnabled { target, insert_id: ghost, on: false }, false),
+            d.apply(
+                Command::RemoveInsert {
+                    target,
+                    insert_id: ghost
+                },
+                false
+            ),
             Err(EditError::NoSuchInsert)
         );
         assert_eq!(
-            d.apply(Command::SetInsertState { target, insert_id: ghost, state: "QUJD".into() }, false),
+            d.apply(
+                Command::MoveInsert {
+                    target,
+                    insert_id: ghost,
+                    to_index: 0
+                },
+                false
+            ),
+            Err(EditError::NoSuchInsert)
+        );
+        assert_eq!(
+            d.apply(
+                Command::SetInsertEnabled {
+                    target,
+                    insert_id: ghost,
+                    on: false
+                },
+                false
+            ),
+            Err(EditError::NoSuchInsert)
+        );
+        assert_eq!(
+            d.apply(
+                Command::SetInsertState {
+                    target,
+                    insert_id: ghost,
+                    state: "QUJD".into()
+                },
+                false
+            ),
             Err(EditError::NoSuchInsert)
         );
     }
@@ -1624,12 +2986,25 @@ fn insert_commands_reject_unknown_tracks_and_unknown_slots() {
     // An insert id only means anything inside its own chain.
     let on_track = d.model().tracks[0].inserts[0].id;
     assert_eq!(
-        d.apply(Command::RemoveInsert { target: InsertTarget::Master, insert_id: on_track }, false),
+        d.apply(
+            Command::RemoveInsert {
+                target: InsertTarget::Master,
+                insert_id: on_track
+            },
+            false
+        ),
         Err(EditError::NoSuchInsert)
     );
 
-    assert_eq!(d.model(), &before, "a refused insert command changed the project");
-    assert!(!d.can_undo(), "a refused insert command recorded an undo step");
+    assert_eq!(
+        d.model(),
+        &before,
+        "a refused insert command changed the project"
+    );
+    assert!(
+        !d.can_undo(),
+        "a refused insert command recorded an undo step"
+    );
 }
 
 #[test]
@@ -1642,7 +3017,11 @@ fn deleting_a_track_takes_its_chain_with_it_and_undo_brings_it_back() {
     d.apply(Command::DeleteTrack { id: t0 }, false).unwrap();
     assert!(d.model().track(&t0).is_none());
     assert!(d.undo());
-    assert_eq!(d.model().tracks[0].inserts, before, "undo lost the track's effect chain");
+    assert_eq!(
+        d.model().tracks[0].inserts,
+        before,
+        "undo lost the track's effect chain"
+    );
 }
 
 #[test]
@@ -1653,9 +3032,21 @@ fn the_sequence_carries_both_insert_chains_through_from_the_model() {
     let expected = m.tracks[0].inserts.clone();
     assert_eq!(expected.len(), 2);
 
-    for sequence in [Sequence::from_pattern(&m, &m.patterns[0].id).unwrap(), Sequence::from_song(&m)] {
-        assert_eq!(sequence.tracks[0].inserts, expected, "the sequence dropped a track's inserts");
-        assert!(sequence.tracks[1].inserts.is_empty(), "a track with no inserts gained some");
-        assert_eq!(sequence.master_inserts, m.master_inserts, "the sequence dropped the master inserts");
+    for sequence in [
+        Sequence::from_pattern(&m, &m.patterns[0].id, 0).unwrap(),
+        Sequence::from_song(&m),
+    ] {
+        assert_eq!(
+            sequence.tracks[0].inserts, expected,
+            "the sequence dropped a track's inserts"
+        );
+        assert!(
+            sequence.tracks[1].inserts.is_empty(),
+            "a track with no inserts gained some"
+        );
+        assert_eq!(
+            sequence.master_inserts, m.master_inserts,
+            "the sequence dropped the master inserts"
+        );
     }
 }

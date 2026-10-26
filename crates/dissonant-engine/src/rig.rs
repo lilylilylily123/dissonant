@@ -9,8 +9,8 @@
 //! audio thread.
 
 use crate::dsp::{
-    db_to_linear, Allpass1, Biquad, CabIr, Compressor, DelayLine, EnvFollower, Lfo, MicVoice, NoiseGate, Over4, Reverb,
-    SpeakerVoice, ToneStack, ToneStackParts, TubeStage,
+    db_to_linear, Allpass1, Biquad, CabIr, Compressor, DelayLine, EnvFollower, Lfo, MicVoice,
+    NoiseGate, Over4, Reverb, SpeakerVoice, ToneStack, ToneStackParts, TubeStage,
 };
 use dissonant_core::{AmpModel, AmpRig, CabModel, EqModel, MicModel, Pedal, PedalKind};
 
@@ -90,7 +90,9 @@ impl PedalState {
 
     fn new(kind: PedalKind, sample_rate: f32) -> Self {
         match kind {
-            PedalKind::Comp => PedalState::Comp { comp: Compressor::new(sample_rate) },
+            PedalKind::Comp => PedalState::Comp {
+                comp: Compressor::new(sample_rate),
+            },
             PedalKind::Drive => PedalState::Drive {
                 dc: Biquad::default(),
                 hump: Biquad::default(),
@@ -122,7 +124,10 @@ impl PedalState {
                 last: 0.0,
                 sample_rate,
             },
-            PedalKind::Tremolo => PedalState::Tremolo { lfo: Lfo::default(), depth: 0.0 },
+            PedalKind::Tremolo => PedalState::Tremolo {
+                lfo: Lfo::default(),
+                depth: 0.0,
+            },
             PedalKind::Delay => PedalState::Delay {
                 line: DelayLine::new((MAX_DELAY_SECONDS * sample_rate) as usize + 2),
                 damp: Biquad::default(),
@@ -141,7 +146,22 @@ impl PedalState {
                 let threshold = -40.0 + 2.4 * (10.0 - *sustain as f32);
                 comp.set(threshold, 4.0, -6.0 + *level as f32 * 1.8);
             }
-            (PedalState::Drive { dc, hump, tone, os, drive, level }, Pedal::Drive { drive: d, tone: t, level: l, .. }) => {
+            (
+                PedalState::Drive {
+                    dc,
+                    hump,
+                    tone,
+                    os,
+                    drive,
+                    level,
+                },
+                Pedal::Drive {
+                    drive: d,
+                    tone: t,
+                    level: l,
+                    ..
+                },
+            ) => {
                 dc.highpass(sample_rate, 30.0, 0.707);
                 hump.peaking(sample_rate, 720.0, 4.0, 0.9);
                 tone.lowpass(sample_rate, log_map(*t as f32, 1_500.0, 9_000.0), 0.707);
@@ -149,31 +169,91 @@ impl PedalState {
                 *drive = 1.0 + *d as f32 * 3.5;
                 *level = db_to_linear(-12.0 + *l as f32 * 1.8);
             }
-            (PedalState::Wah { env, sensitivity, base_hz, span, .. }, Pedal::Wah { sensitivity: s, range: r, .. }) => {
+            (
+                PedalState::Wah {
+                    env,
+                    sensitivity,
+                    base_hz,
+                    span,
+                    ..
+                },
+                Pedal::Wah {
+                    sensitivity: s,
+                    range: r,
+                    ..
+                },
+            ) => {
                 env.set(sample_rate, 10.0, 160.0);
                 *sensitivity = (*s as f32 / 5.0).max(0.05);
                 *base_hz = 380.0;
                 // Range 0…10 sweeps up to three octaves above the base.
                 *span = *r as f32 / 10.0 * 3.0;
             }
-            (PedalState::Chorus { lfo, depth_samples, centre_samples, mix, .. }, Pedal::Chorus { rate_hz, depth, mix: m, .. }) => {
+            (
+                PedalState::Chorus {
+                    lfo,
+                    depth_samples,
+                    centre_samples,
+                    mix,
+                    ..
+                },
+                Pedal::Chorus {
+                    rate_hz,
+                    depth,
+                    mix: m,
+                    ..
+                },
+            ) => {
                 lfo.set_rate(sample_rate, *rate_hz as f32);
                 *centre_samples = 0.012 * sample_rate;
                 *depth_samples = *depth as f32 / 10.0 * 0.006 * sample_rate;
                 *mix = *m as f32 / 10.0;
             }
-            (PedalState::Phaser { lfo, feedback, depth, .. }, Pedal::Phaser { rate_hz, depth: d, feedback: fb, .. }) => {
+            (
+                PedalState::Phaser {
+                    lfo,
+                    feedback,
+                    depth,
+                    ..
+                },
+                Pedal::Phaser {
+                    rate_hz,
+                    depth: d,
+                    feedback: fb,
+                    ..
+                },
+            ) => {
                 lfo.set_rate(sample_rate, *rate_hz as f32);
                 *feedback = *fb as f32 / 10.0 * 0.85;
                 *depth = *d as f32 / 10.0;
             }
-            (PedalState::Tremolo { lfo, depth }, Pedal::Tremolo { rate_hz, depth: d, .. }) => {
+            (
+                PedalState::Tremolo { lfo, depth },
+                Pedal::Tremolo {
+                    rate_hz, depth: d, ..
+                },
+            ) => {
                 lfo.set_rate(sample_rate, *rate_hz as f32);
                 *depth = *d as f32 / 10.0;
             }
-            (PedalState::Delay { damp, delay_samples, feedback, mix, .. }, Pedal::Delay { time_ms, feedback: fb, mix: m, .. }) => {
+            (
+                PedalState::Delay {
+                    damp,
+                    delay_samples,
+                    feedback,
+                    mix,
+                    ..
+                },
+                Pedal::Delay {
+                    time_ms,
+                    feedback: fb,
+                    mix: m,
+                    ..
+                },
+            ) => {
                 damp.lowpass(sample_rate, 3_500.0, 0.707);
-                *delay_samples = (*time_ms as f32 * 0.001 * sample_rate).min(MAX_DELAY_SECONDS * sample_rate - 2.0);
+                *delay_samples = (*time_ms as f32 * 0.001 * sample_rate)
+                    .min(MAX_DELAY_SECONDS * sample_rate - 2.0);
                 *feedback = *fb as f32 / 10.0 * 0.92;
                 *mix = *m as f32 / 10.0;
             }
@@ -186,7 +266,14 @@ impl PedalState {
     fn process(&mut self, x: f32) -> f32 {
         match self {
             PedalState::Comp { comp } => comp.process(x),
-            PedalState::Drive { dc, hump, tone, os, drive, level } => {
+            PedalState::Drive {
+                dc,
+                hump,
+                tone,
+                os,
+                drive,
+                level,
+            } => {
                 let v = dc.process(x);
                 let d = *drive;
                 // Asymmetric: the +0.15 bias favours even harmonics, which is what makes a
@@ -194,18 +281,38 @@ impl PedalState {
                 let v = os.process(v, &mut |s| (s * d + 0.15).tanh() - 0.148_885);
                 tone.process(hump.process(v)) * *level
             }
-            PedalState::Wah { env, filter, sensitivity, base_hz, span, sample_rate } => {
+            PedalState::Wah {
+                env,
+                filter,
+                sensitivity,
+                base_hz,
+                span,
+                sample_rate,
+            } => {
                 let e = (env.process(x) * *sensitivity).clamp(0.0, 1.0);
                 filter.bandpass(*sample_rate, *base_hz * 2f32.powf(e * *span), 3.5);
                 filter.process(x)
             }
-            PedalState::Chorus { line, lfo, depth_samples, centre_samples, mix } => {
+            PedalState::Chorus {
+                line,
+                lfo,
+                depth_samples,
+                centre_samples,
+                mix,
+            } => {
                 line.write(x);
                 let d = *centre_samples + lfo.tick() * *depth_samples;
                 let wet = line.read(d);
                 x * (1.0 - *mix * 0.5) + wet * *mix
             }
-            PedalState::Phaser { stages, lfo, feedback, depth, last, sample_rate } => {
+            PedalState::Phaser {
+                stages,
+                lfo,
+                feedback,
+                depth,
+                last,
+                sample_rate,
+            } => {
                 let sweep = log_map((lfo.tick() * 0.5 + 0.5) * 10.0, 200.0, 1_600.0);
                 let mut v = x + *last * *feedback;
                 for s in stages.iter_mut() {
@@ -216,7 +323,13 @@ impl PedalState {
                 x + v * *depth
             }
             PedalState::Tremolo { lfo, depth } => x * (1.0 - *depth * (0.5 - 0.5 * lfo.tick())),
-            PedalState::Delay { line, damp, delay_samples, feedback, mix } => {
+            PedalState::Delay {
+                line,
+                damp,
+                delay_samples,
+                feedback,
+                mix,
+            } => {
                 let wet = line.read(*delay_samples);
                 line.write(x + damp.process(wet) * *feedback);
                 x + wet * *mix
@@ -227,7 +340,9 @@ impl PedalState {
     fn reset(&mut self) {
         match self {
             PedalState::Comp { comp } => comp.reset(),
-            PedalState::Drive { dc, hump, tone, os, .. } => {
+            PedalState::Drive {
+                dc, hump, tone, os, ..
+            } => {
                 dc.reset();
                 hump.reset();
                 tone.reset();
@@ -241,7 +356,9 @@ impl PedalState {
                 line.reset();
                 lfo.reset();
             }
-            PedalState::Phaser { stages, lfo, last, .. } => {
+            PedalState::Phaser {
+                stages, lfo, last, ..
+            } => {
                 for s in stages.iter_mut() {
                     s.reset();
                 }
@@ -277,10 +394,30 @@ struct Voicing {
 
 fn voicing(model: AmpModel) -> Voicing {
     match model {
-        AmpModel::Clean => Voicing { stages: 1, bias: 0.0, drive_scale: 6.0, pre_emphasis_hz: 0.0 },
-        AmpModel::Crunch => Voicing { stages: 2, bias: -0.3, drive_scale: 24.0, pre_emphasis_hz: 720.0 },
-        AmpModel::Lead => Voicing { stages: 3, bias: -0.6, drive_scale: 70.0, pre_emphasis_hz: 900.0 },
-        AmpModel::Fuzz => Voicing { stages: 3, bias: -1.2, drive_scale: 220.0, pre_emphasis_hz: 1_100.0 },
+        AmpModel::Clean => Voicing {
+            stages: 1,
+            bias: 0.0,
+            drive_scale: 6.0,
+            pre_emphasis_hz: 0.0,
+        },
+        AmpModel::Crunch => Voicing {
+            stages: 2,
+            bias: -0.3,
+            drive_scale: 24.0,
+            pre_emphasis_hz: 720.0,
+        },
+        AmpModel::Lead => Voicing {
+            stages: 3,
+            bias: -0.6,
+            drive_scale: 70.0,
+            pre_emphasis_hz: 900.0,
+        },
+        AmpModel::Fuzz => Voicing {
+            stages: 3,
+            bias: -1.2,
+            drive_scale: 220.0,
+            pre_emphasis_hz: 1_100.0,
+        },
     }
 }
 
@@ -292,21 +429,45 @@ const MAX_STAGES: usize = 3;
 fn tone_stack_parts(model: EqModel) -> ToneStackParts {
     match model {
         // The '59 Bassman stack: a small treble cap and a 25 k mid pot, so the mids scoop deeply.
-        EqModel::UsClassic => {
-            ToneStackParts { c1: 0.25e-9, c2: 20e-9, c3: 20e-9, r1: 250e3, r2: 1e6, r3: 25e3, r4: 56e3 }
-        }
+        EqModel::UsClassic => ToneStackParts {
+            c1: 0.25e-9,
+            c2: 20e-9,
+            c3: 20e-9,
+            r1: 250e3,
+            r2: 1e6,
+            r3: 25e3,
+            r4: 56e3,
+        },
         // A bigger treble cap and a lower slope resistor: browner, and the mid control bites.
-        EqModel::British => {
-            ToneStackParts { c1: 0.47e-9, c2: 22e-9, c3: 22e-9, r1: 220e3, r2: 1e6, r3: 22e3, r4: 33e3 }
-        }
+        EqModel::British => ToneStackParts {
+            c1: 0.47e-9,
+            c2: 22e-9,
+            c3: 22e-9,
+            r1: 220e3,
+            r2: 1e6,
+            r3: 22e3,
+            r4: 33e3,
+        },
         // The same again with the treble cap doubled — the glassy, cutting voice.
-        EqModel::BritishBright => {
-            ToneStackParts { c1: 1.0e-9, c2: 22e-9, c3: 22e-9, r1: 220e3, r2: 1e6, r3: 22e3, r4: 56e3 }
-        }
+        EqModel::BritishBright => ToneStackParts {
+            c1: 1.0e-9,
+            c2: 22e-9,
+            c3: 22e-9,
+            r1: 220e3,
+            r2: 1e6,
+            r3: 22e3,
+            r4: 56e3,
+        },
         // A 100 k mid pot fills the scoop back in, which is most of what "boutique" means.
-        EqModel::Boutique => {
-            ToneStackParts { c1: 0.5e-9, c2: 47e-9, c3: 47e-9, r1: 250e3, r2: 1e6, r3: 100e3, r4: 56e3 }
-        }
+        EqModel::Boutique => ToneStackParts {
+            c1: 0.5e-9,
+            c2: 47e-9,
+            c3: 47e-9,
+            r1: 250e3,
+            r2: 1e6,
+            r3: 100e3,
+            r4: 56e3,
+        },
     }
 }
 
@@ -343,13 +504,26 @@ fn speaker_voice(model: CabModel) -> SpeakerVoice {
 fn mic_voice(model: MicModel) -> MicVoice {
     match model {
         // A moving coil: the famous presence lift, and nothing much above 7 kHz.
-        MicModel::Dynamic => MicVoice { presence_hz: 4_500.0, presence_db: 5.0, presence_q: 1.1, top_hz: 7_500.0 },
+        MicModel::Dynamic => MicVoice {
+            presence_hz: 4_500.0,
+            presence_db: 5.0,
+            presence_q: 1.1,
+            top_hz: 7_500.0,
+        },
         // Flat and extended, which means it hears the fizz as well as the note.
-        MicModel::Condenser => {
-            MicVoice { presence_hz: 9_000.0, presence_db: 3.0, presence_q: 0.7, top_hz: 16_000.0 }
-        }
+        MicModel::Condenser => MicVoice {
+            presence_hz: 9_000.0,
+            presence_db: 3.0,
+            presence_q: 0.7,
+            top_hz: 16_000.0,
+        },
         // A ribbon is dark and thick, and forgives a cranked amp more than either of the others.
-        MicModel::Ribbon => MicVoice { presence_hz: 2_200.0, presence_db: 2.0, presence_q: 0.8, top_hz: 5_500.0 },
+        MicModel::Ribbon => MicVoice {
+            presence_hz: 2_200.0,
+            presence_db: 2.0,
+            presence_q: 0.8,
+            top_hz: 5_500.0,
+        },
     }
 }
 
@@ -405,7 +579,11 @@ impl Rig {
             input_peak: 0.0,
             pedals: Vec::new(),
             pedal_on: Vec::new(),
-            stages: [TubeStage::new(sample_rate), TubeStage::new(sample_rate), TubeStage::new(sample_rate)],
+            stages: [
+                TubeStage::new(sample_rate),
+                TubeStage::new(sample_rate),
+                TubeStage::new(sample_rate),
+            ],
             active_stages: 1,
             stack: ToneStack::new(),
             power: Over4::new(sample_rate),
@@ -429,7 +607,11 @@ impl Rig {
 
         self.input_gain = db_to_linear(settings.input_db as f32);
         self.gate_on = settings.gate.on;
-        self.gate.set(sr, settings.gate.threshold_db as f32, settings.gate.release_ms as f32);
+        self.gate.set(
+            sr,
+            settings.gate.threshold_db as f32,
+            settings.gate.release_ms as f32,
+        );
 
         self.pedals.truncate(settings.pedals.len());
         self.pedal_on.resize(settings.pedals.len(), false);
@@ -466,7 +648,8 @@ impl Rig {
             settings.amp.bass as f32 / 10.0,
         );
         self.power_drive = 0.6 + settings.amp.master as f32 / 10.0 * 2.4;
-        self.presence.high_shelf(sr, 6_000.0, settings.amp.presence as f32, 0.707);
+        self.presence
+            .high_shelf(sr, 6_000.0, settings.amp.presence as f32, 0.707);
 
         self.cab_on = settings.cab.model != CabModel::Direct;
         if self.cab_on {
@@ -475,7 +658,10 @@ impl Rig {
                 self.cab.bake(sr, speaker_voice(want.0), mic_voice(want.1));
                 self.baked = Some(want);
             }
-            self.cab.morph(settings.cab.pos_x as f32 / 10.0, settings.cab.pos_z as f32 / 10.0);
+            self.cab.morph(
+                settings.cab.pos_x as f32 / 10.0,
+                settings.cab.pos_z as f32 / 10.0,
+            );
         }
 
         self.reverb.wet = settings.rack.reverb as f32 / 10.0 * 0.6;

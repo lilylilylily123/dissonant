@@ -380,28 +380,14 @@ export function defaultAmpRig(): AmpRig {
   };
 }
 
-export interface ChordTrack {
-  chords: ChordEvent[];
-}
-
-/**
- * A pattern. `lengthTicks` is the merged length: each track and the chord track may loop
- * shorter and repeat to fill it, so a 2-bar drum loop plays twice under a 4-bar progression.
- */
+/** A pattern belongs to one track; its clips play on that track's lane. */
 export interface SongPattern {
   id: string;
+  trackId: string;
   name: string;
   lengthTicks: number;
-  chords: ChordTrack;
-  notesByTrack: Record<string, NoteEvent[]>;
-  /** Loop length in ticks per track; a track that is absent fills the pattern. */
-  trackLoopTicks: Record<string, number>;
-  /** Loop length in ticks of the chord track; `null` fills the pattern. */
-  chordLoopTicks: number | null;
+  notes: NoteEvent[];
 }
-
-/** Mirrors `dissonant_core::model::MIN_LOOP_TICKS`. */
-export const MIN_LOOP_TICKS = TICKS_PER_BEAT;
 
 /** Shortest note the model keeps. Mirrors `dissonant_core::model::MIN_NOTE_TICKS`. */
 export const MIN_NOTE_TICKS = TICKS_PER_BEAT / 16;
@@ -409,29 +395,10 @@ export const MIN_NOTE_TICKS = TICKS_PER_BEAT / 16;
 /** Largest start offset a note may carry. Mirrors `dissonant_core::model::MAX_SHIFT_TICKS`. */
 export const MAX_SHIFT_TICKS = 4 * TICKS_PER_BEAT;
 
-/** A stored loop length made usable: clamped into the pattern, with anything missing or
- *  nonsensical meaning "fills the pattern". Mirrors `SongPattern::usable_loop`. */
-function usableLoop(p: SongPattern, ticks: number | null | undefined): number {
-  const len = Math.max(1, p.lengthTicks);
-  return ticks != null && Number.isFinite(ticks) && ticks > 0
-    ? Math.min(Math.max(ticks, Math.min(MIN_LOOP_TICKS, len)), len)
-    : len;
-}
-
-/** How long one turn of `trackId` is inside `p`, in ticks. */
-export function trackLoop(p: SongPattern, trackId: string): number {
-  return usableLoop(p, p.trackLoopTicks?.[trackId]);
-}
-
-/** How long one turn of the chord track is inside `p`, in ticks. */
-export function chordLoop(p: SongPattern): number {
-  return usableLoop(p, p.chordLoopTicks);
-}
-
 /**
  * Lay `events` out across `totalTicks` in turns of `turnTicks`, trimming each turn at its own
- * end. Mirrors `SongPattern::looped_notes` / `looped_chords` for display; repeats carry a
- * suffixed id so React keys stay unique and hit-testing can tell them from the source.
+ * end. Mirrors how the engine loops a pattern inside a longer clip; repeats carry a suffixed
+ * id so React keys stay unique and hit-testing can tell them from the source.
  */
 export function layOutLoop<
   T extends { id: string; startTick: number; lengthTicks: number },
@@ -457,7 +424,8 @@ export function layOutLoop<
   return out;
 }
 
-/** A pattern placed on the song; loops from `offsetTicks` for `lengthTicks`. */
+/** A pattern placed on the song; loops from `offsetTicks` for `lengthTicks`. Its track is
+ *  its pattern's track. */
 export interface Clip {
   id: string;
   patternId: string;
@@ -487,6 +455,7 @@ export interface MasterSettings {
 }
 
 export interface ProjectModel {
+  /** 10 for everything this build reads or writes; older files are migrated on load. */
   schemaVersion: number;
   tempo: number;
   key: KeyState;
@@ -508,6 +477,10 @@ export interface ProjectModel {
   tempoPoints?: TempoPoint[];
   /** The master effect chain, ahead of the master bus. Absent when empty. */
   masterInserts?: Insert[];
+  /** The project-wide progression in song ticks: sorted, non-overlapping. */
+  chords: ChordEvent[];
+  /** The song's hard end in ticks: clips can't start at or run past it. At least one bar. */
+  songLengthTicks: number;
 }
 
 export interface TempoPoint {
@@ -588,12 +561,53 @@ export function swingWarp(tick: number, swing: number, gridTicks: number): numbe
   );
 }
 
-/** The song's end, in ticks. */
+/** The song's explicit length, in ticks. */
 export function songLength(m: ProjectModel): number {
-  return m.clips.reduce(
-    (max, c) => Math.max(max, c.startTick + c.lengthTicks),
-    0,
-  );
+  return m.songLengthTicks;
+}
+
+/** The track a clip plays on (its pattern's track), or null for a dangling clip. */
+export function clipTrackId(m: ProjectModel, clip: Clip): string | null {
+  return m.patterns.find((p) => p.id === clip.patternId)?.trackId ?? null;
+}
+
+/**
+ * The song chords inside `[offset, offset + length)`, shifted to start at 0 and clipped to the
+ * window: what a pattern edited at `offset` is tiered against (the engine's pattern-mode bed).
+ */
+export function chordsInWindow(chords: ChordEvent[], offset: number, length: number): ChordEvent[] {
+  const end = offset + length;
+  const out: ChordEvent[] = [];
+  for (const c of chords) {
+    const s = Math.max(c.startTick, offset);
+    const e = Math.min(c.startTick + c.lengthTicks, end);
+    if (e > s) out.push({ ...c, startTick: s - offset, lengthTicks: e - s });
+  }
+  return out;
+}
+
+/**
+ * Song chords with the window `[offset, offset + length)` replaced by `local` (window-relative,
+ * clipped to the window). Chords crossing the window's edges are trimmed to the outside part.
+ */
+export function replaceChordWindow(chords: ChordEvent[], offset: number, length: number, local: ChordEvent[]): ChordEvent[] {
+  const end = offset + length;
+  const out: ChordEvent[] = [];
+  for (const c of chords) {
+    const cEnd = c.startTick + c.lengthTicks;
+    if (c.startTick < offset) out.push({ ...c, lengthTicks: Math.min(cEnd, offset) - c.startTick });
+    if (cEnd > end) {
+      const s = Math.max(c.startTick, end);
+      // A chord spanning the whole window splits in two: give the right half its own id.
+      out.push({ ...c, id: c.startTick < offset ? uuid() : c.id, startTick: s, lengthTicks: cEnd - s });
+    }
+  }
+  for (const c of local) {
+    const s = Math.max(0, c.startTick);
+    const e = Math.min(length, c.startTick + c.lengthTicks);
+    if (e > s) out.push({ ...c, startTick: offset + s, lengthTicks: e - s });
+  }
+  return out.filter((c) => c.lengthTicks > 0).sort((a, b) => a.startTick - b.startTick);
 }
 
 export function sectionAt(m: ProjectModel, tick: number): Section | null {
@@ -752,7 +766,10 @@ export function hostPlatforms(): Platform[] {
 }
 
 export type TrackParam = "volume" | "reverbSend" | "tone" | "pan";
+/** What the engine plays: one pattern (looped) or the whole song. */
 export type PlayMode = "pattern" | "song";
+/** What the window shows. SETUP and SONG both play the song. */
+export type ViewMode = "setup" | "pattern" | "song";
 export type Tier = "chordTone" | "tension" | "dissonance";
 
 export type Command =
@@ -781,20 +798,13 @@ export type Command =
   | { type: "moveInsert"; target: InsertTarget; insertId: string; toIndex: number }
   | { type: "setInsertEnabled"; target: InsertTarget; insertId: string; on: boolean }
   | { type: "setInsertState"; target: InsertTarget; insertId: string; state: string }
-  | { type: "addPattern" }
+  | { type: "addPattern"; trackId: string }
   | { type: "duplicatePattern"; id: string }
   | { type: "deletePattern"; id: string }
   | { type: "renamePattern"; id: string; name: string }
   | { type: "setPatternLength"; id: string; ticks: number }
-  | {
-      type: "setTrackLoop";
-      patternId: string;
-      trackId: string;
-      ticks: number | null;
-    }
-  | { type: "setChordLoop"; patternId: string; ticks: number | null }
-  | { type: "setNotes"; patternId: string; trackId: string; notes: NoteEvent[] }
-  | { type: "setChords"; patternId: string; chords: ChordEvent[] }
+  | { type: "setNotes"; patternId: string; notes: NoteEvent[] }
+  | { type: "setChords"; chords: ChordEvent[] }
   | {
       type: "addClip";
       patternId: string;
@@ -802,7 +812,11 @@ export type Command =
       lengthTicks: number | null;
     }
   | { type: "updateClip"; clip: Clip }
+  | { type: "updateClips"; clips: Clip[] }
   | { type: "removeClip"; id: string }
+  | { type: "removeClips"; ids: string[] }
+  | { type: "makeClipUnique"; id: string }
+  | { type: "setSongLength"; ticks: number }
   | { type: "addSection"; name: string; startTick: number }
   | { type: "updateSection"; section: Section }
   | { type: "removeSection"; id: string }
@@ -867,7 +881,6 @@ export interface ExportRequest {
   tailSeconds: number | null;
   loops: number | null;
   stems: boolean;
-  hearChords: boolean | null;
 }
 
 export interface ExportProgress {
@@ -883,6 +896,15 @@ export interface ExportResult {
 export interface TemplateInfo {
   name: string;
   path: string;
+}
+
+/** `dissonant_core::VibeInfo`: a built-in project to start from (lo-fi, post-punk, …). */
+export interface VibeInfo {
+  id: string;
+  name: string;
+  blurb: string;
+  tempo: number;
+  key: KeyState;
 }
 
 export interface OutputDevice {
@@ -939,6 +961,8 @@ export interface Settings {
     defaultNoteLength: number;
     defaultVelocity: number;
     defaultPatternBars: number;
+    /** Length of a new project's song, in bars. */
+    defaultSongBars: number;
     defaultTempo: number;
     defaultTimeSignature: TimeSignature;
     newProject: NewProjectKind;
@@ -946,6 +970,7 @@ export interface Settings {
     confirmDestructive: boolean;
     altKey: AltKey;
     snapToChords: boolean;
+    showWelcome: boolean;
   };
   export: {
     sampleRate: number;
@@ -1010,6 +1035,7 @@ export const DEFAULT_SETTINGS: Settings = {
     defaultNoteLength: 240,
     defaultVelocity: 100,
     defaultPatternBars: 4,
+    defaultSongBars: 32,
     defaultTempo: 120,
     defaultTimeSignature: { numerator: 4, denominator: 4 },
     newProject: "starter",
@@ -1017,6 +1043,7 @@ export const DEFAULT_SETTINGS: Settings = {
     confirmDestructive: true,
     altKey: "noSnap",
     snapToChords: false,
+    showWelcome: true,
   },
   export: {
     sampleRate: 44100,
@@ -1090,6 +1117,29 @@ export const VOICES = [
   "pad",
   "pluck",
 ] as const;
+
+/** A sound named by character: a voice plus tone (low-pass Hz) and reverb send. */
+export interface SoundPreset {
+  name: string;
+  voice: (typeof VOICES)[number];
+  tone: number;
+  reverbSend: number;
+}
+
+/** Instrument presets by character. The vibe templates in `dissonant-core` use the same values. */
+export const SOUND_PRESETS: SoundPreset[] = [
+  { name: "warm pad", voice: "pad", tone: 4000, reverbSend: 0.45 },
+  { name: "soft keys", voice: "triangle", tone: 6000, reverbSend: 0.25 },
+  { name: "glass pluck", voice: "pluck", tone: 12000, reverbSend: 0.3 },
+  { name: "buzzy bass", voice: "saw", tone: 1200, reverbSend: 0 },
+  { name: "round bass", voice: "sine", tone: 2000, reverbSend: 0 },
+  { name: "lead with bite", voice: "square", tone: 9000, reverbSend: 0.15 },
+];
+
+/** The preset a track currently sounds like, if any. */
+export function soundPresetOf(track: { voice: string; tone: number; reverbSend: number }): SoundPreset | undefined {
+  return SOUND_PRESETS.find((p) => p.voice === track.voice && Math.abs(p.tone - track.tone) < 1 && Math.abs(p.reverbSend - track.reverbSend) < 1e-6);
+}
 
 /** The handoff's 12-color track palette (last one is reserved for returns/master). */
 export const TRACK_PALETTE = [

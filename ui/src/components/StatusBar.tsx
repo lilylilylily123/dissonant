@@ -6,6 +6,7 @@ import {
   selectedTrack,
   useStore,
 } from "../store";
+import { barLabel } from "./Editor";
 
 export function StatusBar() {
   const snapshot = useStore((s) => s.snapshot!);
@@ -15,14 +16,20 @@ export function StatusBar() {
   const selectedNoteIds = useStore((s) => s.selectedNoteIds);
   const pattern = useStore(selectedPattern);
   const track = useStore(selectedTrack);
-  const bticks = useStore(barTicks);
+  const barTick = useStore(barTicks);
+  const armed = useStore((s) => s.armed);
+  const recordingAudio = useStore((s) => s.recordingAudio);
+  const liveKeyboard = useStore((s) => s.liveKeyboard);
+  const hearChords = useStore((s) => s.hearChords);
+  const chordOffsetTicks = useStore((s) => s.chordOffsetTicks);
+  const ghost = useStore((s) => s.snapshot?.model.patterns.find((p) => p.id === s.ghostPatternId && p.id !== s.selectedPatternId) ?? null);
 
-  const noteCount =
-    pattern && track ? (pattern.notesByTrack[track.id]?.length ?? 0) : 0;
-  const totalTicks = snapshot.model.clips.reduce(
-    (max, c) => Math.max(max, c.startTick + c.lengthTicks),
-    0,
-  );
+  const m = snapshot.model;
+  const noteCount = pattern ? pattern.notes.length : 0;
+  const totalTicks = m.songLengthTicks;
+  // "<track> › <pattern>": what PATTERN plays, what recording and the live keys write into.
+  const target = pattern && track ? `${track.name} › ${pattern.name}` : null;
+  const ghostTrack = ghost ? m.tracks.find((t) => t.id === ghost.trackId) : null;
 
   const audioTrack = useStore(selectedAudioTrack);
   const takes = (snapshot.model.audioClips ?? []).filter(
@@ -35,9 +42,20 @@ export function StatusBar() {
             ? ` · ${audioTrack.amp.enabled ? audioTrack.amp.amp.model : "rig off"}`
             : ""
         }`
-      : screen === "pattern"
-        ? `${pattern?.name ?? "—"} › ${track?.name ?? "—"} · ${noteCount} notes${selectedNoteIds.length ? ` · ${selectedNoteIds.length} selected` : ""} · snap ${gridLabel(noteLength)}`
-        : `song · ${snapshot.model.clips.length} clips · ${snapshot.model.sections.length} sections · ${+(totalTicks / bticks).toFixed(2)} bars · ${snapshot.model.tracks.length} tracks`;
+      : screen === "pattern" && !target
+        ? `${track?.name ?? "—"} › no pattern`
+        : screen === "pattern"
+          ? [
+              target,
+              `${noteCount} ${track?.isDrum ? "hits" : "notes"}${selectedNoteIds.length ? ` · ${selectedNoteIds.length} selected` : ""}`,
+              `snap ${gridLabel(noteLength)}`,
+              `chords from ${barLabel(chordOffsetTicks, barTick)}`,
+              hearChords ? "chord bed on" : null,
+              ghost ? `ghost ${ghostTrack?.name ?? "?"} › ${ghost.name}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          : `${screen} · ${m.tracks.length} tracks · ${m.patterns.length} patterns · ${m.clips.length} clips · ${m.sections.length} sections · ${+(totalTicks / barTick).toFixed(2)} bars`;
 
   return (
     <div className="statusbar">
@@ -45,12 +63,10 @@ export function StatusBar() {
         ● {audio?.running ? "READY" : "NO AUDIO"}
       </span>
       <span>{context}</span>
-      {(useStore.getState().armed || useStore.getState().recordingAudio) && (
-        <span style={{ color: "var(--rec-text)" }}>● REC</span>
-      )}
-      {useStore.getState().liveKeyboard !== "off" && (
+      {(armed || recordingAudio) && <span style={{ color: "var(--rec-text)" }}>● REC → {target ?? "no pattern"}</span>}
+      {liveKeyboard !== "off" && (
         <span style={{ color: "var(--accent)" }}>
-          keys: {useStore.getState().liveKeyboard}
+          keys: {liveKeyboard} → {track?.name ?? "—"}
         </span>
       )}
       <span className="spacer" />

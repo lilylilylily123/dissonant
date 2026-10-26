@@ -25,7 +25,10 @@ pub mod synth;
 
 pub use audio::{AudioBuffer, AudioLane, AudioPool, BlockContext};
 pub use channel::{InsertSlot, Instrument};
-pub use device::{default_output_name, list_output_devices, AudioConfig, AudioDevice, DeviceError, EngineIo, OutputDeviceInfo};
+pub use device::{
+    default_output_name, list_output_devices, AudioConfig, AudioDevice, DeviceError, EngineIo,
+    OutputDeviceInfo,
+};
 pub use engine::{Engine, EngineCommand, NoteShape, Shared, MAX_TRACKS};
 pub use input::{default_input_name, list_input_devices, AudioInput, InputDeviceInfo};
 pub use render::{normalize, render_to_buffer, render_wav, write_wav, RenderError, RenderOptions};

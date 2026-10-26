@@ -44,6 +44,12 @@ mod tests {
         assert_eq!(beats_to_ticks(f64::INFINITY), 0);
         assert_eq!(ticks_to_beats(960), 1.0);
         assert_eq!(bar_ticks(TimeSignature::default()), 4 * TICKS_PER_BEAT);
-        assert_eq!(bar_ticks(TimeSignature { numerator: 7, denominator: 8 }), 3360);
+        assert_eq!(
+            bar_ticks(TimeSignature {
+                numerator: 7,
+                denominator: 8
+            }),
+            3360
+        );
     }
 }

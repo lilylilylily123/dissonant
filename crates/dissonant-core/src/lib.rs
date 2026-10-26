@@ -17,16 +17,18 @@ pub mod sequence;
 pub mod tempo;
 pub mod theory;
 pub mod ticks;
+pub mod vibes;
 
 pub use arrangement::Arrangement;
 pub use chord_track::ChordTrack;
 pub use document::{Command, Document, EditError, InsertTarget, TrackParam};
 pub use midi_file::{ImportedMidi, ImportedTrack, MidiError, MidiScope};
 pub use model::{
-    AmpHead, AmpModel, AmpRig, AudioClip, AudioSource, CabModel, Cabinet, ChordEvent, Clip, EqModel, Gate, Insert, KeyState,
-    MasterSettings, MicModel, NoteEvent, Pedal, PedalKind, ProjectModel, Rack, ScaleType, Section, SongPattern,
-    TimeSignature, Track, TrackKind, TrackPlugin, MAX_CLIP_GAIN, MAX_FADE_SECONDS, MAX_INSERTS, MAX_PEDALS, MAX_SHIFT_TICKS,
-    MIN_LOOP_TICKS, MIN_NOTE_TICKS, SCHEMA_VERSION,
+    tidy_chords, tile_chords, AmpHead, AmpModel, AmpRig, AudioClip, AudioSource, CabModel, Cabinet,
+    ChordEvent, Clip, EqModel, Gate, Insert, KeyState, MasterSettings, MicModel, NoteEvent, Pedal,
+    PedalKind, ProjectModel, Rack, ScaleType, Section, SongPattern, TimeSignature, Track,
+    TrackKind, TrackPlugin, DEFAULT_SONG_BARS, MAX_CLIP_GAIN, MAX_FADE_SECONDS, MAX_INSERTS,
+    MAX_PEDALS, MAX_SHIFT_TICKS, MIN_NOTE_TICKS, SCHEMA_VERSION,
 };
 pub use sequence::{Sequence, SequenceAudioClip, SequenceTrack};
 pub use tempo::{swing_warp_ticks, Tempo, TempoMap, TempoPoint};
@@ -35,3 +37,4 @@ pub use theory::highlight::HighlightEngine;
 pub use theory::key_detector::{KeyCandidate, KeyDetectionResult, KeyDetector};
 pub use theory::tier::{Tier, TierClassifier};
 pub use ticks::{bar_ticks, beats_to_ticks, ticks_to_beats, TICKS_PER_BEAT};
+pub use vibes::{vibes, Groove, VibeInfo};

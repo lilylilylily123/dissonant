@@ -137,6 +137,8 @@ pub struct EditingSettings {
     pub default_note_length: i64,
     pub default_velocity: u8,
     pub default_pattern_bars: u32,
+    /// Song length of a new project (new, starter, vibe), in bars.
+    pub default_song_bars: u32,
     pub default_tempo: f64,
     pub default_time_signature: TimeSignature,
     pub new_project: NewProjectKind,
@@ -146,6 +148,8 @@ pub struct EditingSettings {
     pub alt_key: AltKey,
     /// Snap note starts to chord changes when within a grid step of one.
     pub snap_to_chords: bool,
+    /// Open the new-project screen (vibes, recent files) when the app starts.
+    pub show_welcome: bool,
 }
 
 /// The smallest grid that can be ticks rather than beats. `MIN_NOTE_TICKS` is 60, so a real
@@ -170,6 +174,7 @@ impl Default for EditingSettings {
             default_note_length: TICKS_PER_BEAT / 4,
             default_velocity: 100,
             default_pattern_bars: 4,
+            default_song_bars: dissonant_core::DEFAULT_SONG_BARS,
             default_tempo: 120.0,
             default_time_signature: TimeSignature::default(),
             new_project: NewProjectKind::Starter,
@@ -177,6 +182,7 @@ impl Default for EditingSettings {
             confirm_destructive: true,
             alt_key: AltKey::NoSnap,
             snap_to_chords: false,
+            show_welcome: true,
         }
     }
 }
@@ -276,6 +282,7 @@ impl Settings {
         }
         e.default_velocity = e.default_velocity.clamp(1, 127);
         e.default_pattern_bars = e.default_pattern_bars.clamp(1, 64);
+        e.default_song_bars = e.default_song_bars.clamp(1, 999);
         if !e.default_tempo.is_finite() {
             e.default_tempo = 120.0;
         }
@@ -364,6 +371,10 @@ mod tests {
         assert_eq!(partial.editing.default_grid, TICKS_PER_BEAT / 4);
         assert_eq!(partial.audio.buffer_size, Some(256));
         assert!(partial.midi.auto_reconnect);
+        assert_eq!(partial.editing.default_song_bars, 32, "a settings file from before song length still loads");
+        let set: Settings = serde_json::from_str(r#"{"editing":{"defaultSongBars":48}}"#).unwrap();
+        assert_eq!(set.editing.default_song_bars, 48);
+        assert!(serde_json::to_string(&s).unwrap().contains("\"defaultSongBars\":32"));
     }
 
     #[test]
@@ -374,7 +385,9 @@ mod tests {
         s.export.bit_depth = 12;
         s.audio.buffer_size = Some(3);
         s.appearance.tier_colors.tension = "orange".into();
+        s.editing.default_song_bars = 0;
         let s = s.sanitized();
+        assert_eq!(s.editing.default_song_bars, 1);
         assert_eq!(s.editing.default_velocity, 1);
         assert_eq!(s.editing.default_tempo, 120.0);
         assert_eq!(s.export.bit_depth, 16);

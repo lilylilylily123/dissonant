@@ -96,14 +96,20 @@ pub struct DrumKit {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
     }
 }
 
 impl DrumKit {
     pub fn new(sample_rate: f32) -> Self {
-        let buffers = KIT.iter().map(|(name, _)| Self::synthesize(name, sample_rate)).collect();
+        let buffers = KIT
+            .iter()
+            .map(|(name, _)| Self::synthesize(name, sample_rate))
+            .collect();
         DrumKit {
             sample_rate,
             tone_hz: DEFAULT_TONE_HZ,
@@ -122,7 +128,9 @@ impl DrumKit {
     }
 
     pub fn note_on(&mut self, pitch: u8, velocity: u8, shape: NoteShape) {
-        let Some(drum) = Self::pitch_index(pitch) else { return };
+        let Some(drum) = Self::pitch_index(pitch) else {
+            return;
+        };
         let gain = 0.35 + 0.65 * (velocity as f32 / 127.0);
         let neutral = shape == NoteShape::neutral();
         // `fine` is the step sequencer's "step pitch": resample the one-shot rather than
@@ -132,7 +140,8 @@ impl DrumKit {
         // multiply, and at rest the factor is exactly 1.0 so nothing is touched at all.
         let seconds = self.buffers[drum].len() as f32 / self.sample_rate;
         let tail = ((shape.release.clamp(0.0, 1.0) - 0.5) * 2.0 * RELEASE_OCTAVES).exp2();
-        let env_step = (-RELEASE_SHAPE * (1.0 / tail - 1.0) / (seconds.max(1e-4) * self.sample_rate)).exp();
+        let env_step =
+            (-RELEASE_SHAPE * (1.0 / tail - 1.0) / (seconds.max(1e-4) * self.sample_rate)).exp();
         let hit = Playing {
             drum,
             pos: 0.0,
@@ -159,10 +168,15 @@ impl DrumKit {
     pub fn render_add(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let frames = out_l.len().min(out_r.len());
         for p in &mut self.playing {
-            p.render(&self.buffers[p.drum], &mut out_l[..frames], &mut out_r[..frames]);
+            p.render(
+                &self.buffers[p.drum],
+                &mut out_l[..frames],
+                &mut out_r[..frames],
+            );
         }
         let buffers = &self.buffers;
-        self.playing.retain(|p| p.pos < buffers[p.drum].len() as f64);
+        self.playing
+            .retain(|p| p.pos < buffers[p.drum].len() as f64);
     }
 
     fn synthesize(name: &str, sample_rate: f32) -> Vec<f32> {
@@ -183,13 +197,19 @@ impl DrumKit {
                         (two_pi * freq * t).sin() * (-t * 8.0).exp()
                     }
                     "snare" => {
-                        let body = ((two_pi * 175.0 * t).sin() + 0.5 * (two_pi * 280.0 * t).sin()) * 0.5 * (-t * 32.0).exp();
+                        let body = ((two_pi * 175.0 * t).sin() + 0.5 * (two_pi * 280.0 * t).sin())
+                            * 0.5
+                            * (-t * 32.0).exp();
                         let noise = rng.next() * (-t * 16.0).exp();
                         let snap = if t < 0.004 { rng.next() * 0.7 } else { 0.0 };
                         body + noise * 0.85 + snap
                     }
                     "clap" => {
-                        let burst = if (two_pi * 50.0 * t).sin() > 0.0 || t > 0.03 { 1.0 } else { 0.4 };
+                        let burst = if (two_pi * 50.0 * t).sin() > 0.0 || t > 0.03 {
+                            1.0
+                        } else {
+                            0.4
+                        };
                         rng.next() * burst * (-t * 22.0).exp()
                     }
                     _ => rng.next() * (-t * 65.0).exp(),
@@ -277,25 +297,55 @@ mod tests {
     fn fine_resamples_the_one_shot() {
         let length = |fine: i32| {
             let mut kit = DrumKit::new(SR);
-            kit.note_on(36, 127, NoteShape { fine, ..NoteShape::neutral() });
+            kit.note_on(
+                36,
+                127,
+                NoteShape {
+                    fine,
+                    ..NoteShape::neutral()
+                },
+            );
             frames_until_silent(&mut kit)
         };
         let plain = length(0);
         // An octave of step pitch reads the buffer twice as fast, so the hit is half as long.
         let up = length(1200);
-        assert!(plain > 10_000, "the reference kick should run its whole buffer: {plain}");
+        assert!(
+            plain > 10_000,
+            "the reference kick should run its whole buffer: {plain}"
+        );
         let ratio = up as f32 / plain as f32;
-        assert!((ratio - 0.5).abs() < 0.02, "+1200 cents ran {up} frames against {plain} ({ratio})");
-        assert!(length(-1200) > plain, "a negative step pitch must stretch the hit");
+        assert!(
+            (ratio - 0.5).abs() < 0.02,
+            "+1200 cents ran {up} frames against {plain} ({ratio})"
+        );
+        assert!(
+            length(-1200) > plain,
+            "a negative step pitch must stretch the hit"
+        );
     }
 
     #[test]
     fn pan_places_the_hit_and_centre_stays_balanced() {
-        let (l, r) = hit(36, NoteShape { pan: 0.0, ..NoteShape::neutral() }, 4096);
+        let (l, r) = hit(
+            36,
+            NoteShape {
+                pan: 0.0,
+                ..NoteShape::neutral()
+            },
+            4096,
+        );
         assert!(rms(&l) > 0.01);
         assert!(rms(&r) < rms(&l) * 1e-6, "hard left leaked into the right");
 
-        let (l, r) = hit(36, NoteShape { pan: 1.0, ..NoteShape::neutral() }, 4096);
+        let (l, r) = hit(
+            36,
+            NoteShape {
+                pan: 1.0,
+                ..NoteShape::neutral()
+            },
+            4096,
+        );
         assert!(rms(&r) > 0.01);
         assert!(rms(&l) < rms(&r) * 1e-6);
 
@@ -307,18 +357,35 @@ mod tests {
     fn release_lengthens_the_tail() {
         // How far into the hit the last audible sample sits.
         let audible_until = |release: f32| {
-            let (l, _) = hit(36, NoteShape { release, ..NoteShape::neutral() }, 20_000);
+            let (l, _) = hit(
+                36,
+                NoteShape {
+                    release,
+                    ..NoteShape::neutral()
+                },
+                20_000,
+            );
             l.iter().rposition(|s| s.abs() > 0.01).unwrap_or(0)
         };
         let short = audible_until(0.0);
         let long = audible_until(1.0);
         assert!(short > 0, "even a cut-short kick has to speak");
-        assert!(long > short * 2, "release 1.0 died at {long}, release 0.0 at {short}");
+        assert!(
+            long > short * 2,
+            "release 1.0 died at {long}, release 0.0 at {short}"
+        );
 
         // The kick's own decay still reaches the end of its buffer, so measure how much is
         // *left* that late: a long release holds the tail up, a short one has thrown it away.
         let late_energy = |release: f32| {
-            let (l, _) = hit(36, NoteShape { release, ..NoteShape::neutral() }, 15_000);
+            let (l, _) = hit(
+                36,
+                NoteShape {
+                    release,
+                    ..NoteShape::neutral()
+                },
+                15_000,
+            );
             rms(&l[10_000..])
         };
         assert!(late_energy(1.0) > late_energy(0.5) * 2.0);
@@ -330,7 +397,14 @@ mod tests {
         let render = |mod_x: f32| {
             let mut kit = DrumKit::new(SR);
             kit.set_tone_hz(4_000.0);
-            kit.note_on(42, 127, NoteShape { mod_x, ..NoteShape::neutral() });
+            kit.note_on(
+                42,
+                127,
+                NoteShape {
+                    mod_x,
+                    ..NoteShape::neutral()
+                },
+            );
             let (mut l, mut r) = (vec![0.0; 4096], vec![0.0; 4096]);
             kit.render_add(&mut l, &mut r);
             l

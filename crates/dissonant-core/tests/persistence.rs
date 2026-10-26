@@ -5,18 +5,19 @@ const BEAT: i64 = TICKS_PER_BEAT;
 #[test]
 fn round_trip_preserves_all_state() {
     let mut model = ProjectModel::starter();
-    let tid = model.tracks[0].id;
     let pid = model.patterns[0].id;
     model.tempo = 96.0;
     model.key = KeyState::locked(0, ScaleType::Major);
     model.tracks[0].soloed = true;
     model.tracks[0].pan = -0.3;
     model.master.reverb_wet = 0.25;
-    model.patterns[0]
-        .notes_by_track
-        .insert(tid, vec![NoteEvent::new(0, BEAT, 60).with_velocity(77)]);
-    model.clips = vec![Clip::new(pid, 0, 16 * BEAT), Clip::new(pid, 16 * BEAT, 8 * BEAT)];
+    model.patterns[0].notes = vec![NoteEvent::new(0, BEAT, 60).with_velocity(77)];
+    model.clips = vec![
+        Clip::new(pid, 0, 16 * BEAT),
+        Clip::new(pid, 16 * BEAT, 8 * BEAT),
+    ];
     model.sections = vec![Section::new("intro", 0)];
+    model.song_length_ticks = 48 * BEAT;
 
     let json = model.to_json().unwrap();
     let decoded = ProjectModel::from_json(&json).unwrap();
@@ -27,19 +28,37 @@ fn round_trip_preserves_all_state() {
 fn audio_tracks_clips_and_rigs_round_trip() {
     let mut model = ProjectModel::starter();
     let mut guitar = Track::audio("guitar");
-    let rig = guitar.amp.as_mut().expect("an audio track is created with a rig");
+    let rig = guitar
+        .amp
+        .as_mut()
+        .expect("an audio track is created with a rig");
     rig.amp.model = AmpModel::Fuzz;
     rig.amp.gain = 9.5;
     rig.cab.model = CabModel::TwoByTwelve;
     rig.input_db = -3.0;
     rig.pedals = vec![
-        Pedal::Comp { on: true, sustain: 7.0, level: 5.0 },
-        Pedal::Delay { on: true, time_ms: 420.0, feedback: 4.0, mix: 3.0 },
+        Pedal::Comp {
+            on: true,
+            sustain: 7.0,
+            level: 5.0,
+        },
+        Pedal::Delay {
+            on: true,
+            time_ms: 420.0,
+            feedback: 4.0,
+            mix: 3.0,
+        },
     ];
     let gid = guitar.id;
     model.tracks.push(guitar);
 
-    let source = AudioSource { id: uuid::Uuid::new_v4(), name: "riff.wav".into(), frames: 96_000, sample_rate: 48_000, channels: 2 };
+    let source = AudioSource {
+        id: uuid::Uuid::new_v4(),
+        name: "riff.wav".into(),
+        frames: 96_000,
+        sample_rate: 48_000,
+        channels: 2,
+    };
     let mut clip = AudioClip::new(gid, source.id, 8 * BEAT, 2.0);
     clip.gain = 0.7;
     clip.fade_in_seconds = 0.2;
@@ -55,19 +74,31 @@ fn audio_tracks_clips_and_rigs_round_trip() {
 fn a_project_with_no_audio_writes_no_audio_keys() {
     // Opening and re-saving an old project must not grow it with empty collections.
     let json = ProjectModel::starter().to_json().unwrap();
-    assert!(!json.contains("audioClips"), "empty audio clips were written:\n{json}");
-    assert!(!json.contains("audioSources"), "empty audio sources were written:\n{json}");
+    assert!(
+        !json.contains("audioClips"),
+        "empty audio clips were written:\n{json}"
+    );
+    assert!(
+        !json.contains("audioSources"),
+        "empty audio sources were written:\n{json}"
+    );
 }
 
 #[test]
 fn a_file_written_before_audio_tracks_existed_opens_with_no_audio() {
-    let v7 = r#"{
+    let track = "11111111-1111-1111-1111-111111111111";
+    let v7 = format!(
+        r#"{{
         "schemaVersion": 7,
         "tempo": 110,
-        "tracks": [{"id": "11111111-1111-1111-1111-111111111111", "name": "lead", "voice": "saw"}],
-        "patterns": [{"id": "22222222-2222-2222-2222-222222222222", "name": "p1", "lengthBeats": 16}]
-    }"#;
-    let m = ProjectModel::from_json(v7).unwrap();
+        "tracks": [{{"id": "{track}", "name": "lead", "voice": "saw"}}],
+        "patterns": [{{
+            "id": "22222222-2222-2222-2222-222222222222", "name": "p1", "lengthBeats": 16,
+            "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startBeat": 0, "lengthBeats": 1, "pitch": 60 }} ] }}
+        }}]
+    }}"#
+    );
+    let m = ProjectModel::from_json(&v7).unwrap();
     assert_eq!(m.schema_version, SCHEMA_VERSION);
     assert!(!m.tracks[0].is_audio);
     assert_eq!(m.tracks[0].amp, None);
@@ -82,15 +113,21 @@ fn loading_drops_audio_clips_whose_track_or_source_is_gone() {
     let guitar = Track::audio("guitar");
     let gid = guitar.id;
     m.tracks.push(guitar);
-    let source = AudioSource { id: uuid::Uuid::new_v4(), name: "take".into(), frames: 1_000, sample_rate: 48_000, channels: 1 };
+    let source = AudioSource {
+        id: uuid::Uuid::new_v4(),
+        name: "take".into(),
+        frames: 1_000,
+        sample_rate: 48_000,
+        channels: 1,
+    };
     let sid = source.id;
     m.audio_sources = vec![source];
     m.audio_clips = vec![
-        AudioClip::new(gid, sid, 0, 1.0),                              // keeper
-        AudioClip::new(uuid::Uuid::new_v4(), sid, 0, 1.0),             // no such track
-        AudioClip::new(gid, uuid::Uuid::new_v4(), 0, 1.0),             // no such source
-        AudioClip::new(m.tracks[0].id, sid, 0, 1.0),                   // not an audio track
-        AudioClip::new(gid, sid, 0, 0.0),                              // zero length
+        AudioClip::new(gid, sid, 0, 1.0),                  // keeper
+        AudioClip::new(uuid::Uuid::new_v4(), sid, 0, 1.0), // no such track
+        AudioClip::new(gid, uuid::Uuid::new_v4(), 0, 1.0), // no such source
+        AudioClip::new(m.tracks[0].id, sid, 0, 1.0),       // not an audio track
+        AudioClip::new(gid, sid, 0, 0.0),                  // zero length
     ];
     let decoded = ProjectModel::from_json(&m.to_json().unwrap()).unwrap();
     assert_eq!(decoded.audio_clips.len(), 1);
@@ -120,8 +157,14 @@ fn empty_project_defaults() {
     let empty = ProjectModel::empty();
     assert_eq!(empty.tracks.len(), 1);
     assert_eq!(empty.patterns.len(), 1);
-    assert!(empty.patterns[0].notes_by_track.is_empty());
-    assert!(empty.patterns[0].chords.is_empty());
+    assert_eq!(
+        empty.patterns[0].track_id, empty.tracks[0].id,
+        "the pattern belongs to the track"
+    );
+    assert_eq!(empty.patterns[0].name, "melody 1");
+    assert!(empty.patterns[0].notes.is_empty());
+    assert!(empty.chords.is_empty());
+    assert_eq!(empty.song_length_ticks, DEFAULT_SONG_BARS as i64 * 4 * BEAT);
     assert_eq!(empty.tempo, 120.0);
     assert_eq!(empty.key, KeyState::NONE);
     assert_eq!(empty.patterns[0].length_ticks, 16 * BEAT);
@@ -130,15 +173,32 @@ fn empty_project_defaults() {
 
 #[test]
 fn decoding_missing_fields_does_not_fail() {
-    let decoded = ProjectModel::from_json(r#"{ "tempo": 140 }"#).unwrap();
+    let decoded = ProjectModel::from_json(r#"{ "schemaVersion": 6, "tempo": 140 }"#).unwrap();
     assert_eq!(decoded.tempo, 140.0);
     assert_eq!(decoded.tracks.len(), 1);
     assert_eq!(decoded.patterns.len(), 1);
     assert_eq!(decoded.schema_version, SCHEMA_VERSION);
+    assert_eq!(decoded.song_length_ticks, 128 * BEAT);
 
-    let decoded = ProjectModel::from_json("{}").unwrap();
+    let decoded = ProjectModel::from_json(r#"{ "schemaVersion": 6 }"#).unwrap();
     assert_eq!(decoded.tempo, 120.0);
     assert_eq!(decoded.master, MasterSettings::default());
+}
+
+/// A file from the future is refused rather than opened and re-saved without the fields this
+/// build never knew about.
+#[test]
+fn a_file_from_a_newer_version_is_refused() {
+    let err =
+        ProjectModel::from_json(r#"{ "schemaVersion": 99 }"#).expect_err("a newer file was opened");
+    assert!(
+        err.to_string().contains("newer version of dissonant"),
+        "{err}"
+    );
+    assert!(ProjectModel::from_json(r#"{ "schemaVersion": 6 }"#).is_ok());
+    // A project is an object: a bare array would otherwise decode as a blank project and the
+    // next save would destroy the file.
+    assert!(ProjectModel::from_json("[]").is_err());
 }
 
 #[test]
@@ -146,54 +206,126 @@ fn notes_without_velocity_default_to_100_and_bad_values_are_clamped() {
     let track = "11111111-1111-1111-1111-111111111111";
     let json = format!(
         r#"{{
+          "schemaVersion": 6,
           "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
           "patterns": [ {{
-            "id": "22222222-2222-2222-2222-222222222222", "name": "p",
-            "chords": {{ "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0, "lengthBeats": 4, "pitchClasses": [0,4,7], "name": "C" }} ] }},
-            "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startBeat": 1, "lengthBeats": 1, "pitch": 300 }} ] }}
+            "id": "22222222-2222-2222-2222-222222222222", "trackId": "{track}", "name": "p",
+            "notes": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startBeat": 1, "lengthBeats": 1, "pitch": 300 }} ]
           }} ],
-          "arrangement": [ "22222222-2222-2222-2222-222222222222", "99999999-9999-9999-9999-999999999999" ]
+          "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0, "lengthBeats": 4, "pitchClasses": [0,4,7], "name": "C" }} ]
         }}"#
     );
     let decoded = ProjectModel::from_json(&json).unwrap();
-    let tid = decoded.tracks[0].id;
-    let notes = decoded.patterns[0].notes(&tid);
+    let notes = &decoded.patterns[0].notes;
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].velocity, 100);
     assert_eq!(notes[0].pitch, 127);
     assert_eq!(notes[0].start_tick, BEAT);
     assert_eq!(decoded.tracks[0].voice, "saw");
     assert_eq!(decoded.tracks[0].tone, 18_000.0);
-    assert_eq!(decoded.patterns[0].chords.chord_at(BEAT).unwrap().name.as_deref(), Some("C"));
-    // The legacy arrangement list becomes clips; unknown pattern ids are dropped.
-    assert!(decoded.arrangement.is_empty());
-    assert_eq!(decoded.clips.len(), 1);
-    assert_eq!(decoded.clips[0].start_tick, 0);
-    assert_eq!(decoded.clips[0].length_ticks, 16 * BEAT);
+    assert_eq!(
+        decoded.chords.chord_at(BEAT).unwrap().name.as_deref(),
+        Some("C")
+    );
 }
 
 #[test]
 fn legacy_arrangement_lays_clips_back_to_back() {
-    let json = r#"{
-      "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "name": "a", "lengthBeats": 8 },
-                    { "id": "33333333-3333-3333-3333-333333333333", "name": "b", "lengthBeats": 16 } ],
-      "arrangement": [ "22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333", "22222222-2222-2222-2222-222222222222" ]
-    }"#;
-    let m = ProjectModel::from_json(json).unwrap();
+    let track = "11111111-1111-1111-1111-111111111111";
+    let (a, b) = (
+        "22222222-2222-2222-2222-222222222222",
+        "33333333-3333-3333-3333-333333333333",
+    );
+    let note =
+        |id: &str| format!(r#"{{ "id": "{id}", "startBeat": 0, "lengthBeats": 1, "pitch": 60 }}"#);
+    let json = format!(
+        r#"{{
+      "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
+      "patterns": [ {{ "id": "{a}", "name": "a", "lengthBeats": 8, "notesByTrack": {{ "{track}": [ {} ] }} }},
+                    {{ "id": "{b}", "name": "b", "lengthBeats": 16, "notesByTrack": {{ "{track}": [ {} ] }} }} ],
+      "arrangement": [ "{a}", "{b}", "{a}" ]
+    }}"#,
+        note("44444444-4444-4444-4444-444444444444"),
+        note("55555555-5555-5555-5555-555555555555")
+    );
+    let m = ProjectModel::from_json(&json).unwrap();
     let starts: Vec<i64> = m.clips.iter().map(|c| c.start_tick).collect();
     assert_eq!(starts, vec![0, 8 * BEAT, 24 * BEAT]);
-    assert_eq!(m.song_length(), 32 * BEAT);
+    // The clips survive the v10 split: each one now plays the pattern of the track it fed.
+    assert_eq!(m.patterns.len(), 2, "one pattern per track per old pattern");
+    assert!(m.clips.iter().all(|c| m.pattern(&c.pattern_id).is_some()));
     assert!(!m.to_json().unwrap().contains("\"arrangement\""));
+}
+
+#[test]
+fn loading_tidies_chords_song_length_and_clips() {
+    let track = "11111111-1111-1111-1111-111111111111";
+    let pattern = "22222222-2222-2222-2222-222222222222";
+    let json = format!(
+        r#"{{
+          "schemaVersion": 6,
+          "songLengthTicks": 960,
+          "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
+          "patterns": [ {{ "id": "{pattern}", "trackId": "{track}", "name": "p" }} ],
+          "chords": [
+            {{ "startBeat": 4, "lengthBeats": 4, "pitchClasses": [7, 11, 2] }},
+            {{ "startBeat": 0, "lengthBeats": 8, "pitchClasses": [0, 4, 7] }},
+            {{ "startBeat": -2, "lengthBeats": 4, "pitchClasses": [0] }}
+          ],
+          "clips": [
+            {{ "patternId": "{pattern}", "startBeat": 2, "lengthBeats": 16 }},
+            {{ "patternId": "{pattern}", "startBeat": 8, "lengthBeats": 4 }}
+          ]
+        }}"#
+    );
+    let m = ProjectModel::from_json(&json).unwrap();
+    assert_eq!(m.song_length_ticks, 4 * BEAT, "at least one bar");
+    let chords: Vec<(i64, i64)> = m
+        .chords
+        .chords()
+        .iter()
+        .map(|c| (c.start_tick, c.length_ticks))
+        .collect();
+    assert_eq!(
+        chords,
+        vec![(0, 4 * BEAT), (4 * BEAT, 4 * BEAT)],
+        "sorted, the bad one dropped, no overlap"
+    );
+    let clips: Vec<(i64, i64)> = m
+        .clips
+        .iter()
+        .map(|c| (c.start_tick, c.length_ticks))
+        .collect();
+    assert_eq!(
+        clips,
+        vec![(2 * BEAT, 2 * BEAT)],
+        "the clip past the end is gone and the crossing one cut"
+    );
 }
 
 #[test]
 fn json_uses_camel_case_tick_keys() {
     let json = ProjectModel::starter().to_json().unwrap();
-    assert!(json.contains("\"schemaVersion\""));
-    assert!(json.contains("\"notesByTrack\""));
-    assert!(json.contains("\"lengthTicks\""));
-    assert!(json.contains("\"swingGridTicks\""));
+    for key in [
+        "schemaVersion",
+        "trackId",
+        "lengthTicks",
+        "songLengthTicks",
+        "swingGridTicks",
+        "chords",
+        "notes",
+    ] {
+        assert!(
+            json.contains(&format!("\"{key}\"")),
+            "missing {key}:\n{json}"
+        );
+    }
+    assert!(
+        !json.contains("notesByTrack"),
+        "a pattern no longer holds every track's notes:\n{json}"
+    );
     assert!(!json.contains("length_ticks"));
+    assert!(json.contains(&format!("\"schemaVersion\": {SCHEMA_VERSION}")));
 }
 
 /// Every schema ≤ 8 time key folds into its tick field at exactly 960 PPQ, including the
@@ -211,10 +343,8 @@ fn a_schema_8_file_migrates_every_beat_field_to_ticks() {
           "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
           "patterns": [ {{
             "id": "{pattern}", "name": "p", "lengthBeats": 8,
-            "chords": {{ "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0.5, "lengthBeats": 1.5, "pitchClasses": [0,4,7], "name": "C" }} ] }},
-            "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startBeat": 0.25, "lengthBeats": 0.75, "pitch": 60, "shift": -0.125 }} ] }},
-            "trackLoopBeats": {{ "{track}": 4 }},
-            "chordLoopBeats": 2
+            "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0.5, "lengthBeats": 1.5, "pitchClasses": [0,4,7], "name": "C" }} ],
+            "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startBeat": 0.25, "lengthBeats": 0.75, "pitch": 60, "shift": -0.125 }} ] }}
           }} ],
           "clips": [ {{ "id": "55555555-5555-5555-5555-555555555555", "patternId": "{pattern}", "startBeat": 16, "lengthBeats": 8, "offsetBeats": 1.5 }} ],
           "sections": [ {{ "id": "66666666-6666-6666-6666-666666666666", "name": "intro", "startBeat": 2.5 }} ],
@@ -225,20 +355,27 @@ fn a_schema_8_file_migrates_every_beat_field_to_ticks() {
     assert_eq!(m.schema_version, SCHEMA_VERSION);
 
     let p = &m.patterns[0];
+    assert_eq!(
+        p.track_id, m.tracks[0].id,
+        "the pattern found its owning track"
+    );
     assert_eq!(p.length_ticks, 8 * BEAT);
-    let tid = m.tracks[0].id;
-    let note = &p.notes(&tid)[0];
+    let note = &p.notes[0];
     assert_eq!(note.start_tick, 240, "0.25 beats is 240 ticks");
     assert_eq!(note.length_ticks, 720);
     assert_eq!(note.shift_ticks, -120);
-    let chord = &p.chords.chords()[0];
-    assert_eq!((chord.start_tick, chord.length_ticks), (480, 1440));
-    assert_eq!(p.track_loop_ticks.get(&tid).copied(), Some(4 * BEAT));
-    assert_eq!(p.chord_loop_ticks, Some(2 * BEAT));
 
     assert_eq!(m.clips[0].start_tick, 16 * BEAT);
     assert_eq!(m.clips[0].length_ticks, 8 * BEAT);
     assert_eq!(m.clips[0].offset_ticks, 1440);
+    // The pattern's own chords moved onto the song, under the clip that played them.
+    let chord = &m.chords.chords()[0];
+    assert_eq!(
+        chord.start_tick,
+        16 * BEAT,
+        "the chord that was sounding at the clip start begins there"
+    );
+    assert_eq!(chord.name.as_deref(), Some("C"));
     assert_eq!(m.sections[0].start_tick, 2400);
     assert_eq!(m.tempo_points[0].tick, 12_000);
     assert_eq!(m.swing_grid_ticks, BEAT / 4);
@@ -248,7 +385,7 @@ fn a_schema_8_file_migrates_every_beat_field_to_ticks() {
 /// Migration is one-way: what a migrated project writes back carries ticks only, so the next
 /// load has nothing left to fold.
 #[test]
-fn a_migrated_project_is_written_back_without_legacy_beat_keys() {
+fn a_migrated_project_is_written_back_without_legacy_keys() {
     let track = "11111111-1111-1111-1111-111111111111";
     let json = format!(
         r#"{{
@@ -257,7 +394,7 @@ fn a_migrated_project_is_written_back_without_legacy_beat_keys() {
           "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
           "patterns": [ {{
             "id": "22222222-2222-2222-2222-222222222222", "name": "p", "lengthBeats": 8,
-            "chords": {{ "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0, "lengthBeats": 4, "pitchClasses": [0,4,7] }} ] }},
+            "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startBeat": 0, "lengthBeats": 4, "pitchClasses": [0,4,7] }} ],
             "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startBeat": 1, "lengthBeats": 1, "pitch": 60, "shift": 0.25 }} ] }},
             "trackLoopBeats": {{ "{track}": 4 }},
             "chordLoopBeats": 4
@@ -274,15 +411,24 @@ fn a_migrated_project_is_written_back_without_legacy_beat_keys() {
         "\"offsetBeats\"",
         "\"trackLoopBeats\"",
         "\"chordLoopBeats\"",
+        "\"trackLoopTicks\"",
+        "\"chordLoopTicks\"",
+        "\"notesByTrack\"",
         "\"swingGrid\"",
         "\"shift\"",
         "\"beat\"",
     ] {
-        assert!(!written.contains(key), "{key} survived the migration:\n{written}");
+        assert!(
+            !written.contains(key),
+            "{key} survived the migration:\n{written}"
+        );
     }
     // Reloading what we wrote changes nothing.
     let once = ProjectModel::from_json(&written).unwrap();
-    assert_eq!(once, ProjectModel::from_json(&once.to_json().unwrap()).unwrap());
+    assert_eq!(
+        once,
+        ProjectModel::from_json(&once.to_json().unwrap()).unwrap()
+    );
 }
 
 #[test]
@@ -293,26 +439,527 @@ fn imports_swift_flat_array_notes_by_track() {
       "key": { "rootPitchClass": 7, "scale": "major", "isLocked": true },
       "tracks": [ { "id": "11111111-1111-1111-1111-111111111111", "name": "melody", "voice": "pluck", "muted": false, "soloed": false, "isDrum": false, "volume": 1, "reverbSend": 0.2, "tone": 9000, "pan": 0 } ],
       "patterns": [ { "id": "22222222-2222-2222-2222-222222222222", "name": "verse", "lengthBeats": 16,
-        "chords": { "chords": [] },
+        "chords": [],
         "notesByTrack": [ "11111111-1111-1111-1111-111111111111", [ { "id": "44444444-4444-4444-4444-444444444444", "startBeat": 2, "lengthBeats": 0.5, "pitch": 67 } ] ] } ],
       "arrangement": [ "22222222-2222-2222-2222-222222222222" ]
     }"#;
     let m = ProjectModel::from_json(json).unwrap();
-    let tid = m.tracks[0].id;
-    assert_eq!(m.patterns[0].notes(&tid).len(), 1);
-    assert_eq!(m.patterns[0].notes(&tid)[0].pitch, 67);
-    assert_eq!(m.patterns[0].notes(&tid)[0].velocity, 100);
-    assert_eq!(m.patterns[0].notes(&tid)[0].start_tick, 2 * BEAT);
-    assert_eq!(m.patterns[0].notes(&tid)[0].length_ticks, BEAT / 2);
+    let notes = &m.patterns[0].notes;
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].pitch, 67);
+    assert_eq!(notes[0].velocity, 100);
+    assert_eq!(notes[0].start_tick, 2 * BEAT);
+    assert_eq!(notes[0].length_ticks, BEAT / 2);
+    assert_eq!(m.patterns[0].track_id, m.tracks[0].id);
+    assert_eq!(
+        m.clips.len(),
+        1,
+        "the arrangement entry became a clip of the split pattern"
+    );
     assert_eq!(m.key.root_pitch_class, Some(7));
     assert_eq!(m.time_signature, TimeSignature::default());
     assert_eq!(m.schema_version, SCHEMA_VERSION);
 }
 
+// ------------------------------------------------- the schema 9 → 10 split
+
+/// The headline migration: one pattern that held two tracks' notes and its own progression
+/// becomes one pattern per track, each clip of the old pattern is duplicated onto every split
+/// pattern, and the chords move onto the song under those clips.
+#[test]
+fn a_schema_9_pattern_splits_into_one_pattern_per_track() {
+    let (lead, drums) = (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    );
+    let pattern = "33333333-3333-3333-3333-333333333333";
+    let json = format!(
+        r#"{{
+          "schemaVersion": 9,
+          "tracks": [ {{ "id": "{lead}", "name": "lead" }}, {{ "id": "{drums}", "name": "drums", "isDrum": true }} ],
+          "patterns": [ {{
+            "id": "{pattern}", "name": "verse", "lengthTicks": 15360,
+            "chords": [
+              {{ "id": "44444444-4444-4444-4444-444444444444", "startTick": 0, "lengthTicks": 7680, "pitchClasses": [0,4,7], "name": "C" }},
+              {{ "id": "55555555-5555-5555-5555-555555555555", "startTick": 7680, "lengthTicks": 7680, "pitchClasses": [5,9,0], "name": "F" }}
+            ],
+            "notesByTrack": {{
+              "{lead}": [ {{ "id": "66666666-6666-6666-6666-666666666666", "startTick": 960, "lengthTicks": 960, "pitch": 67 }} ],
+              "{drums}": [ {{ "id": "77777777-7777-7777-7777-777777777777", "startTick": 0, "lengthTicks": 240, "pitch": 36 }} ]
+            }}
+          }} ],
+          "clips": [
+            {{ "id": "88888888-8888-8888-8888-888888888888", "patternId": "{pattern}", "startTick": 0, "lengthTicks": 15360 }},
+            {{ "id": "99999999-9999-9999-9999-999999999999", "patternId": "{pattern}", "startTick": 15360, "lengthTicks": 15360 }}
+          ]
+        }}"#
+    );
+    let m = ProjectModel::from_json(&json).unwrap();
+    let (lead_id, drums_id) = (m.tracks[0].id, m.tracks[1].id);
+
+    let names: Vec<&str> = m.patterns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["lead verse", "drums verse"],
+        "one pattern per track, named after both"
+    );
+    let lead_pattern = m.patterns_of(&lead_id).next().unwrap();
+    let drums_pattern = m.patterns_of(&drums_id).next().unwrap();
+    assert_eq!(lead_pattern.length_ticks, 16 * BEAT);
+    assert_eq!(
+        lead_pattern
+            .notes
+            .iter()
+            .map(|n| (n.start_tick, n.pitch))
+            .collect::<Vec<_>>(),
+        vec![(BEAT, 67)]
+    );
+    assert_eq!(
+        drums_pattern
+            .notes
+            .iter()
+            .map(|n| (n.start_tick, n.pitch))
+            .collect::<Vec<_>>(),
+        vec![(0, 36)]
+    );
+
+    // Both clips of the old pattern now play on both tracks, in their old places.
+    assert_eq!(m.clips.len(), 4);
+    let spans = |pid| {
+        m.clips
+            .iter()
+            .filter(|c| c.pattern_id == pid)
+            .map(|c| (c.start_tick, c.length_ticks))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        spans(lead_pattern.id),
+        vec![(0, 16 * BEAT), (16 * BEAT, 16 * BEAT)]
+    );
+    assert_eq!(spans(drums_pattern.id), spans(lead_pattern.id));
+
+    // The pattern's progression is now the song's, repeated under each clip.
+    let chords: Vec<(i64, i64, &str)> = m
+        .chords
+        .chords()
+        .iter()
+        .map(|c| {
+            (
+                c.start_tick,
+                c.length_ticks,
+                c.name.as_deref().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        chords,
+        vec![
+            (0, 8 * BEAT, "C"),
+            (8 * BEAT, 8 * BEAT, "F"),
+            (16 * BEAT, 8 * BEAT, "C"),
+            (24 * BEAT, 8 * BEAT, "F"),
+        ]
+    );
+    assert_eq!(
+        m.song_length_ticks,
+        128 * BEAT,
+        "the default song is long enough to hold both clips"
+    );
+    assert!(m.patterns.iter().all(|p| !p.track_id.is_nil()));
+    // Nothing is left to migrate: a second pass through the file changes nothing.
+    assert_eq!(m, ProjectModel::from_json(&m.to_json().unwrap()).unwrap());
+}
+
+/// A schema ≤ 9 pattern could loop one track (or its chords) faster than the pattern itself.
+/// There is nowhere to keep that in v10, so the migration flattens it: the loop is written out
+/// as repeated material.
+#[test]
+fn the_v10_split_flattens_the_old_per_track_and_chord_loops() {
+    let track = "11111111-1111-1111-1111-111111111111";
+    let pattern = "22222222-2222-2222-2222-222222222222";
+    let json = format!(
+        r#"{{
+          "schemaVersion": 9,
+          "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
+          "patterns": [ {{
+            "id": "{pattern}", "name": "p", "lengthTicks": 15360,
+            "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startTick": 0, "lengthTicks": 3840, "pitchClasses": [0,4,7], "name": "C" }} ],
+            "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startTick": 0, "lengthTicks": 960, "pitch": 60 }} ] }},
+            "trackLoopTicks": {{ "{track}": 3840 }},
+            "chordLoopTicks": 3840
+          }} ],
+          "clips": [ {{ "id": "55555555-5555-5555-5555-555555555555", "patternId": "{pattern}", "startTick": 0, "lengthTicks": 15360 }} ]
+        }}"#
+    );
+    let m = ProjectModel::from_json(&json).unwrap();
+    let starts: Vec<i64> = m.patterns[0].notes.iter().map(|n| n.start_tick).collect();
+    assert_eq!(
+        starts,
+        vec![0, 4 * BEAT, 8 * BEAT, 12 * BEAT],
+        "the 4-beat track loop is written out"
+    );
+    let ids: std::collections::HashSet<_> = m.patterns[0].notes.iter().map(|n| n.id).collect();
+    assert_eq!(ids.len(), 4, "every repeat keeps its own id");
+    let chords: Vec<i64> = m.chords.chords().iter().map(|c| c.start_tick).collect();
+    assert_eq!(
+        chords,
+        vec![0, 4 * BEAT, 8 * BEAT, 12 * BEAT],
+        "and so is the chord loop"
+    );
+}
+
+/// A clip that started mid-pattern or ran past its end carried the chords with it; the lifted
+/// progression lands where it was heard, cut at the clip's edges.
+#[test]
+fn lifted_chords_follow_an_offset_clip() {
+    let track = "11111111-1111-1111-1111-111111111111";
+    let pattern = "22222222-2222-2222-2222-222222222222";
+    let json = format!(
+        r#"{{
+          "schemaVersion": 9,
+          "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
+          "patterns": [ {{
+            "id": "{pattern}", "name": "p", "lengthTicks": 7680,
+            "chords": [
+              {{ "id": "33333333-3333-3333-3333-333333333333", "startTick": 0, "lengthTicks": 3840, "pitchClasses": [0,4,7], "name": "C" }},
+              {{ "id": "44444444-4444-4444-4444-444444444444", "startTick": 3840, "lengthTicks": 3840, "pitchClasses": [5,9,0], "name": "F" }}
+            ],
+            "notesByTrack": {{ "{track}": [ {{ "id": "55555555-5555-5555-5555-555555555555", "startTick": 0, "lengthTicks": 960, "pitch": 60 }} ] }}
+          }} ],
+          "clips": [ {{ "id": "66666666-6666-6666-6666-666666666666", "patternId": "{pattern}", "startTick": 7680, "lengthTicks": 11520, "offsetTicks": 3840 }} ]
+        }}"#
+    );
+    let m = ProjectModel::from_json(&json).unwrap();
+    let chords: Vec<(i64, i64, &str)> = m
+        .chords
+        .chords()
+        .iter()
+        .map(|c| {
+            (
+                c.start_tick,
+                c.length_ticks,
+                c.name.as_deref().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        chords,
+        vec![
+            (8 * BEAT, 4 * BEAT, "F"),
+            (12 * BEAT, 4 * BEAT, "C"),
+            (16 * BEAT, 4 * BEAT, "F")
+        ],
+        "the clip starts on the second chord and loops the pattern once more"
+    );
+    assert_eq!(
+        m.clips[0].offset_ticks,
+        4 * BEAT,
+        "the clip keeps its offset"
+    );
+}
+
+/// Schema 9 wrote a pattern's chord track as the struct it was then — `{"chords": [...]}` —
+/// while every other version writes a bare array. A v9 project must still open, chords and all.
+#[test]
+fn a_v9_pattern_chord_track_written_as_an_object_still_opens() {
+    let track = "11111111-1111-1111-1111-111111111111";
+    let pattern = "22222222-2222-2222-2222-222222222222";
+    let json = format!(
+        r#"{{
+          "schemaVersion": 9,
+          "tracks": [ {{ "id": "{track}", "name": "lead" }} ],
+          "patterns": [ {{
+            "id": "{pattern}", "name": "p", "lengthTicks": 3840,
+            "chords": {{ "chords": [ {{ "id": "33333333-3333-3333-3333-333333333333", "startTick": 0, "lengthTicks": 3840, "pitchClasses": [0,4,7], "name": "C" }} ] }},
+            "notesByTrack": {{ "{track}": [ {{ "id": "44444444-4444-4444-4444-444444444444", "startTick": 0, "lengthTicks": 960, "pitch": 60 }} ] }}
+          }} ],
+          "clips": [ {{ "id": "55555555-5555-5555-5555-555555555555", "patternId": "{pattern}", "startTick": 0, "lengthTicks": 3840 }} ]
+        }}"#
+    );
+    let m = ProjectModel::from_json(&json).unwrap();
+    assert_eq!(m.patterns.len(), 1, "the pattern split onto its one track");
+    assert_eq!(m.patterns[0].notes.len(), 1);
+    let chords: Vec<(i64, i64)> = m.chords.chords().iter().map(|c| (c.start_tick, c.length_ticks)).collect();
+    assert_eq!(chords, vec![(0, 4 * BEAT)], "the wrapped chord track was lifted onto the song");
+}
+
+// ---------------------------------------------------------------- the starter project
+
+/// Every melody note's tier against the project chord under it, with the starter's locked key.
+fn melody_tiers(model: &ProjectModel) -> Vec<Tier> {
+    let scale = model.key.scale_pitch_classes();
+    model.patterns[0]
+        .notes
+        .iter()
+        .map(|n| {
+            let chord = model
+                .chords
+                .chord_at(n.start_tick)
+                .expect("every melody note sits on a chord");
+            TierClassifier.tier(n.pitch, &chord.pitch_classes, scale.as_deref())
+        })
+        .collect()
+}
+
+#[test]
+fn starter_has_a_melody_a_groove_and_a_locked_key() {
+    let m = ProjectModel::starter();
+    assert_eq!(m.key, KeyState::locked(0, ScaleType::Major));
+    assert_eq!(m.song_length_ticks, 128 * BEAT, "32 bars of 4/4");
+    assert!(!m.tracks[0].is_drum && m.tracks[1].is_drum);
+    let names: Vec<&str> = m.patterns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["melody 1", "drums 1"], "one pattern per track");
+    let (melody, drums) = (&m.patterns[0], &m.patterns[1]);
+    assert_eq!(
+        (melody.track_id, drums.track_id),
+        (m.tracks[0].id, m.tracks[1].id)
+    );
+    assert_eq!(melody.length_ticks, 16 * BEAT);
+    assert!(!melody.notes.is_empty(), "the melody track plays something");
+    let count = |pitch| drums.notes.iter().filter(|n| n.pitch == pitch).count();
+    assert_eq!(
+        (count(36), count(38), count(42)),
+        (8, 8, 32),
+        "kick on 1 and 3, snare on 2 and 4, 8th hats, 4 bars"
+    );
+
+    // The progression tiles the whole song, and both patterns loop across it from tick 0.
+    let starts: Vec<i64> = m.chords.chords().iter().map(|c| c.start_tick).collect();
+    assert_eq!(starts, (0..32).map(|i| i * 4 * BEAT).collect::<Vec<_>>());
+    assert_eq!(m.chords.chords()[4].name, m.chords.chords()[0].name);
+    assert_eq!(m.clips.len(), 2, "one clip per track");
+    for c in &m.clips {
+        assert_eq!((c.start_tick, c.length_ticks), (0, 128 * BEAT));
+    }
+
+    let tiers = melody_tiers(&m);
+    assert!(
+        tiers.iter().all(|t| *t != Tier::Dissonance),
+        "the starter melody is never flagged: {tiers:?}"
+    );
+    assert!(
+        tiers.contains(&Tier::ChordTone) && tiers.contains(&Tier::Tension),
+        "it shows more than one tier"
+    );
+}
+
+#[test]
+fn starter_shaped_fits_any_length_and_meter() {
+    for (length, bar) in [
+        (32 * BEAT, 4 * BEAT),
+        (8 * BEAT, 4 * BEAT),
+        (12 * BEAT, 3 * BEAT),
+        (14 * BEAT, 7 * BEAT / 2),
+        (8 * BEAT, 2 * BEAT),
+    ] {
+        let m = ProjectModel::starter_shaped(length, bar, 8);
+        let song = 8 * bar;
+        assert_eq!(m.song_length_ticks, song);
+        for p in &m.patterns {
+            assert_eq!(p.length_ticks, length);
+            for n in &p.notes {
+                assert!(
+                    n.start_tick >= 0 && n.end_tick() <= length,
+                    "{length}/{bar}: note past the end: {n:?}"
+                );
+            }
+        }
+        assert!(m
+            .clips
+            .iter()
+            .all(|c| c.start_tick == 0 && c.length_ticks == song));
+        let first_pass: Vec<&ChordEvent> = m
+            .chords
+            .chords()
+            .iter()
+            .filter(|c| c.start_tick < length)
+            .collect();
+        assert_eq!(
+            first_pass.len(),
+            4,
+            "{length}/{bar}: one pass of the progression per pattern length"
+        );
+        assert_eq!(
+            m.chords.chords().last().unwrap().end_tick(),
+            song,
+            "{length}/{bar}: chords reach the song end"
+        );
+        assert!(
+            melody_tiers(&m).iter().all(|t| *t != Tier::Dissonance),
+            "{length}/{bar}: the melody keeps its tiers"
+        );
+        let hits = &m.patterns[1].notes;
+        let kicks: Vec<i64> = hits
+            .iter()
+            .filter(|n| n.pitch == 36)
+            .map(|n| n.start_tick % bar)
+            .collect();
+        assert!(
+            kicks.contains(&0),
+            "{length}/{bar}: a kick on every downbeat"
+        );
+        assert!(
+            hits.iter().any(|n| n.pitch == 38),
+            "{length}/{bar}: there is a snare"
+        );
+    }
+    // Nonsense input falls back to the default shape instead of an empty pattern.
+    let fallback = ProjectModel::starter_shaped(0, -1, 0);
+    assert_eq!(fallback.patterns[0].length_ticks, 16 * BEAT);
+    assert_eq!(
+        fallback.song_length_ticks,
+        4 * BEAT,
+        "a zero-bar song is one bar"
+    );
+}
+
+// ---------------------------------------------------------------- vibes
+
+#[test]
+fn every_vibe_builds_a_playable_project() {
+    let infos = vibes();
+    assert_eq!(infos.len(), 5);
+    for info in &infos {
+        let m = ProjectModel::from_vibe(&info.id, DEFAULT_SONG_BARS)
+            .unwrap_or_else(|| panic!("{} builds", info.id));
+        assert_eq!(m.tempo, info.tempo, "{}", info.id);
+        assert_eq!(m.key, info.key, "{}: key locked as advertised", info.id);
+        assert!(m.key.is_locked);
+        assert_eq!(m.song_length_ticks, 128 * BEAT);
+        assert_eq!(m.patterns.len(), 3, "{}: one pattern per track", info.id);
+        for (p, t) in m.patterns.iter().zip(&m.tracks) {
+            assert_eq!(p.track_id, t.id);
+            assert_eq!(p.name, format!("{} 1", t.name));
+            assert_eq!(p.length_ticks, 16 * BEAT);
+            for n in &p.notes {
+                assert!(
+                    n.start_tick >= 0 && n.end_tick() <= 16 * BEAT,
+                    "{}: {n:?} past the end",
+                    info.id
+                );
+            }
+        }
+        assert_eq!(
+            m.clips.len(),
+            3,
+            "{}: every pattern is in the song",
+            info.id
+        );
+        assert!(m
+            .clips
+            .iter()
+            .all(|c| c.start_tick == 0 && c.length_ticks == 128 * BEAT));
+        assert_eq!(
+            m.chords.chords().last().unwrap().end_tick(),
+            128 * BEAT,
+            "{}: the progression fills the song",
+            info.id
+        );
+        assert!(
+            m.patterns[0].notes.is_empty(),
+            "{}: the lead is left for the player",
+            info.id
+        );
+        // Every bass note is the root of the chord it sits on, low.
+        let bass = &m.patterns[1].notes;
+        assert!(!bass.is_empty());
+        for n in bass {
+            let chord = m.chords.chord_at(n.start_tick).unwrap();
+            assert_eq!(
+                n.pitch.rem_euclid(12),
+                chord.pitch_classes[0].rem_euclid(12),
+                "{}: bass plays roots",
+                info.id
+            );
+            assert!(
+                (32..=43).contains(&n.pitch),
+                "{}: bass pitch {} out of range",
+                info.id,
+                n.pitch
+            );
+        }
+        // A kick on every downbeat, whatever the groove.
+        let kicks: Vec<i64> = m.patterns[2]
+            .notes
+            .iter()
+            .filter(|n| n.pitch == 36)
+            .map(|n| n.start_tick)
+            .collect();
+        for bar in 0..4 {
+            assert!(
+                kicks.contains(&(bar * 4 * BEAT)),
+                "{}: kick on bar {bar}",
+                info.id
+            );
+        }
+    }
+    assert!(ProjectModel::from_vibe("polka", DEFAULT_SONG_BARS).is_none());
+    assert_eq!(
+        ProjectModel::from_vibe("lofi", 8)
+            .unwrap()
+            .song_length_ticks,
+        32 * BEAT
+    );
+}
+
+/// The browser mock (ui/src/bridge.ts) mirrors the vibes; `bridge.test.ts` asserts these same
+/// values, so a change on either side fails a test. Chords are the first pass of the
+/// progression (one pattern length); the rest of the song repeats it.
+#[test]
+fn vibe_values_shared_with_the_ui() {
+    let described: Vec<String> = vibes()
+        .iter()
+        .map(|info| {
+            let m = ProjectModel::from_vibe(&info.id, DEFAULT_SONG_BARS).unwrap();
+            let names: Vec<&str> = m.tracks.iter().map(|t| t.name.as_str()).collect();
+            let chords: Vec<&str> = m
+                .chords
+                .chords()
+                .iter()
+                .filter(|c| c.start_tick < 16 * BEAT)
+                .map(|c| c.name.as_deref().unwrap_or(""))
+                .collect();
+            let count = |track: usize, pitch: Option<i32>| {
+                m.patterns_of(&m.tracks[track].id)
+                    .flat_map(|p| &p.notes)
+                    .filter(|n| pitch.is_none_or(|x| n.pitch == x))
+                    .count()
+            };
+            format!(
+                "{}|{}|{}|{}|{}|{}|kick {}|bass {}|{}",
+                info.id,
+                info.tempo,
+                m.swing,
+                names.join(","),
+                chords.join(" "),
+                m.tracks[0].voice,
+                count(2, Some(36)),
+                count(1, None),
+                count(2, None),
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        [
+            "lofi|80|60|keys,bass,drums|Gm C F Dm|triangle|kick 12|bass 12|52",
+            "postpunk|148|50|lead,bass,drums|Em C G D|square|kick 12|bass 32|52",
+            "ambient|70|50|pad,bass,drums|D G|pad|kick 4|bass 4|8",
+            "songwriter|96|50|melody,bass,drums|G D Em C|pluck|kick 8|bass 8|48",
+            "club|124|50|lead,bass,drums|Am G F G|square|kick 16|bass 16|40",
+        ]
+    );
+}
+
+// ---------------------------------------------------------------- insert chains
+
 #[test]
 fn insert_chains_round_trip_with_their_order_bypass_and_state() {
     let mut model = ProjectModel::starter();
-    let mut delay = Insert::new("clap:/CLAP/ValhallaDelay.clap:com.valhalladsp.delay", "Valhalla Delay");
+    let mut delay = Insert::new(
+        "clap:/CLAP/ValhallaDelay.clap:com.valhalladsp.delay",
+        "Valhalla Delay",
+    );
     delay.state = Some("ZGVsYXk=".into());
     let mut eq = Insert::new("clap:/CLAP/Pro-Q.clap:com.fabfilter.proq3", "Pro-Q");
     eq.enabled = false;
@@ -323,7 +970,11 @@ fn insert_chains_round_trip_with_their_order_bypass_and_state() {
     assert_eq!(decoded, model);
     // Order is meaning, not presentation: the chain must come back in the order it went in.
     assert_eq!(
-        decoded.tracks[0].inserts.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        decoded.tracks[0]
+            .inserts
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
         ["Valhalla Delay", "Pro-Q"]
     );
 }
@@ -332,8 +983,14 @@ fn insert_chains_round_trip_with_their_order_bypass_and_state() {
 fn a_project_with_no_inserts_writes_no_insert_keys() {
     // Opening and re-saving a project that has never used an effect must not grow it.
     let json = ProjectModel::starter().to_json().unwrap();
-    assert!(!json.contains("\"inserts\""), "an empty chain was written:\n{json}");
-    assert!(!json.contains("masterInserts"), "an empty master chain was written:\n{json}");
+    assert!(
+        !json.contains("\"inserts\""),
+        "an empty chain was written:\n{json}"
+    );
+    assert!(
+        !json.contains("masterInserts"),
+        "an empty master chain was written:\n{json}"
+    );
 }
 
 #[test]
@@ -342,7 +999,7 @@ fn a_file_written_before_inserts_existed_opens_with_empty_chains() {
         "schemaVersion": 9,
         "tempo": 110,
         "tracks": [{"id": "11111111-1111-1111-1111-111111111111", "name": "lead", "voice": "saw"}],
-        "patterns": [{"id": "22222222-2222-2222-2222-222222222222", "name": "p1", "lengthTicks": 7680}]
+        "patterns": [{"id": "22222222-2222-2222-2222-222222222222", "trackId": "11111111-1111-1111-1111-111111111111", "name": "p1", "lengthTicks": 7680}]
     }"#;
     let m = ProjectModel::from_json(v9).unwrap();
     assert!(m.tracks[0].inserts.is_empty());
@@ -357,7 +1014,10 @@ fn loading_drops_unusable_inserts_and_caps_the_chain() {
     let mut m = ProjectModel::starter();
     let dup = Insert::new("clap:/CLAP/Pro-Q.clap:com.fabfilter.proq3", "Pro-Q");
     let mut chain = vec![
-        Insert { uid: "   ".into(), ..Insert::new("x", "nameless") },
+        Insert {
+            uid: "   ".into(),
+            ..Insert::new("x", "nameless")
+        },
         dup.clone(),
         dup.clone(),
     ];
@@ -368,8 +1028,18 @@ fn loading_drops_unusable_inserts_and_caps_the_chain() {
     let loaded = ProjectModel::from_json(&m.to_json().unwrap()).unwrap();
     for inserts in [&loaded.tracks[0].inserts, &loaded.master_inserts] {
         assert_eq!(inserts.len(), MAX_INSERTS, "the chain was not capped");
-        assert!(inserts.iter().all(|i| !i.uid.trim().is_empty()), "a uid-less insert survived");
-        assert_eq!(inserts.iter().filter(|i| i.id == dup.id).count(), 1, "a duplicated insert id survived");
-        assert_eq!(inserts[0].name, "Pro-Q", "the surviving order was disturbed");
+        assert!(
+            inserts.iter().all(|i| !i.uid.trim().is_empty()),
+            "a uid-less insert survived"
+        );
+        assert_eq!(
+            inserts.iter().filter(|i| i.id == dup.id).count(),
+            1,
+            "a duplicated insert id survived"
+        );
+        assert_eq!(
+            inserts[0].name, "Pro-Q",
+            "the surviving order was disturbed"
+        );
     }
 }

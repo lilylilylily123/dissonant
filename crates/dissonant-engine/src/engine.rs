@@ -3,7 +3,10 @@
 use crate::audio::{AudioPool, BlockContext};
 use crate::channel::{chain_is_silent, run_inserts, Channel, InsertSlot, Instrument, Master};
 use crate::synth::{PolySynth, VoicePreset};
-use dissonant_core::{swing_warp_ticks, InsertTarget, MasterSettings, NoteEvent, Sequence, Tempo, MAX_INSERTS, TICKS_PER_BEAT};
+use dissonant_core::{
+    swing_warp_ticks, InsertTarget, MasterSettings, NoteEvent, Sequence, Tempo, MAX_INSERTS,
+    TICKS_PER_BEAT,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -152,14 +155,26 @@ impl Shared {
 pub enum EngineCommand {
     Play,
     Stop,
-    Seek { tick: f64 },
+    Seek {
+        tick: f64,
+    },
     SetLooping(bool),
     /// Loop a sub-range `[start, end)` of the sequence instead of the whole thing, in ticks.
-    SetLoop { start: f64, end: f64 },
+    SetLoop {
+        start: f64,
+        end: f64,
+    },
     ClearLoop,
     /// A held note from a controller / typing keyboard. Released by `NoteOff`.
-    NoteOn { track_id: Uuid, pitch: u8, velocity: u8 },
-    NoteOff { track_id: Uuid, pitch: u8 },
+    NoteOn {
+        track_id: Uuid,
+        pitch: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        track_id: Uuid,
+        pitch: u8,
+    },
     /// Replace what's playing. The old `Arc` is dropped on the audio thread; sequences are
     /// small so this is acceptable for now (a return channel is the real-time-pure fix).
     SetSequence(Arc<Sequence>),
@@ -168,29 +183,54 @@ pub enum EngineCommand {
     /// Sound a note on a track right now (placement audition / typing keyboard). `seconds` is
     /// how long to hold it before the automatic release — the roll passes the length of the note
     /// being previewed, so auditions don't outlast the note the user is drawing.
-    Audition { track_id: Uuid, pitch: u8, velocity: u8, seconds: f32 },
+    Audition {
+        track_id: Uuid,
+        pitch: u8,
+        velocity: u8,
+        seconds: f32,
+    },
     /// Release an audition note early (typing keyboard key-up).
-    AuditionOff { track_id: Uuid, pitch: u8 },
+    AuditionOff {
+        track_id: Uuid,
+        pitch: u8,
+    },
     /// A short sine on the master bus, for checking the output device from Settings.
     TestTone,
     /// Click on every beat (accented on the bar) while playing; `volume` 0…1.
-    SetMetronome { on: bool, volume: f32 },
+    SetMetronome {
+        on: bool,
+        volume: f32,
+    },
     /// Click through `bars` bars with the transport held, then play.
-    PlayWithCountIn { bars: u32 },
+    PlayWithCountIn {
+        bars: u32,
+    },
     /// Install an instrument built on the app thread. Loading a plugin takes hundreds of
     /// milliseconds, so it is never done here; the app hands over a ready one and the audio
     /// thread only swaps a pointer. The displaced instrument is dropped here, the same
     /// tradeoff `SetSequence` already makes.
-    SetInstrument { track_id: Uuid, instrument: Box<Instrument> },
+    SetInstrument {
+        track_id: Uuid,
+        instrument: Box<Instrument>,
+    },
     /// Restore a track to its built-in voice, releasing whatever plugin it hosted.
-    ClearInstrument { track_id: Uuid },
+    ClearInstrument {
+        track_id: Uuid,
+    },
     /// A parameter change on a hosted plugin, applied at the next block.
-    SetPluginParam { track_id: Uuid, param_id: u32, value: f64 },
+    SetPluginParam {
+        track_id: Uuid,
+        param_id: u32,
+        value: f64,
+    },
     /// Decoded audio, built on the app thread. The displaced pool is dropped here — the same
     /// tradeoff `SetSequence` makes, and it only happens when the set of sources changes.
     SetAudioPool(Arc<AudioPool>),
     /// Which audio track hears the live input, and whether it is monitored through the rig.
-    SetAudioArm { track_id: Option<Uuid>, monitor: bool },
+    SetAudioArm {
+        track_id: Option<Uuid>,
+        monitor: bool,
+    },
     /// Capture the input into the take ring from the next playing sample.
     StartRecord,
     StopRecord,
@@ -198,16 +238,35 @@ pub enum EngineCommand {
     /// built on the app thread for the same reason `SetInstrument`'s instrument is, and its
     /// unit is `None` when the project names a plugin this machine cannot load — the slot still
     /// takes its place in the chain so everything after it keeps its index.
-    AddInsert { target: InsertTarget, index: usize, slot: InsertSlot },
+    AddInsert {
+        target: InsertTarget,
+        index: usize,
+        slot: InsertSlot,
+    },
     /// Drop an effect. Its unit is released here, the same tradeoff `ClearInstrument` makes.
-    RemoveInsert { target: InsertTarget, id: Uuid },
+    RemoveInsert {
+        target: InsertTarget,
+        id: Uuid,
+    },
     /// Move an effect within its chain; `to` is clamped.
-    MoveInsert { target: InsertTarget, id: Uuid, to: usize },
+    MoveInsert {
+        target: InsertTarget,
+        id: Uuid,
+        to: usize,
+    },
     /// Bypass (`on: false`) or re-enable an effect, leaving it loaded and in place.
-    SetInsertEnabled { target: InsertTarget, id: Uuid, on: bool },
+    SetInsertEnabled {
+        target: InsertTarget,
+        id: Uuid,
+        on: bool,
+    },
     /// A parameter change on a hosted effect, applied at the next block. Inserts are keyed by
     /// their own id, so the chain they live in does not have to be named.
-    SetInsertParam { id: Uuid, param_id: u32, value: f64 },
+    SetInsertParam {
+        id: Uuid,
+        param_id: u32,
+        value: f64,
+    },
 }
 
 /// One sounding metronome click: a short decaying sine.
@@ -290,12 +349,26 @@ struct Event {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum EventKind {
-    NoteOn { track: usize, pitch: u8, velocity: u8, shape: NoteShape },
-    NoteOff { track: usize, pitch: u8 },
-    ChordOn { pitch: u8 },
-    ChordOff { pitch: u8 },
+    NoteOn {
+        track: usize,
+        pitch: u8,
+        velocity: u8,
+        shape: NoteShape,
+    },
+    NoteOff {
+        track: usize,
+        pitch: u8,
+    },
+    ChordOn {
+        pitch: u8,
+    },
+    ChordOff {
+        pitch: u8,
+    },
     ReleaseAll,
-    Click { accent: bool },
+    Click {
+        accent: bool,
+    },
 }
 
 /// Whether the beat click at `tick` is the first of its bar, and so the accented one.
@@ -373,7 +446,9 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(sample_rate: f32, shared: Arc<Shared>, master: &MasterSettings) -> Self {
-        shared.sample_rate.store(sample_rate as u32, Ordering::Relaxed);
+        shared
+            .sample_rate
+            .store(sample_rate as u32, Ordering::Relaxed);
         Engine {
             sample_rate,
             shared,
@@ -518,17 +593,23 @@ impl Engine {
                 }
             }
             EngineCommand::ClearLoop => self.loop_region = None,
-            EngineCommand::NoteOn { track_id, pitch, velocity } => {
+            EngineCommand::NoteOn {
+                track_id,
+                pitch,
+                velocity,
+            } => {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     ch.instrument.note_on(pitch, velocity, NoteShape::neutral());
                 }
-                self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
+                self.auditions
+                    .retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
             EngineCommand::NoteOff { track_id, pitch } => {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     ch.instrument.note_off(pitch);
                 }
-                self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
+                self.auditions
+                    .retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
             EngineCommand::SetSequence(seq) => self.set_sequence(seq),
             EngineCommand::SetHearChords(on) => {
@@ -539,14 +620,29 @@ impl Engine {
                 }
             }
             EngineCommand::SetMaster(settings) => self.master.apply(&settings),
-            EngineCommand::Audition { track_id, pitch, velocity, seconds } => {
+            EngineCommand::Audition {
+                track_id,
+                pitch,
+                velocity,
+                seconds,
+            } => {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     ch.instrument.note_on(pitch, velocity, NoteShape::neutral());
-                    let hold = (self.sample_rate * seconds.clamp(MIN_AUDITION_SECS, MAX_AUDITION_SECS)) as usize;
-                    if let Some(a) = self.auditions.iter_mut().find(|a| a.track_id == track_id && a.pitch == pitch) {
+                    let hold = (self.sample_rate
+                        * seconds.clamp(MIN_AUDITION_SECS, MAX_AUDITION_SECS))
+                        as usize;
+                    if let Some(a) = self
+                        .auditions
+                        .iter_mut()
+                        .find(|a| a.track_id == track_id && a.pitch == pitch)
+                    {
                         a.samples_left = hold;
                     } else {
-                        self.auditions.push(Audition { track_id, pitch, samples_left: hold });
+                        self.auditions.push(Audition {
+                            track_id,
+                            pitch,
+                            samples_left: hold,
+                        });
                     }
                 }
             }
@@ -554,10 +650,14 @@ impl Engine {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     ch.instrument.note_off(pitch);
                 }
-                self.auditions.retain(|a| !(a.track_id == track_id && a.pitch == pitch));
+                self.auditions
+                    .retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
             EngineCommand::TestTone => self.test_tone = ((self.sample_rate * 0.6) as usize, 0.0),
-            EngineCommand::SetInstrument { track_id, instrument } => {
+            EngineCommand::SetInstrument {
+                track_id,
+                instrument,
+            } => {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     // Release what was sounding first: the outgoing instrument is about to be
                     // dropped and the incoming one has no idea which keys are held.
@@ -577,7 +677,11 @@ impl Engine {
                     ch.instrument = instrument;
                 }
             }
-            EngineCommand::SetPluginParam { track_id, param_id, value } => {
+            EngineCommand::SetPluginParam {
+                track_id,
+                param_id,
+                value,
+            } => {
                 if let Some(ch) = self.channel_mut(&track_id) {
                     if let Instrument::Plugin(p) = &mut ch.instrument {
                         p.set_param(param_id, value);
@@ -603,7 +707,11 @@ impl Engine {
                 self.record_started = false;
                 self.shared.recording.store(false, Ordering::Relaxed);
             }
-            EngineCommand::AddInsert { target, index, slot } => {
+            EngineCommand::AddInsert {
+                target,
+                index,
+                slot,
+            } => {
                 if let Some(chain) = self.chain_mut(target) {
                     // The document enforces the same ceiling; the audio thread refuses to grow
                     // past it whatever reaches it, so the per-block cost stays bounded.
@@ -634,7 +742,11 @@ impl Engine {
                     }
                 }
             }
-            EngineCommand::SetInsertParam { id, param_id, value } => {
+            EngineCommand::SetInsertParam {
+                id,
+                param_id,
+                value,
+            } => {
                 if let Some(slot) = self.insert_mut(id) {
                     if let Some(unit) = &mut slot.unit {
                         unit.set_param(param_id, value);
@@ -685,9 +797,15 @@ impl Engine {
         let mut new_channels = Vec::with_capacity(seq.tracks.len());
         let mut new_ids = Vec::with_capacity(seq.tracks.len());
         let old_ids = std::mem::take(&mut self.channel_ids);
-        let mut old = std::mem::take(&mut self.channels).into_iter().map(Some).collect::<Vec<_>>();
+        let mut old = std::mem::take(&mut self.channels)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
         for track in &seq.tracks {
-            let existing = old_ids.iter().position(|id| id == &track.id).and_then(|i| old[i].take());
+            let existing = old_ids
+                .iter()
+                .position(|id| id == &track.id)
+                .and_then(|i| old[i].take());
             let mut ch = match existing {
                 Some(ch) => ch,
                 None => Channel::new(track, self.sample_rate),
@@ -704,7 +822,10 @@ impl Engine {
                 .tracks
                 .iter()
                 .find(|t| t.id == track.id)
-                .map(|t| t.notes != track.notes || t.audible(old_seq.any_solo()) != track.audible(self.sequence.any_solo()))
+                .map(|t| {
+                    t.notes != track.notes
+                        || t.audible(old_seq.any_solo()) != track.audible(self.sequence.any_solo())
+                })
                 .unwrap_or(true);
             if changed {
                 new_channels[i].instrument.all_notes_off();
@@ -744,7 +865,9 @@ impl Engine {
     }
 
     fn publish(&self) {
-        self.shared.position_bits.store(self.position.to_bits(), Ordering::Relaxed);
+        self.shared
+            .position_bits
+            .store(self.position.to_bits(), Ordering::Relaxed);
         self.shared.playing.store(self.playing, Ordering::Relaxed);
         for (i, ch) in self.channels.iter().enumerate().take(MAX_TRACKS) {
             self.shared.track_peaks[i].store(ch.peak.to_bits(), Ordering::Relaxed);
@@ -754,11 +877,16 @@ impl Engine {
         // Still published in beats: it is a UI countdown ("3, 2, 1"), not a time position.
         let left = match self.count_in {
             Some((total, done)) => {
-                (self.tempo.ticks_for_samples((total - done) as f64, self.sample_rate as f64) / TICKS_PER_BEAT as f64) as f32
+                (self
+                    .tempo
+                    .ticks_for_samples((total - done) as f64, self.sample_rate as f64)
+                    / TICKS_PER_BEAT as f64) as f32
             }
             None => 0.0,
         };
-        self.shared.count_in.store(left.to_bits(), Ordering::Relaxed);
+        self.shared
+            .count_in
+            .store(left.to_bits(), Ordering::Relaxed);
     }
 
     /// Render one block of interleaved stereo. `out.len()` must be even.
@@ -781,12 +909,20 @@ impl Engine {
         let mut cursor = 0usize;
         let mut ev_idx = 0usize;
         while cursor < frames {
-            let next = self.events.get(ev_idx).map(|e| e.offset.min(frames)).unwrap_or(frames);
+            let next = self
+                .events
+                .get(ev_idx)
+                .map(|e| e.offset.min(frames))
+                .unwrap_or(frames);
             if next > cursor {
                 self.render_range(cursor, next);
                 cursor = next;
             }
-            while let Some(e) = self.events.get(ev_idx).filter(|e| e.offset.min(frames) <= cursor) {
+            while let Some(e) = self
+                .events
+                .get(ev_idx)
+                .filter(|e| e.offset.min(frames) <= cursor)
+            {
                 match e.kind {
                     EventKind::Click { accent } => self.click(cursor, accent),
                     kind => self.fire(kind),
@@ -811,7 +947,8 @@ impl Engine {
                     break;
                 }
                 let done = total - self.test_tone.0;
-                let env = (done.min(fade) as f32 / fade as f32).min(self.test_tone.0.min(fade) as f32 / fade as f32);
+                let env = (done.min(fade) as f32 / fade as f32)
+                    .min(self.test_tone.0.min(fade) as f32 / fade as f32);
                 let s = self.test_tone.1.sin() * 0.25 * env;
                 l[i] += s;
                 r[i] += s;
@@ -837,7 +974,9 @@ impl Engine {
     /// While counting in: click on each beat boundary inside this block and, when the count
     /// runs out, start the transport at the exact sample (the remainder of the block plays).
     fn tick_count_in(&mut self, frames: usize) {
-        let Some((total, done)) = self.count_in else { return };
+        let Some((total, done)) = self.count_in else {
+            return;
+        };
         let spb = self.tempo.samples_per_tick(self.sample_rate as f64) * TICKS_PER_BEAT as f64;
         let bar = self.sequence.bar_ticks.max(1);
         let end = (done + frames).min(total);
@@ -881,7 +1020,9 @@ impl Engine {
         let slack = self.input_slack.clamp(floor, ceiling);
         let Some(input) = &mut self.input else {
             block.fill(0.0);
-            self.shared.input_peak.store(0f32.to_bits(), Ordering::Relaxed);
+            self.shared
+                .input_peak
+                .store(0f32.to_bits(), Ordering::Relaxed);
             self.shared.input_backlog.store(0, Ordering::Relaxed);
             return;
         };
@@ -922,12 +1063,15 @@ impl Engine {
         }
 
         let peak = block.iter().fold(0.0f32, |p, s| p.max(s.abs()));
-        self.shared.input_peak.store(peak.to_bits(), Ordering::Relaxed);
+        self.shared
+            .input_peak
+            .store(peak.to_bits(), Ordering::Relaxed);
         // What is still in hand is latency the player hears, so report it rather than the
         // block size alone.
-        self.shared
-            .input_backlog
-            .store(self.input.as_ref().map(|i| i.slots()).unwrap_or(0) as u32, Ordering::Relaxed);
+        self.shared.input_backlog.store(
+            self.input.as_ref().map(|i| i.slots()).unwrap_or(0) as u32,
+            Ordering::Relaxed,
+        );
     }
 
     /// Push this block's input into the take ring while recording and playing.
@@ -940,12 +1084,16 @@ impl Engine {
         }
         if !self.record_started {
             self.record_started = true;
-            self.shared.record_start_tick.store(self.position.to_bits(), Ordering::Relaxed);
+            self.shared
+                .record_start_tick
+                .store(self.position.to_bits(), Ordering::Relaxed);
             self.shared.record_frames.store(0, Ordering::Relaxed);
             self.shared.recording.store(true, Ordering::Relaxed);
         }
         let from = self.late_start.min(frames);
-        let Some(capture) = &mut self.capture else { return };
+        let Some(capture) = &mut self.capture else {
+            return;
+        };
         let mut written = 0u64;
         for &s in &self.input_block[from..frames] {
             // A full ring drops samples rather than blocking: missing the audio deadline would
@@ -955,14 +1103,17 @@ impl Engine {
             }
             written += 1;
         }
-        self.shared.record_frames.fetch_add(written, Ordering::Relaxed);
+        self.shared
+            .record_frames
+            .fetch_add(written, Ordering::Relaxed);
     }
 
     fn render_range(&mut self, from: usize, to: usize) {
         // `seconds_at_tick` is exact and `advance` moves the transport by exactly `frames/sr`
         // seconds, so the block's start time needs no extra state of its own.
         let ctx = BlockContext {
-            time_seconds: self.sequence.tempo_map.seconds_at_tick(self.position) + from as f64 / self.sample_rate as f64,
+            time_seconds: self.sequence.tempo_map.seconds_at_tick(self.position)
+                + from as f64 / self.sample_rate as f64,
             playing: self.playing && from >= self.late_start,
             pool: &self.audio_pool,
             clips: &self.sequence.audio,
@@ -973,7 +1124,10 @@ impl Engine {
         for (ch, track) in self.channels.iter_mut().zip(self.sequence.tracks.iter()) {
             // A muted track whose insert is still ringing keeps rendering: the chain's own tail
             // is as real as an instrument's release.
-            if track.audible(any_solo) || !ch.instrument.is_silent() || !chain_is_silent(&ch.inserts) {
+            if track.audible(any_solo)
+                || !ch.instrument.is_silent()
+                || !chain_is_silent(&ch.inserts)
+            {
                 ch.render_add(l, r, &ctx);
             } else {
                 // Muted and finished releasing: nothing to mix, but the meter still has to fall
@@ -1004,7 +1158,12 @@ impl Engine {
 
     fn fire(&mut self, kind: EventKind) {
         match kind {
-            EventKind::NoteOn { track, pitch, velocity, shape } => {
+            EventKind::NoteOn {
+                track,
+                pitch,
+                velocity,
+                shape,
+            } => {
                 if let Some(ch) = self.channels.get_mut(track) {
                     ch.instrument.note_on(pitch, velocity, shape);
                 }
@@ -1032,7 +1191,10 @@ impl Engine {
         let map = &self.sequence.tempo_map;
         let secs = frames as f64 / self.sample_rate as f64;
         let mut p = if map.is_constant() {
-            position + self.tempo.ticks_for_samples(frames as f64, self.sample_rate as f64)
+            position
+                + self
+                    .tempo
+                    .ticks_for_samples(frames as f64, self.sample_rate as f64)
         } else {
             map.tick_at_seconds(map.seconds_at_tick(position) + secs)
         };
@@ -1074,8 +1236,12 @@ impl Engine {
             let seam_secs = map.seconds_at_tick(loop_end) - t0;
             let seam = base + (seam_secs * sr).round() as usize;
             self.collect_segment(start, loop_end, base);
-            self.events.push(Event { offset: seam.min(frames), kind: EventKind::ReleaseAll });
-            let to = map.tick_at_seconds(map.seconds_at_tick(loop_start) + (avail - seam_secs).max(0.0));
+            self.events.push(Event {
+                offset: seam.min(frames),
+                kind: EventKind::ReleaseAll,
+            });
+            let to =
+                map.tick_at_seconds(map.seconds_at_tick(loop_start) + (avail - seam_secs).max(0.0));
             self.collect_segment(loop_start, to, seam);
         } else {
             self.collect_segment(start, end, base);
@@ -1128,7 +1294,12 @@ impl Engine {
         let seq = Arc::clone(&self.sequence);
         let sr = self.sample_rate as f64;
         let t_from = seq.tempo_map.seconds_at_tick(from);
-        let offset_of = |tick: f64| base_offset + ((seq.tempo_map.seconds_at_tick(tick) - t_from) * sr).round().max(0.0) as usize;
+        let offset_of = |tick: f64| {
+            base_offset
+                + ((seq.tempo_map.seconds_at_tick(tick) - t_from) * sr)
+                    .round()
+                    .max(0.0) as usize
+        };
         let swing = |tick: f64| swing_warp_ticks(tick, seq.swing, seq.swing_grid_ticks);
 
         if self.metronome {
@@ -1139,7 +1310,9 @@ impl Engine {
                 let tick = k * TICKS_PER_BEAT;
                 self.events.push(Event {
                     offset: offset_of(tick as f64),
-                    kind: EventKind::Click { accent: accents_bar(tick, bar) },
+                    kind: EventKind::Click {
+                        accent: accents_bar(tick, bar),
+                    },
                 });
                 k += 1;
             }
@@ -1167,7 +1340,12 @@ impl Engine {
                     if s >= from && s < to {
                         self.events.push(Event {
                             offset: offset_of(s),
-                            kind: EventKind::NoteOn { track: ti, pitch, velocity, shape },
+                            kind: EventKind::NoteOn {
+                                track: ti,
+                                pitch,
+                                velocity,
+                                shape,
+                            },
                         });
                     }
                     // A drum hit is a one-shot: it rings out on its own and has nothing to
@@ -1190,7 +1368,9 @@ impl Engine {
                     for &pc in &chord.pitch_classes {
                         self.events.push(Event {
                             offset: offset_of(s),
-                            kind: EventKind::ChordOn { pitch: (60 + pc.rem_euclid(12)) as u8 },
+                            kind: EventKind::ChordOn {
+                                pitch: (60 + pc.rem_euclid(12)) as u8,
+                            },
                         });
                     }
                 }
@@ -1198,7 +1378,9 @@ impl Engine {
                     for &pc in &chord.pitch_classes {
                         self.events.push(Event {
                             offset: offset_of(e),
-                            kind: EventKind::ChordOff { pitch: (60 + pc.rem_euclid(12)) as u8 },
+                            kind: EventKind::ChordOff {
+                                pitch: (60 + pc.rem_euclid(12)) as u8,
+                            },
                         });
                     }
                 }
@@ -1209,7 +1391,9 @@ impl Engine {
                     for &pc in &chord.pitch_classes {
                         self.events.push(Event {
                             offset: base_offset,
-                            kind: EventKind::ChordOn { pitch: (60 + pc.rem_euclid(12)) as u8 },
+                            kind: EventKind::ChordOn {
+                                pitch: (60 + pc.rem_euclid(12)) as u8,
+                            },
                         });
                     }
                 }
@@ -1242,7 +1426,11 @@ impl Engine {
 
     /// Convenience for tests and offline rendering: build a lookup from track id to index.
     pub fn track_index(&self) -> HashMap<Uuid, usize> {
-        self.channel_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect()
+        self.channel_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect()
     }
 }
 
@@ -1263,12 +1451,10 @@ mod tests {
     fn sequence_with_note(start: i64, len_ticks: i64, loop_len: i64) -> Arc<Sequence> {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = loop_len;
-        model.patterns[0]
-            .notes_by_track
-            .insert(tid, vec![NoteEvent::new(start, len_ticks, 69)]);
-        Arc::new(Sequence::from_pattern(&model, &pid).unwrap())
+        model.patterns[0].notes = vec![NoteEvent::new(start, len_ticks, 69)];
+        Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap())
     }
 
     fn render(engine: &mut Engine, total_frames: usize, block: usize) -> Vec<f32> {
@@ -1284,8 +1470,15 @@ mod tests {
         out
     }
 
-    fn render_stereo(engine: &mut Engine, total_frames: usize, block: usize) -> (Vec<f32>, Vec<f32>) {
-        let (mut left, mut right) = (Vec::with_capacity(total_frames), Vec::with_capacity(total_frames));
+    fn render_stereo(
+        engine: &mut Engine,
+        total_frames: usize,
+        block: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let (mut left, mut right) = (
+            Vec::with_capacity(total_frames),
+            Vec::with_capacity(total_frames),
+        );
         let mut buf = vec![0.0f32; block * 2];
         let mut done = 0;
         while done < total_frames {
@@ -1315,14 +1508,21 @@ mod tests {
             let left = render(&mut e, 30_000, block);
             let onset = first_onset(&left).expect("note should sound");
             // 120 bpm → beat 1 = 22050 samples; the first non-zero sample is one after onset.
-            assert!((onset as i64 - 22_050).abs() <= 2, "block {block}: onset {onset}");
+            assert!(
+                (onset as i64 - 22_050).abs() <= 2,
+                "block {block}: onset {onset}"
+            );
         }
     }
 
     #[test]
     fn note_releases_and_loop_retriggers() {
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(sequence_with_note(0, B / 2, 2 * B)));
+        e.handle(EngineCommand::SetSequence(sequence_with_note(
+            0,
+            B / 2,
+            2 * B,
+        )));
         e.handle(EngineCommand::Play);
         let left = render(&mut e, 44_100 * 2, 512);
         // One loop = 2 beats = 44100 samples. The second onset must land at the loop start.
@@ -1348,10 +1548,12 @@ mod tests {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
         model.tracks[0].muted = true;
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(0, B, 69)]);
+        let pid = model.patterns[0].id;
+        model.patterns[0].notes = vec![NoteEvent::new(0, B, 69)];
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
         e.handle(EngineCommand::Play);
         assert!(render(&mut e, 8_000, 256).iter().all(|s| s.abs() < 1e-6));
     }
@@ -1359,12 +1561,13 @@ mod tests {
     #[test]
     fn drums_and_chord_bed_make_sound() {
         let mut model = ProjectModel::starter();
-        let drums = model.tracks[1].id;
-        let pid = model.patterns[0].id;
-        model.patterns[0].notes_by_track.insert(drums, vec![NoteEvent::new(0, B / 2, 36)]);
+        let pid = model.patterns[1].id; // the drum pattern
+        model.patterns[1].notes = vec![NoteEvent::new(0, B / 2, 36)];
         let shared = Arc::new(Shared::default());
         let mut e = Engine::new(SR, shared.clone(), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
         e.handle(EngineCommand::SetHearChords(true));
         e.handle(EngineCommand::Play);
         let left = render(&mut e, 20_000, 512);
@@ -1374,13 +1577,58 @@ mod tests {
         assert!(shared.master_peak().0 > 0.0);
     }
 
+    /// The starter has to make music on the first press of space, chord bed or not: in the
+    /// song (where a new project opens) and in each of its patterns on its own.
+    #[test]
+    fn starter_makes_sound_without_the_chord_bed() {
+        let model = ProjectModel::starter();
+        let mut sequences = vec![Sequence::from_song(&model)];
+        sequences.extend(
+            model
+                .patterns
+                .iter()
+                .map(|p| Sequence::from_pattern(&model, &p.id, 0).unwrap()),
+        );
+        for seq in sequences {
+            let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+            e.handle(EngineCommand::SetSequence(Arc::new(seq)));
+            e.handle(EngineCommand::Play);
+            assert!(render(&mut e, 20_000, 512).iter().any(|s| s.abs() > 0.05));
+        }
+    }
+
+    /// The bed is a live monitor in song mode too: an empty song with chords is silent until
+    /// it is switched on.
+    #[test]
+    fn the_chord_bed_monitors_the_song_when_switched_on() {
+        let mut model = ProjectModel::starter();
+        model.clips.clear();
+        for on in [false, true] {
+            let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+            e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_song(
+                &model,
+            ))));
+            e.handle(EngineCommand::SetHearChords(on));
+            e.handle(EngineCommand::Play);
+            let loud = render(&mut e, 20_000, 512).iter().any(|s| s.abs() > 0.01);
+            assert_eq!(loud, on, "hear chords {on}");
+        }
+    }
+
     #[test]
     fn audition_plays_then_stops_by_itself() {
         let model = ProjectModel::empty();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100, seconds: 0.8 });
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::Audition {
+            track_id: tid,
+            pitch: 60,
+            velocity: 100,
+            seconds: 0.8,
+        });
         let left = render(&mut e, 44_100 * 2, 512);
         assert!(left[..4000].iter().any(|s| s.abs() > 0.01));
         assert!(left[70_000..].iter().all(|s| s.abs() < 1e-4));
@@ -1394,14 +1642,25 @@ mod tests {
         let model = ProjectModel::empty();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100, seconds: 0.125 });
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::Audition {
+            track_id: tid,
+            pitch: 60,
+            velocity: 100,
+            seconds: 0.125,
+        });
         let left = render(&mut e, SR as usize, 512);
         let sr = SR as usize;
-        let loud = |from: usize, to: usize| left[from..to].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        let loud =
+            |from: usize, to: usize| left[from..to].iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(loud(0, sr / 20) > 0.01, "the preview must speak");
         // Held 0.125 s, then the voice's release (~0.14 s) runs out: silent well before 0.5 s.
-        assert!(loud(sr / 2, sr) < 1e-4, "preview outlived the note it previewed");
+        assert!(
+            loud(sr / 2, sr) < 1e-4,
+            "preview outlived the note it previewed"
+        );
     }
 
     /// A grid finer than the floor still has to be audible rather than clicking off instantly.
@@ -1410,11 +1669,21 @@ mod tests {
         let model = ProjectModel::empty();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::Audition { track_id: tid, pitch: 60, velocity: 100, seconds: 0.0 });
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::Audition {
+            track_id: tid,
+            pitch: 60,
+            velocity: 100,
+            seconds: 0.0,
+        });
         let left = render(&mut e, SR as usize, 512);
         let at_floor = (SR * MIN_AUDITION_SECS * 0.8) as usize;
-        assert!(left[..at_floor].iter().any(|s| s.abs() > 0.01), "a sub-floor preview must still speak");
+        assert!(
+            left[..at_floor].iter().any(|s| s.abs() > 0.01),
+            "a sub-floor preview must still speak"
+        );
     }
 
     #[test]
@@ -1422,9 +1691,9 @@ mod tests {
         use dissonant_core::{Clip, TempoPoint};
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = 16 * B;
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(8 * B, B, 69)]);
+        model.patterns[0].notes = vec![NoteEvent::new(8 * B, B, 69)];
         model.clips = vec![Clip::new(pid, 0, 16 * B)];
         // 120 for 4 beats (2 s), then 60: beat 8 is reached at 2 + 4 = 6 s.
         model.tempo_points = vec![TempoPoint::new(4 * B, 60.0, false)];
@@ -1438,18 +1707,22 @@ mod tests {
         assert!((onset - 44_100 * 6).abs() <= 2, "onset {onset}");
         // The playhead: 6 s + 2000 samples at 60 bpm ≈ beat 8.045.
         let expected = 8.0 + (2_000.0 / 44_100.0) * (60.0 / 60.0);
-        assert!((in_beats(e.position()) - expected).abs() < 1e-6, "{}", e.position());
+        assert!(
+            (in_beats(e.position()) - expected).abs() < 1e-6,
+            "{}",
+            e.position()
+        );
     }
 
     #[test]
     fn muted_notes_are_skipped() {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         let mut n = NoteEvent::new(0, B, 69);
         n.muted = true;
-        model.patterns[0].notes_by_track.insert(tid, vec![n]);
-        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        model.patterns[0].notes = vec![n];
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap());
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(seq));
         e.handle(EngineCommand::Play);
@@ -1461,11 +1734,11 @@ mod tests {
     fn swing_delays_the_offbeat_only() {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = 4 * B;
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(B / 2, B / 4, 69)]);
+        model.patterns[0].notes = vec![NoteEvent::new(B / 2, B / 4, 69)];
         model.swing = 200.0 / 3.0; // triplet feel: the "and" of 1 lands at 2/3 beat
-        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap());
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(seq));
         e.handle(EngineCommand::Play);
@@ -1479,25 +1752,44 @@ mod tests {
     fn metronome_clicks_on_beats_and_count_in_holds_the_transport() {
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(sequence_with_note(B, B, 16 * B)));
-        e.handle(EngineCommand::SetMetronome { on: true, volume: 1.0 });
+        e.handle(EngineCommand::SetMetronome {
+            on: true,
+            volume: 1.0,
+        });
         e.handle(EngineCommand::Play);
         let left = render(&mut e, 22_050 + 100, 256);
         // A click at beat 0 (sample 0) and another at beat 1 (sample 22050).
         assert!(left[..50].iter().any(|s| s.abs() > 1e-4), "click on beat 0");
-        assert!(left[2_500..21_000].iter().all(|s| s.abs() < 1e-4), "silence between clicks (note starts at beat 1)");
-        assert!(left[22_050..22_100].iter().any(|s| s.abs() > 1e-4), "click on beat 1");
+        assert!(
+            left[2_500..21_000].iter().all(|s| s.abs() < 1e-4),
+            "silence between clicks (note starts at beat 1)"
+        );
+        assert!(
+            left[22_050..22_100].iter().any(|s| s.abs() > 1e-4),
+            "click on beat 1"
+        );
 
         // Count-in: one bar (4 beats = 88200 samples) of clicks, then the transport starts.
         let shared = Arc::new(Shared::default());
         let mut e = Engine::new(SR, shared.clone(), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(sequence_with_note(0, B, 16 * B)));
-        e.handle(EngineCommand::SetMetronome { on: false, volume: 1.0 });
+        e.handle(EngineCommand::SetMetronome {
+            on: false,
+            volume: 1.0,
+        });
         e.handle(EngineCommand::PlayWithCountIn { bars: 1 });
         assert!(!e.is_playing());
         let half = render(&mut e, 44_100, 1000);
-        assert!(shared.count_in_beats() > 1.9 && shared.count_in_beats() < 2.1, "{}", shared.count_in_beats());
+        assert!(
+            shared.count_in_beats() > 1.9 && shared.count_in_beats() < 2.1,
+            "{}",
+            shared.count_in_beats()
+        );
         assert_eq!(e.position(), 0.0, "transport held during count-in");
-        assert!(half[..50].iter().any(|s| s.abs() > 1e-4), "count-in clicks even with the metronome off");
+        assert!(
+            half[..50].iter().any(|s| s.abs() > 1e-4),
+            "count-in clicks even with the metronome off"
+        );
         let rest = render(&mut e, 44_100 + 2_000, 1000);
         assert!(e.is_playing());
         assert_eq!(shared.count_in_beats(), 0.0);
@@ -1505,7 +1797,11 @@ mod tests {
         let onset = first_onset(&rest[44_100 - 10..]).unwrap() + 44_100 - 10;
         assert!((onset as i64 - 44_100).abs() <= 2, "onset {onset}");
         // Position advanced only for the part of the block after the start.
-        assert!((in_beats(e.position()) - 2_000.0 / 22_050.0).abs() < 1e-6, "{}", e.position());
+        assert!(
+            (in_beats(e.position()) - 2_000.0 / 22_050.0).abs() < 1e-6,
+            "{}",
+            e.position()
+        );
     }
 
     /// The peak the metronome reaches in the first 2000 samples of each beat. An accented click
@@ -1513,19 +1809,31 @@ mod tests {
     /// apart by level rather than by pitch.
     fn beat_click_peaks(numerator: u32, denominator: u32, beats: usize) -> Vec<f32> {
         let mut model = ProjectModel::empty();
-        model.time_signature = TimeSignature { numerator, denominator };
+        model.time_signature = TimeSignature {
+            numerator,
+            denominator,
+        };
         let pid = model.patterns[0].id;
         // Long enough that nothing loops back inside the window being measured.
         model.patterns[0].length_ticks = (beats as i64 + 2) * B;
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::SetMetronome { on: true, volume: 1.0 });
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::SetMetronome {
+            on: true,
+            volume: 1.0,
+        });
         e.handle(EngineCommand::Play);
         // 120 bpm at 44.1 kHz: one beat is 22050 samples.
         let spb = 22_050usize;
         let left = render(&mut e, beats * spb + 2_000, 256);
         (0..beats)
-            .map(|k| left[k * spb..k * spb + 2_000].iter().fold(0.0f32, |p, s| p.max(s.abs())))
+            .map(|k| {
+                left[k * spb..k * spb + 2_000]
+                    .iter()
+                    .fold(0.0f32, |p, s| p.max(s.abs()))
+            })
             .collect()
     }
 
@@ -1535,13 +1843,26 @@ mod tests {
         // falls on a beat. The accent has to land on the first click of each bar regardless:
         // bars start at beats 0, 3.5, 7, 10.5, 14, so the clicks that open them are 0, 4, 7, 11.
         let peaks = beat_click_peaks(7, 8, 14);
-        let accented: Vec<usize> = peaks.iter().enumerate().filter(|(_, p)| **p > 0.4).map(|(k, _)| k).collect();
+        let accented: Vec<usize> = peaks
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p > 0.4)
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(accented, vec![0, 4, 7, 11], "7/8 accents: {peaks:?}");
-        assert!(peaks.iter().all(|p| *p > 0.25), "every beat still clicks: {peaks:?}");
+        assert!(
+            peaks.iter().all(|p| *p > 0.25),
+            "every beat still clicks: {peaks:?}"
+        );
 
         // 4/4 is the case that always worked, and must keep working.
         let peaks = beat_click_peaks(4, 4, 12);
-        let accented: Vec<usize> = peaks.iter().enumerate().filter(|(_, p)| **p > 0.4).map(|(k, _)| k).collect();
+        let accented: Vec<usize> = peaks
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p > 0.4)
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(accented, vec![0, 4, 8], "4/4 accents: {peaks:?}");
     }
 
@@ -1551,16 +1872,24 @@ mod tests {
         // sounds, once per 4 beats.
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
-        model.patterns[0]
-            .notes_by_track
-            .insert(tid, vec![NoteEvent::new(0, B / 2, 69), NoteEvent::new(4 * B, B / 2, 69)]);
+        let pid = model.patterns[0].id;
+        model.patterns[0].notes = vec![
+            NoteEvent::new(0, B / 2, 69),
+            NoteEvent::new(4 * B, B / 2, 69),
+        ];
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::SetLoop { start: (4 * B) as f64, end: (8 * B) as f64 });
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::SetLoop {
+            start: (4 * B) as f64,
+            end: (8 * B) as f64,
+        });
         e.handle(EngineCommand::Seek { tick: 0.0 });
         assert_eq!(e.position(), 0.0, "seeking before the loop is allowed");
-        e.handle(EngineCommand::Seek { tick: (4 * B) as f64 });
+        e.handle(EngineCommand::Seek {
+            tick: (4 * B) as f64,
+        });
         e.handle(EngineCommand::Play);
         // 4 beats = 88200 samples per loop pass; render two passes.
         let left = render(&mut e, 88_200 * 2 + 100, 512);
@@ -1576,11 +1905,23 @@ mod tests {
         let model = ProjectModel::empty();
         let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
-        e.handle(EngineCommand::NoteOn { track_id: tid, pitch: 60, velocity: 100 });
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::NoteOn {
+            track_id: tid,
+            pitch: 60,
+            velocity: 100,
+        });
         let held = render(&mut e, 44_100 * 2, 512);
-        assert!(held[80_000..].iter().any(|s| s.abs() > 0.01), "a held note must not auto-release");
-        e.handle(EngineCommand::NoteOff { track_id: tid, pitch: 60 });
+        assert!(
+            held[80_000..].iter().any(|s| s.abs() > 0.01),
+            "a held note must not auto-release"
+        );
+        e.handle(EngineCommand::NoteOff {
+            track_id: tid,
+            pitch: 60,
+        });
         let tail = render(&mut e, 44_100, 512);
         assert!(tail[30_000..].iter().all(|s| s.abs() < 1e-4));
     }
@@ -1590,9 +1931,13 @@ mod tests {
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         let seq = sequence_with_note(0, B, 4 * B);
         e.handle(EngineCommand::SetSequence(seq.clone()));
-        e.handle(EngineCommand::Seek { tick: (9 * B) as f64 });
+        e.handle(EngineCommand::Seek {
+            tick: (9 * B) as f64,
+        });
         assert_eq!(e.position(), 0.0);
-        e.handle(EngineCommand::Seek { tick: 2.5 * B as f64 });
+        e.handle(EngineCommand::Seek {
+            tick: 2.5 * B as f64,
+        });
         assert_eq!(e.position(), 2.5 * B as f64);
         e.handle(EngineCommand::SetSequence(seq.clone()));
         assert_eq!(e.track_index().len(), 1);
@@ -1612,10 +1957,10 @@ mod tests {
     fn sequence_with(note: NoteEvent, loop_len: i64) -> Arc<Sequence> {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = loop_len;
-        model.patterns[0].notes_by_track.insert(tid, vec![note]);
-        Arc::new(Sequence::from_pattern(&model, &pid).unwrap())
+        model.patterns[0].notes = vec![note];
+        Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap())
     }
 
     fn playing_engine(note: NoteEvent, loop_len: i64) -> Engine {
@@ -1633,22 +1978,34 @@ mod tests {
         // 120 bpm: one beat is 22050 samples, so a quarter-beat shift is 5512.5, rounded.
         let mut early = NoteEvent::new(B, B / 2, 69);
         early.shift_ticks = -B / 4;
-        assert_eq!(note_on_offsets(&mut playing_engine(early, 8 * B), 44_100), vec![16_538]);
+        assert_eq!(
+            note_on_offsets(&mut playing_engine(early, 8 * B), 44_100),
+            vec![16_538]
+        );
 
         let mut late = NoteEvent::new(B, B / 2, 69);
         late.shift_ticks = B / 4;
-        assert_eq!(note_on_offsets(&mut playing_engine(late, 8 * B), 44_100), vec![27_563]);
+        assert_eq!(
+            note_on_offsets(&mut playing_engine(late, 8 * B), 44_100),
+            vec![27_563]
+        );
 
         // The note itself never moved: shifting it did not renumber its grid position.
         let mut plain = NoteEvent::new(B, B / 2, 69);
-        assert_eq!(note_on_offsets(&mut playing_engine(plain.clone(), 8 * B), 44_100), vec![22_050]);
+        assert_eq!(
+            note_on_offsets(&mut playing_engine(plain.clone(), 8 * B), 44_100),
+            vec![22_050]
+        );
         plain.shift_ticks = -B / 4;
         assert_eq!(plain.start_tick, B);
 
         // Negative shift at the very start clamps to tick 0 rather than going missing.
         let mut clamped = NoteEvent::new(0, B / 2, 69);
         clamped.shift_ticks = -2 * B;
-        assert_eq!(note_on_offsets(&mut playing_engine(clamped, 8 * B), 44_100), vec![0]);
+        assert_eq!(
+            note_on_offsets(&mut playing_engine(clamped, 8 * B), 44_100),
+            vec![0]
+        );
 
         // And it is audible there: an onset at the top of the block, not silence.
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
@@ -1673,7 +2030,10 @@ mod tests {
 
         // Zero repeats is one strike, and the note's length is untouched by the split.
         let plain = NoteEvent::new(0, 2 * B, 69);
-        assert_eq!(note_on_offsets(&mut playing_engine(plain, 8 * B), 80_000), vec![0]);
+        assert_eq!(
+            note_on_offsets(&mut playing_engine(plain, 8 * B), 80_000),
+            vec![0]
+        );
 
         // Repeats ride the shift with the note.
         let mut shifted = NoteEvent::new(0, 2 * B, 69);
@@ -1693,7 +2053,9 @@ mod tests {
         note.repeats = 3;
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(sequence_with(note, 8 * B)));
-        e.handle(EngineCommand::Seek { tick: (B + B / 4) as f64 });
+        e.handle(EngineCommand::Seek {
+            tick: (B + B / 4) as f64,
+        });
         e.handle(EngineCommand::Play);
         // The third strike runs [1.0, 1.5): exactly one resumed note-on, at the block start,
         // and the next scheduled strike at beat 1.5 lands a quarter-beat later.
@@ -1709,21 +2071,27 @@ mod tests {
             let mut model = ProjectModel::empty();
             model.tracks[0].voice = "saw".into();
             model.tracks[0].tone = 2_000.0;
-            let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+            let pid = model.patterns[0].id;
             model.patterns[0].length_ticks = 8 * B;
             let mut note = NoteEvent::new(0, 2 * B, 69);
             note.pan = pan;
             note.mod_x = mod_x;
-            model.patterns[0].notes_by_track.insert(tid, vec![note]);
+            model.patterns[0].notes = vec![note];
             let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-            e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+            e.handle(EngineCommand::SetSequence(Arc::new(
+                Sequence::from_pattern(&model, &pid, 0).unwrap(),
+            )));
             e.handle(EngineCommand::Play);
             render_stereo(&mut e, 20_000, 512)
         };
 
         let (l, r) = shaped(0.0, 0.5);
         assert!(rms(&l) > 0.001, "a hard-left note must reach the mix");
-        assert!(rms(&r) < rms(&l) * 1e-5, "hard left bled into the right bus: {}", rms(&r));
+        assert!(
+            rms(&r) < rms(&l) * 1e-5,
+            "hard left bled into the right bus: {}",
+            rms(&r)
+        );
 
         let (l, r) = shaped(0.5, 0.5);
         assert_eq!(l, r, "a centred note must land identically on both buses");
@@ -1732,7 +2100,10 @@ mod tests {
         // own tone to sweep around.
         let bright = rms(&shaped(0.5, 0.5).0);
         let dark = rms(&shaped(0.5, 0.0).0);
-        assert!(dark < bright * 0.5, "mod_x 0 was not darker through the mix: {dark} vs {bright}");
+        assert!(
+            dark < bright * 0.5,
+            "mod_x 0 was not darker through the mix: {dark} vs {bright}"
+        );
     }
 
     /// Swing is applied to an integer tick, so the same musical position has to resolve to
@@ -1741,13 +2112,13 @@ mod tests {
     fn a_swung_sixteenth_lands_on_the_same_sample_every_pass() {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = 4 * B;
         // The second sixteenth of beat 1: the note swing actually moves.
-        model.patterns[0].notes_by_track.insert(tid, vec![NoteEvent::new(B / 4, B / 4, 69)]);
+        model.patterns[0].notes = vec![NoteEvent::new(B / 4, B / 4, 69)];
         model.swing = 75.0; // hard shuffle
         model.swing_grid_ticks = B / 4;
-        let seq = Arc::new(Sequence::from_pattern(&model, &pid).unwrap());
+        let seq = Arc::new(Sequence::from_pattern(&model, &pid, 0).unwrap());
 
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         e.handle(EngineCommand::SetSequence(Arc::clone(&seq)));
@@ -1756,12 +2127,20 @@ mod tests {
         // Tick 240 warps to 360 = 0.375 beat = 8268.75 samples at 120 bpm.
         assert_eq!(first, vec![8_269]);
         e.handle(EngineCommand::Seek { tick: 0.0 });
-        assert_eq!(note_on_offsets(&mut e, 44_100), first, "the same pass must schedule identically");
+        assert_eq!(
+            note_on_offsets(&mut e, 44_100),
+            first,
+            "the same pass must schedule identically"
+        );
 
         let mut other = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
         other.handle(EngineCommand::SetSequence(seq));
         other.handle(EngineCommand::Play);
-        assert_eq!(note_on_offsets(&mut other, 44_100), first, "a fresh engine must agree");
+        assert_eq!(
+            note_on_offsets(&mut other, 44_100),
+            first,
+            "a fresh engine must agree"
+        );
     }
 
     /// 960 PPQ divides by three, so eighth-note triplets are exact ticks (320) and land on
@@ -1770,13 +2149,17 @@ mod tests {
     fn a_triplet_grid_position_is_sample_exact() {
         let mut model = ProjectModel::empty();
         model.tracks[0].voice = "sine".into();
-        let (tid, pid) = (model.tracks[0].id, model.patterns[0].id);
+        let pid = model.patterns[0].id;
         model.patterns[0].length_ticks = 4 * B;
         assert_eq!(B % 3, 0, "a triplet has to be an integer number of ticks");
-        let triplets: Vec<NoteEvent> = (0..3).map(|i| NoteEvent::new(i * (B / 3), B / 3, 69)).collect();
-        model.patterns[0].notes_by_track.insert(tid, triplets);
+        let triplets: Vec<NoteEvent> = (0..3)
+            .map(|i| NoteEvent::new(i * (B / 3), B / 3, 69))
+            .collect();
+        model.patterns[0].notes = triplets;
         let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
-        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_pattern(&model, &pid).unwrap())));
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
         e.handle(EngineCommand::Play);
         // 22050 samples per beat: thirds of it are 7350 samples apart, with no remainder.
         assert_eq!(note_on_offsets(&mut e, 44_100), vec![0, 7_350, 14_700]);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { beatsPerBar, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { DRUM_KIT, NOTE_PROPS, noteProp, TICKS_PER_BEAT, ticksToBeats, trackColor, trackLoop, type NoteEvent, type NoteProp, uuid } from "../types";
+import { selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { DRUM_KIT, NOTE_PROPS, noteProp, TICKS_PER_BEAT, trackColor, type NoteEvent, type NoteProp, uuid } from "../types";
 import {
   clearRow,
   euclideanRow,
@@ -12,6 +12,7 @@ import {
   seededRng,
   setNoteProp,
   stepIndexOf,
+  tileGhost,
   type StepGrid,
 } from "../noteEditing";
 import { BASE_BEAT_W } from "./ChordLane";
@@ -43,7 +44,8 @@ const numStyle: React.CSSProperties = {
  * right-click/drag removes. Hits are ordinary notes (pitch = kit note), which is why the graph
  * editor below the grid edits exactly the properties the piano roll's lane does — in FL a step
  * *is* a note, and here it already was one. The grid cell stays the step's identity; `shift`
- * only leans how it plays, so a dragged-early hat still lives in its own cell.
+ * only leans how it plays, so a dragged-early hat still lives in its own cell. A ghost pattern
+ * shows as outlined steps (another drum pattern) or an onset row (a melodic one).
  */
 export function DrumGrid() {
   const pattern = useStore(selectedPattern);
@@ -54,10 +56,13 @@ export function DrumGrid() {
   const zoom = useStore((s) => s.zoom);
   const dispatch = useStore((s) => s.dispatch);
   const audition = useStore((s) => s.audition);
-  const bpb = useStore(beatsPerBar);
   const laneProp = useStore((s) => s.laneProp);
   const setLaneProp = useStore((s) => s.setLaneProp);
   const defaultVelocity = useStore((s) => s.settings.editing.defaultVelocity);
+  const ghostPatternId = useStore((s) => s.ghostPatternId);
+  const ghostPattern = useStore((s) => s.snapshot?.model.patterns.find((p) => p.id === ghostPatternId) ?? null);
+  const ghostTrack = useStore((s) => (ghostPattern ? (s.snapshot?.model.tracks.find((t) => t.id === ghostPattern.trackId) ?? null) : null));
+  const ghostIdx = useStore((s) => (ghostTrack ? (s.snapshot?.model.tracks.indexOf(ghostTrack) ?? 0) : 0));
   const dragMode = useRef<"add" | "remove" | null>(null);
   const [working, setWorking] = useState<NoteEvent[] | null>(null);
   /** Which kit row the graph editor and the step tools act on. */
@@ -69,16 +74,16 @@ export function DrumGrid() {
   const commitLabel = useRef("edit drum steps");
 
   const color = track ? trackColor(track, idx) : "#8a8a93";
-  const committed = (pattern && track ? pattern.notesByTrack[track.id] : undefined) ?? NO_NOTES;
+  const committed = (pattern ? pattern.notes : undefined) ?? NO_NOTES;
   const notes = working ?? committed;
   const pxPerTick = (BASE_BEAT_W * zoom) / TICKS_PER_BEAT;
   const stepTicks = Math.min(TICKS_PER_BEAT / 2, Math.max(TICKS_PER_BEAT / 8, noteLength));
-  // The grid is one turn of the track's loop; a shorter loop repeats under the pattern.
-  const turn = pattern && track ? trackLoop(pattern, track.id) : 4 * TICKS_PER_BEAT;
-  const steps = Math.max(1, Math.round(turn / stepTicks));
+  /** The grid spans the whole pattern: one step per `stepTicks`. */
+  const totalTicks = pattern?.lengthTicks ?? 4 * TICKS_PER_BEAT;
+  const steps = Math.max(1, Math.round(totalTicks / stepTicks));
   const cellW = stepTicks * pxPerTick - 2;
   const pitchW = cellW + CELL_GAP;
-  const currentStep = Math.floor((playhead % turn) / stepTicks);
+  const currentStep = Math.floor((playhead % totalTicks) / stepTicks);
   const graphW = GUTTER + CELL_PAD + steps * pitchW;
   const spec = NOTE_PROPS[laneProp];
 
@@ -153,14 +158,26 @@ export function DrumGrid() {
     right(spec.format(spec.min), GRAPH_H - GRAPH_PAD);
   }, [rowCells, laneProp, spec, steps, cellW, pitchW, graphW, currentStep, color]);
 
+  const ghostNotes = useMemo(
+    () => (ghostPattern && ghostPattern.id !== pattern?.id ? tileGhost(ghostPattern.notes, ghostPattern.lengthTicks, totalTicks) : []),
+    [ghostPattern, pattern?.id, totalTicks],
+  );
+
   if (!pattern || !track) return null;
+  const ghostColor = ghostTrack ? trackColor(ghostTrack, ghostIdx) : "var(--text-4)";
+  // Ghost lookups per step: kit hits by pitch (a drum ghost), or onsets (a melodic ghost).
+  const ghostIsDrum = !!ghostTrack?.isDrum;
+  const stepOf = (tick: number) => Math.floor(tick / stepTicks);
+  const ghostHits = new Set(ghostIsDrum ? ghostNotes.map((n) => `${n.pitch}:${stepOf(n.startTick)}`) : []);
+  const ghostOnsets = new Map<number, number>();
+  if (!ghostIsDrum) for (const n of ghostNotes) ghostOnsets.set(stepOf(n.startTick), (ghostOnsets.get(stepOf(n.startTick)) ?? 0) + 1);
 
   const find = (list: NoteEvent[], pitch: number, step: number) =>
     list.find((n) => n.pitch === pitch && n.startTick === step * stepTicks);
 
   const commit = () => {
     if (working) {
-      void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: working }, false, commitLabel.current);
+      void dispatch({ type: "setNotes", patternId: pattern.id, notes: working }, false, commitLabel.current);
       setWorking(null);
     }
     dragMode.current = null;
@@ -170,7 +187,7 @@ export function DrumGrid() {
   /** One-shot step tool: a whole new row in a single command, so it is a single undo step. */
   const run = (next: NoteEvent[], label: string) => {
     if (next === committed) return;
-    void dispatch({ type: "setNotes", patternId: pattern.id, trackId: track.id, notes: next }, false, label);
+    void dispatch({ type: "setNotes", patternId: pattern.id, notes: next }, false, label);
   };
 
   const paint = (pitch: number, step: number) => {
@@ -241,6 +258,17 @@ export function DrumGrid() {
 
   return (
     <div className="drumgrid" onPointerUp={commit} onPointerLeave={commit}>
+      {ghostPattern && !ghostIsDrum && ghostNotes.length > 0 && (
+        <div className="drumrow ghostrow" title={`${ghostPattern.name}: where its notes start · the ghost`}>
+          <span className="dname">ghost</span>
+          <div className="drumcells">
+            {Array.from({ length: steps }, (_, step) => {
+              const n = ghostOnsets.get(step) ?? 0;
+              return <div key={step} className={`gstep${n ? " on" : ""}`} style={{ width: cellW, background: n ? ghostColor : undefined, opacity: n ? Math.min(0.75, 0.3 + n * 0.15) : undefined }} />;
+            })}
+          </div>
+        </div>
+      )}
       {DRUM_KIT.map((drum) => {
         const picked = drum.pitch === rowPitch;
         return (
@@ -264,6 +292,7 @@ export function DrumGrid() {
             <div className="drumcells">
               {Array.from({ length: steps }, (_, step) => {
                 const hit = find(notes, drum.pitch, step);
+                const ghost = !hit && ghostHits.has(`${drum.pitch}:${step}`);
                 const onBeat = (step * stepTicks) % TICKS_PER_BEAT === 0;
                 // A hit shows how hard it plays, and leans by its shift — at most one cell, so the
                 // slot it sits in still reads as the step it is.
@@ -271,8 +300,8 @@ export function DrumGrid() {
                 return (
                   <div
                     key={step}
-                    className={`step${hit ? " on" : ""}${onBeat ? " beat" : ""}${step === currentStep ? " now" : ""}`}
-                    style={{ width: cellW }}
+                    className={`step${hit ? " on" : ""}${onBeat ? " beat" : ""}${step === currentStep ? " now" : ""}${ghost ? " ghost" : ""}`}
+                    style={{ width: cellW, ...(ghost ? { borderColor: ghostColor } : {}) }}
                     onPointerDown={(e) => {
                       e.preventDefault();
                       commitLabel.current = "edit drum steps";
@@ -376,9 +405,9 @@ export function DrumGrid() {
         />
       </div>
 
+      {notes.length === 0 && <div className="help emptyline">no hits yet: click a step to add one. kick on 1 and 3, snare on 2 and 4 is a fine place to start.</div>}
       <div className="help">
         left-click / drag: add hits · right-click / drag: remove · step {stepTicks === TICKS_PER_BEAT / 2 ? "1/8" : stepTicks === TICKS_PER_BEAT / 4 ? "1/16" : "1/32"} follows snap
-        {turn < pattern.lengthTicks && ` · ${+(ticksToBeats(turn) / bpb).toFixed(2)}-bar loop, repeated across the pattern`}
         {` · graph: drag to set ${spec.label} on ${selectedDrum.name}, ⌥-drag to ramp`}
       </div>
     </div>

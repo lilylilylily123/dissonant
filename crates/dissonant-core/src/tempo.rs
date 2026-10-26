@@ -65,7 +65,13 @@ pub struct TempoPoint {
 
 impl TempoPoint {
     pub fn new(tick: i64, bpm: f64, ramp: bool) -> Self {
-        TempoPoint { id: Uuid::new_v4(), tick, bpm, ramp, legacy_beat: None }
+        TempoPoint {
+            id: Uuid::new_v4(),
+            tick,
+            bpm,
+            ramp,
+            legacy_beat: None,
+        }
     }
 
     /// The beat field from an older file folded into `tick`.
@@ -108,7 +114,13 @@ impl TempoMap {
     }
 
     pub fn new(base_bpm: f64, points: &[TempoPoint]) -> Self {
-        let clamp = |b: f64| if b.is_finite() { b.clamp(Tempo::MIN_BPM, Tempo::MAX_BPM) } else { 120.0 };
+        let clamp = |b: f64| {
+            if b.is_finite() {
+                b.clamp(Tempo::MIN_BPM, Tempo::MAX_BPM)
+            } else {
+                120.0
+            }
+        };
         let mut pts: Vec<&TempoPoint> = points.iter().filter(|p| p.tick >= 0).collect();
         pts.sort_by_key(|p| p.tick);
         pts.dedup_by(|a, b| a.tick == b.tick);
@@ -125,7 +137,12 @@ impl TempoMap {
         let mut seconds = 0.0;
         for (i, &(beat, bpm, _)) in anchors.iter().enumerate() {
             let ramp_to = anchors.get(i + 1).filter(|n| n.2).map(|n| (n.0, n.1));
-            segments.push(Segment { beat, seconds, bpm, ramp_to });
+            segments.push(Segment {
+                beat,
+                seconds,
+                bpm,
+                ramp_to,
+            });
             if let Some(&(nb, nbpm, ramp)) = anchors.get(i + 1) {
                 seconds += segment_seconds(beat, bpm, nb, if ramp { nbpm } else { bpm });
             }
@@ -143,12 +160,18 @@ impl TempoMap {
     }
 
     fn segment_at_beat(&self, beat: f64) -> &Segment {
-        let i = self.segments.partition_point(|s| s.beat <= beat).saturating_sub(1);
+        let i = self
+            .segments
+            .partition_point(|s| s.beat <= beat)
+            .saturating_sub(1);
         &self.segments[i]
     }
 
     fn segment_at_seconds(&self, seconds: f64) -> &Segment {
-        let i = self.segments.partition_point(|s| s.seconds <= seconds).saturating_sub(1);
+        let i = self
+            .segments
+            .partition_point(|s| s.seconds <= seconds)
+            .saturating_sub(1);
         &self.segments[i]
     }
 
@@ -190,7 +213,12 @@ impl TempoMap {
                 let k = (ebpm - s.bpm) / len; // bpm per beat
                 let bpm = s.bpm * (dt * k / 60.0).exp();
                 let b = s.beat + (bpm - s.bpm) / k;
-                b.min(eb).max(s.beat) + if b > eb { (dt - segment_seconds(s.beat, s.bpm, eb, ebpm)) * ebpm / 60.0 } else { 0.0 }
+                b.min(eb).max(s.beat)
+                    + if b > eb {
+                        (dt - segment_seconds(s.beat, s.bpm, eb, ebpm)) * ebpm / 60.0
+                    } else {
+                        0.0
+                    }
             }
             _ => s.beat + dt * s.bpm / 60.0,
         };
@@ -305,7 +333,11 @@ mod tests {
         // Inverse round-trips inside and past the ramp.
         for b in [0.0, 1.0, 2.5, 4.0, 6.0, 9.5] {
             let t = ramp.seconds_at_tick(beat(b));
-            assert!((ramp.tick_at_seconds(t) - beat(b)).abs() < 1e-4, "tick {} → {t} s", beat(b));
+            assert!(
+                (ramp.tick_at_seconds(t) - beat(b)).abs() < 1e-4,
+                "tick {} → {t} s",
+                beat(b)
+            );
         }
         // Unsorted and duplicate points are tolerated; a point at 0 replaces the base.
         let messy = TempoMap::new(

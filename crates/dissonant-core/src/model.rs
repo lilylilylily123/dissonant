@@ -1,25 +1,26 @@
-//! The serializable project. Schema v9 moves every musical time from f64 beats to integer
-//! ticks at [`crate::ticks::TICKS_PER_BEAT`] PPQ and adds ordered effect [`Insert`] chains per
-//! track and on the master, on top of v8's audio tracks — audio sources, audio clips and a
-//! guitar rig per track — v7's optional plugin per track, v6's per-track and per-chord-track
-//! loop lengths inside a pattern, and v5's velocity and persisted master settings.
-//!
-//! Insert chains needed no version of their own: `inserts` and `masterInserts` default to
-//! empty, so a v9 file written before them opens unchanged and a project without effects is
-//! written without the keys.
+//! The serializable project. Schema v10 gives every pattern one owning track, moves the chord
+//! progression onto the song timeline and gives the song an explicit length, on top of v9's
+//! integer ticks at [`crate::ticks::TICKS_PER_BEAT`] PPQ and ordered effect [`Insert`] chains,
+//! v8's audio tracks — audio sources, audio clips and a guitar rig per track — v7's optional
+//! plugin per track and v5's velocity and persisted master settings.
 //!
 //! Decoding is tolerant: every field has a `serde(default)` so a file missing a later-added
 //! field still opens. JSON keys are camelCase to match the previous app's files. Files written
 //! before v9 carry the old `…Beat`/`…Beats` keys; each of those decodes into a `legacy_*` twin
 //! that [`ProjectModel::normalized`] converts to ticks and clears, so nothing downstream ever
-//! sees beats and nothing is ever written back out in them.
+//! sees beats and nothing is ever written back out in them. Files written before v10 carry
+//! patterns that hold every track's notes and their own chords; [`ProjectModel::migrated_v10`]
+//! splits each into one pattern per track and lifts its chords onto the song.
 
 use crate::ticks::{beats_to_ticks, TICKS_PER_BEAT};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
+
+/// Song length of a new project when nothing else says, in bars.
+pub const DEFAULT_SONG_BARS: u32 = 32;
 
 /// A diatonic scale family. Expanded later (modes, harmonic minor, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -86,7 +87,12 @@ pub struct ChordEvent {
 }
 
 impl ChordEvent {
-    pub fn new(start_tick: i64, length_ticks: i64, pitch_classes: Vec<i32>, name: Option<String>) -> Self {
+    pub fn new(
+        start_tick: i64,
+        length_ticks: i64,
+        pitch_classes: Vec<i32>,
+        name: Option<String>,
+    ) -> Self {
         ChordEvent {
             id: Uuid::new_v4(),
             start_tick,
@@ -350,7 +356,13 @@ pub struct Insert {
 impl Insert {
     /// A freshly chosen effect: enabled, with no state of its own yet.
     pub fn new(uid: impl Into<String>, name: impl Into<String>) -> Self {
-        Insert { id: Uuid::new_v4(), uid: uid.into(), name: name.into(), enabled: true, state: None }
+        Insert {
+            id: Uuid::new_v4(),
+            uid: uid.into(),
+            name: name.into(),
+            enabled: true,
+            state: None,
+        }
     }
 }
 
@@ -558,8 +570,16 @@ impl AudioClip {
         if self.start_tick < 0 || self.length_seconds <= 0.0 {
             return None;
         }
-        self.offset_seconds = if self.offset_seconds.is_finite() { self.offset_seconds.max(0.0) } else { 0.0 };
-        self.gain = if self.gain.is_finite() { self.gain.clamp(0.0, MAX_CLIP_GAIN) } else { 1.0 };
+        self.offset_seconds = if self.offset_seconds.is_finite() {
+            self.offset_seconds.max(0.0)
+        } else {
+            0.0
+        };
+        self.gain = if self.gain.is_finite() {
+            self.gain.clamp(0.0, MAX_CLIP_GAIN)
+        } else {
+            1.0
+        };
         let half = self.length_seconds * 0.5;
         self.fade_in_seconds = clamp_fade(self.fade_in_seconds, half);
         self.fade_out_seconds = clamp_fade(self.fade_out_seconds, half);
@@ -632,22 +652,62 @@ pub struct Gate {
 
 impl Default for Gate {
     fn default() -> Self {
-        Gate { on: true, threshold_db: -55.0, release_ms: 120.0 }
+        Gate {
+            on: true,
+            threshold_db: -55.0,
+            release_ms: 120.0,
+        }
     }
 }
 
 /// One stompbox. Every knob is 0…10 like the real thing, except times and rates, which are in
 /// their own units so the UI can print them.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Pedal {
-    Comp { on: bool, sustain: f64, level: f64 },
-    Drive { on: bool, drive: f64, tone: f64, level: f64 },
-    Wah { on: bool, sensitivity: f64, range: f64 },
-    Chorus { on: bool, rate_hz: f64, depth: f64, mix: f64 },
-    Phaser { on: bool, rate_hz: f64, depth: f64, feedback: f64 },
-    Tremolo { on: bool, rate_hz: f64, depth: f64 },
-    Delay { on: bool, time_ms: f64, feedback: f64, mix: f64 },
+    Comp {
+        on: bool,
+        sustain: f64,
+        level: f64,
+    },
+    Drive {
+        on: bool,
+        drive: f64,
+        tone: f64,
+        level: f64,
+    },
+    Wah {
+        on: bool,
+        sensitivity: f64,
+        range: f64,
+    },
+    Chorus {
+        on: bool,
+        rate_hz: f64,
+        depth: f64,
+        mix: f64,
+    },
+    Phaser {
+        on: bool,
+        rate_hz: f64,
+        depth: f64,
+        feedback: f64,
+    },
+    Tremolo {
+        on: bool,
+        rate_hz: f64,
+        depth: f64,
+    },
+    Delay {
+        on: bool,
+        time_ms: f64,
+        feedback: f64,
+        mix: f64,
+    },
 }
 
 /// Which stompbox, without its settings. The UI builds its "add pedal" menu from this.
@@ -701,36 +761,109 @@ impl Pedal {
     /// A fresh pedal of `kind`, switched on, every knob at noon.
     pub fn of(kind: PedalKind) -> Pedal {
         match kind {
-            PedalKind::Comp => Pedal::Comp { on: true, sustain: 5.0, level: 5.0 },
-            PedalKind::Drive => Pedal::Drive { on: true, drive: 5.0, tone: 5.0, level: 5.0 },
-            PedalKind::Wah => Pedal::Wah { on: true, sensitivity: 5.0, range: 5.0 },
-            PedalKind::Chorus => Pedal::Chorus { on: true, rate_hz: 1.2, depth: 5.0, mix: 5.0 },
-            PedalKind::Phaser => Pedal::Phaser { on: true, rate_hz: 0.8, depth: 5.0, feedback: 4.0 },
-            PedalKind::Tremolo => Pedal::Tremolo { on: true, rate_hz: 5.0, depth: 5.0 },
-            PedalKind::Delay => Pedal::Delay { on: true, time_ms: 350.0, feedback: 3.0, mix: 3.0 },
+            PedalKind::Comp => Pedal::Comp {
+                on: true,
+                sustain: 5.0,
+                level: 5.0,
+            },
+            PedalKind::Drive => Pedal::Drive {
+                on: true,
+                drive: 5.0,
+                tone: 5.0,
+                level: 5.0,
+            },
+            PedalKind::Wah => Pedal::Wah {
+                on: true,
+                sensitivity: 5.0,
+                range: 5.0,
+            },
+            PedalKind::Chorus => Pedal::Chorus {
+                on: true,
+                rate_hz: 1.2,
+                depth: 5.0,
+                mix: 5.0,
+            },
+            PedalKind::Phaser => Pedal::Phaser {
+                on: true,
+                rate_hz: 0.8,
+                depth: 5.0,
+                feedback: 4.0,
+            },
+            PedalKind::Tremolo => Pedal::Tremolo {
+                on: true,
+                rate_hz: 5.0,
+                depth: 5.0,
+            },
+            PedalKind::Delay => Pedal::Delay {
+                on: true,
+                time_ms: 350.0,
+                feedback: 3.0,
+                mix: 3.0,
+            },
         }
     }
 
     /// Every knob finite and in range, or `None` if any was NaN.
     pub fn sanitized(self) -> Option<Pedal> {
         let p = match self {
-            Pedal::Comp { on, sustain, level } => Pedal::Comp { on, sustain: knob(sustain)?, level: knob(level)? },
-            Pedal::Drive { on, drive, tone, level } => {
-                Pedal::Drive { on, drive: knob(drive)?, tone: knob(tone)?, level: knob(level)? }
-            }
-            Pedal::Wah { on, sensitivity, range } => {
-                Pedal::Wah { on, sensitivity: knob(sensitivity)?, range: knob(range)? }
-            }
-            Pedal::Chorus { on, rate_hz, depth, mix } => {
-                Pedal::Chorus { on, rate_hz: ranged(rate_hz, 0.1, 8.0)?, depth: knob(depth)?, mix: knob(mix)? }
-            }
-            Pedal::Phaser { on, rate_hz, depth, feedback } => {
-                Pedal::Phaser { on, rate_hz: ranged(rate_hz, 0.1, 8.0)?, depth: knob(depth)?, feedback: knob(feedback)? }
-            }
-            Pedal::Tremolo { on, rate_hz, depth } => {
-                Pedal::Tremolo { on, rate_hz: ranged(rate_hz, 0.1, 14.0)?, depth: knob(depth)? }
-            }
-            Pedal::Delay { on, time_ms, feedback, mix } => Pedal::Delay {
+            Pedal::Comp { on, sustain, level } => Pedal::Comp {
+                on,
+                sustain: knob(sustain)?,
+                level: knob(level)?,
+            },
+            Pedal::Drive {
+                on,
+                drive,
+                tone,
+                level,
+            } => Pedal::Drive {
+                on,
+                drive: knob(drive)?,
+                tone: knob(tone)?,
+                level: knob(level)?,
+            },
+            Pedal::Wah {
+                on,
+                sensitivity,
+                range,
+            } => Pedal::Wah {
+                on,
+                sensitivity: knob(sensitivity)?,
+                range: knob(range)?,
+            },
+            Pedal::Chorus {
+                on,
+                rate_hz,
+                depth,
+                mix,
+            } => Pedal::Chorus {
+                on,
+                rate_hz: ranged(rate_hz, 0.1, 8.0)?,
+                depth: knob(depth)?,
+                mix: knob(mix)?,
+            },
+            Pedal::Phaser {
+                on,
+                rate_hz,
+                depth,
+                feedback,
+            } => Pedal::Phaser {
+                on,
+                rate_hz: ranged(rate_hz, 0.1, 8.0)?,
+                depth: knob(depth)?,
+                feedback: knob(feedback)?,
+            },
+            Pedal::Tremolo { on, rate_hz, depth } => Pedal::Tremolo {
+                on,
+                rate_hz: ranged(rate_hz, 0.1, 14.0)?,
+                depth: knob(depth)?,
+            },
+            Pedal::Delay {
+                on,
+                time_ms,
+                feedback,
+                mix,
+            } => Pedal::Delay {
                 on,
                 time_ms: ranged(time_ms, 20.0, 1200.0)?,
                 feedback: knob(feedback)?,
@@ -788,7 +921,12 @@ pub enum AmpModel {
 }
 
 impl AmpModel {
-    pub const ALL: [AmpModel; 4] = [AmpModel::Clean, AmpModel::Crunch, AmpModel::Lead, AmpModel::Fuzz];
+    pub const ALL: [AmpModel; 4] = [
+        AmpModel::Clean,
+        AmpModel::Crunch,
+        AmpModel::Lead,
+        AmpModel::Fuzz,
+    ];
 }
 
 /// Which passive tone-stack topology sits between the preamp and the power amp. These are
@@ -811,8 +949,12 @@ pub enum EqModel {
 }
 
 impl EqModel {
-    pub const ALL: [EqModel; 4] =
-        [EqModel::UsClassic, EqModel::British, EqModel::BritishBright, EqModel::Boutique];
+    pub const ALL: [EqModel; 4] = [
+        EqModel::UsClassic,
+        EqModel::British,
+        EqModel::BritishBright,
+        EqModel::Boutique,
+    ];
 }
 
 /// The speaker cabinet, which microphone is in front of it, and where that microphone sits.
@@ -831,7 +973,12 @@ pub struct Cabinet {
 
 impl Default for Cabinet {
     fn default() -> Self {
-        Cabinet { model: CabModel::FourByTwelve, mic_model: MicModel::Dynamic, pos_x: 5.0, pos_z: 2.0 }
+        Cabinet {
+            model: CabModel::FourByTwelve,
+            mic_model: MicModel::Dynamic,
+            pos_x: 5.0,
+            pos_z: 2.0,
+        }
     }
 }
 
@@ -864,7 +1011,12 @@ pub enum CabModel {
 }
 
 impl CabModel {
-    pub const ALL: [CabModel; 4] = [CabModel::FourByTwelve, CabModel::TwoByTwelve, CabModel::OneByTwelve, CabModel::Direct];
+    pub const ALL: [CabModel; 4] = [
+        CabModel::FourByTwelve,
+        CabModel::TwoByTwelve,
+        CabModel::OneByTwelve,
+        CabModel::Direct,
+    ];
 }
 
 /// What sits after the cabinet: room and output level.
@@ -881,7 +1033,11 @@ pub struct Rack {
 
 impl Default for Rack {
     fn default() -> Self {
-        Rack { reverb: 2.0, decay: 5.0, output_db: 0.0 }
+        Rack {
+            reverb: 2.0,
+            decay: 5.0,
+            output_db: 0.0,
+        }
     }
 }
 
@@ -891,7 +1047,12 @@ impl Default for AmpRig {
             enabled: true,
             input_db: 0.0,
             gate: Gate::default(),
-            pedals: vec![Pedal::Drive { on: false, drive: 5.0, tone: 5.0, level: 5.0 }],
+            pedals: vec![Pedal::Drive {
+                on: false,
+                drive: 5.0,
+                tone: 5.0,
+                level: 5.0,
+            }],
             amp: AmpHead::default(),
             eq: EqModel::default(),
             cab: Cabinet::default(),
@@ -908,7 +1069,11 @@ impl AmpRig {
         self.gate.threshold_db = ranged(self.gate.threshold_db, -80.0, 0.0)?;
         self.gate.release_ms = ranged(self.gate.release_ms, 5.0, 500.0)?;
         self.pedals.truncate(MAX_PEDALS);
-        self.pedals = self.pedals.into_iter().map(Pedal::sanitized).collect::<Option<Vec<_>>>()?;
+        self.pedals = self
+            .pedals
+            .into_iter()
+            .map(Pedal::sanitized)
+            .collect::<Option<Vec<_>>>()?;
         self.amp.gain = knob(self.amp.gain)?;
         self.amp.bass = knob(self.amp.bass)?;
         self.amp.mid = knob(self.amp.mid)?;
@@ -929,42 +1094,54 @@ fn default_pattern_length() -> i64 {
 }
 
 /// Shortest loop a pattern will subdivide into. Anything finer is a note, not a loop, and a
-/// hand-edited file carrying a tick or two would otherwise tile thousands of copies.
-pub const MIN_LOOP_TICKS: i64 = TICKS_PER_BEAT;
+/// hand-edited file carrying a tick or two would otherwise tile thousands of copies. Only the
+/// schema ≤ 9 migration still uses it, to flatten the loops those patterns carried.
+const MIN_LOOP_TICKS: i64 = TICKS_PER_BEAT;
 
-/// A loop — a named section like "verse" or "chorus". Holds its own chord progression (so
-/// guidance is per-section) and the notes for each track, keyed by track id.
-///
-/// `length_ticks` is the merged length: tracks and the chord track may each loop shorter than
-/// it and repeat to fill it, so a 2-bar drum loop plays twice under a 4-bar progression.
+/// A loop on one track ("bass 1", "drums 2"). Its notes sit at pattern-local ticks; clips place
+/// it on the song, always on its own track's lane, and a clip longer than the pattern loops it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SongPattern {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
+    /// The track whose notes these are. Nil only in a schema ≤ 9 file, where one pattern held
+    /// every track; [`ProjectModel::migrated_v10`] splits those and fills this in.
+    #[serde(default)]
+    pub track_id: Uuid,
     pub name: String,
     /// Zero only in a file that predates ticks or names no length at all; `normalized` fills
     /// it in from the legacy beats or the default.
     #[serde(default)]
     pub length_ticks: i64,
     #[serde(default)]
-    pub chords: crate::chord_track::ChordTrack,
-    #[serde(default, deserialize_with = "de_notes_by_track")]
-    pub notes_by_track: HashMap<Uuid, Vec<NoteEvent>>,
-    /// Loop length in ticks of one track inside this pattern. A track that is absent (or
-    /// carries a value past the pattern) fills the pattern.
-    #[serde(default)]
-    pub track_loop_ticks: HashMap<Uuid, i64>,
-    /// Loop length in ticks of the chord track. `None` fills the pattern.
-    #[serde(default)]
-    pub chord_loop_ticks: Option<i64>,
+    pub notes: Vec<NoteEvent>,
     /// Schema ≤ 8 only; folded into `length_ticks` by [`ProjectModel::normalized`].
     #[serde(default, rename = "lengthBeats", skip_serializing)]
     pub legacy_length_beats: Option<f64>,
-    /// Schema ≤ 8 only; folded into `track_loop_ticks` by [`ProjectModel::normalized`].
+    /// Schema ≤ 9 only: the pattern's own chord progression, lifted onto the song by
+    /// [`ProjectModel::migrated_v10`].
+    #[serde(default, rename = "chords", skip_serializing, deserialize_with = "de_legacy_chords")]
+    pub legacy_chords: crate::chord_track::ChordTrack,
+    /// Schema ≤ 9 only: notes per track, split into one pattern each by
+    /// [`ProjectModel::migrated_v10`].
+    #[serde(
+        default,
+        rename = "notesByTrack",
+        skip_serializing,
+        deserialize_with = "de_notes_by_track"
+    )]
+    pub legacy_notes_by_track: HashMap<Uuid, Vec<NoteEvent>>,
+    /// Schema ≤ 9 only: per-track loop length inside the pattern, flattened by the migration.
+    #[serde(default, rename = "trackLoopTicks", skip_serializing)]
+    pub legacy_track_loop_ticks: HashMap<Uuid, i64>,
+    /// Schema ≤ 9 only: chord-track loop length, flattened by the migration.
+    #[serde(default, rename = "chordLoopTicks", skip_serializing)]
+    pub legacy_chord_loop_ticks: Option<i64>,
+    /// Schema ≤ 8 only; folded into `legacy_track_loop_ticks` by the migration.
     #[serde(default, rename = "trackLoopBeats", skip_serializing)]
     pub legacy_track_loop_beats: Option<HashMap<Uuid, f64>>,
-    /// Schema ≤ 8 only; folded into `chord_loop_ticks` by [`ProjectModel::normalized`].
+    /// Schema ≤ 8 only; folded into `legacy_chord_loop_ticks` by the migration.
     #[serde(default, rename = "chordLoopBeats", skip_serializing)]
     pub legacy_chord_loop_beats: Option<f64>,
 }
@@ -979,15 +1156,19 @@ enum NotesByTrackRepr {
     Flat(Vec<serde_json::Value>),
 }
 
-fn de_notes_by_track<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<Uuid, Vec<NoteEvent>>, D::Error> {
+fn de_notes_by_track<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<HashMap<Uuid, Vec<NoteEvent>>, D::Error> {
     match NotesByTrackRepr::deserialize(d)? {
         NotesByTrackRepr::Map(m) => Ok(m),
         NotesByTrackRepr::Flat(values) => {
             let mut out = HashMap::new();
             for pair in values.chunks(2) {
                 if pair.len() == 2 {
-                    let key: Uuid = serde_json::from_value(pair[0].clone()).map_err(serde::de::Error::custom)?;
-                    let notes: Vec<NoteEvent> = serde_json::from_value(pair[1].clone()).map_err(serde::de::Error::custom)?;
+                    let key: Uuid = serde_json::from_value(pair[0].clone())
+                        .map_err(serde::de::Error::custom)?;
+                    let notes: Vec<NoteEvent> = serde_json::from_value(pair[1].clone())
+                        .map_err(serde::de::Error::custom)?;
                     out.insert(key, notes);
                 }
             }
@@ -996,24 +1177,51 @@ fn de_notes_by_track<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<Uuid, Ve
     }
 }
 
+/// A schema ≤ 9 pattern's `chords`. Schema 9 wrote the chord track as an object
+/// (`{"chords": [...]}`) because `ChordTrack` was a plain struct then; older files and the
+/// current one write a bare array. Accept both, or every v9 project would fail to open.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LegacyChordsRepr {
+    Flat(Vec<ChordEvent>),
+    Wrapped { chords: Vec<ChordEvent> },
+}
+
+fn de_legacy_chords<'de, D: Deserializer<'de>>(d: D) -> Result<crate::chord_track::ChordTrack, D::Error> {
+    let chords = match LegacyChordsRepr::deserialize(d)? {
+        LegacyChordsRepr::Flat(c) => c,
+        LegacyChordsRepr::Wrapped { chords } => chords,
+    };
+    Ok(crate::chord_track::ChordTrack::new(chords))
+}
+
 impl SongPattern {
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(track_id: Uuid, name: impl Into<String>) -> Self {
         SongPattern {
             id: Uuid::new_v4(),
+            track_id,
             name: name.into(),
             length_ticks: default_pattern_length(),
-            chords: Default::default(),
-            notes_by_track: HashMap::new(),
-            track_loop_ticks: HashMap::new(),
-            chord_loop_ticks: None,
+            notes: vec![],
             legacy_length_beats: None,
+            legacy_chords: Default::default(),
+            legacy_notes_by_track: HashMap::new(),
+            legacy_track_loop_ticks: HashMap::new(),
+            legacy_chord_loop_ticks: None,
             legacy_track_loop_beats: None,
             legacy_chord_loop_beats: None,
         }
     }
 
-    pub fn notes(&self, track_id: &Uuid) -> &[NoteEvent] {
-        self.notes_by_track.get(track_id).map(Vec::as_slice).unwrap_or(&[])
+    /// A deep copy on the same track with fresh pattern and note ids, named "<name> copy".
+    pub fn duplicated(&self) -> Self {
+        let mut copy = self.clone();
+        copy.id = Uuid::new_v4();
+        copy.name = format!("{} copy", self.name);
+        for n in &mut copy.notes {
+            n.id = Uuid::new_v4();
+        }
+        copy
     }
 
     /// A stored loop length made usable: clamped into `[MIN_LOOP_TICKS, length_ticks]`, with
@@ -1026,25 +1234,15 @@ impl SongPattern {
         }
     }
 
-    /// How long one turn of `track_id` is inside this pattern.
-    pub fn track_loop(&self, track_id: &Uuid) -> i64 {
-        self.usable_loop(self.track_loop_ticks.get(track_id).copied())
-    }
-
-    /// How long one turn of the chord track is inside this pattern.
-    pub fn chord_loop(&self) -> i64 {
-        self.usable_loop(self.chord_loop_ticks)
-    }
-
-    /// The track's notes laid out across the whole pattern: the stored notes, then one copy
-    /// per further turn of the track's loop, each turn trimmed at its own end. Identical to
-    /// [`SongPattern::notes`] when the track fills the pattern.
-    pub fn looped_notes(&self, track_id: &Uuid) -> Vec<NoteEvent> {
-        let src = self.notes(track_id);
+    /// Schema ≤ 9 only: one track's notes laid out across the whole pattern, the stored notes
+    /// then one copy per further turn of that track's loop, each turn trimmed at its own end.
+    fn legacy_looped_notes(&self, track_id: &Uuid) -> Vec<NoteEvent> {
+        let empty = Vec::new();
+        let src = self.legacy_notes_by_track.get(track_id).unwrap_or(&empty);
         let total = self.length_ticks.max(1);
-        let turn = self.track_loop(track_id);
+        let turn = self.usable_loop(self.legacy_track_loop_ticks.get(track_id).copied());
         if turn >= total || src.is_empty() {
-            return src.to_vec();
+            return src.clone();
         }
         let mut out = Vec::with_capacity(src.len() * ((total + turn - 1) / turn) as usize);
         for (rep, base) in turns(turn, total) {
@@ -1057,7 +1255,8 @@ impl SongPattern {
                 out.push(NoteEvent {
                     id: repeat_id(&note.id, rep),
                     start_tick: start,
-                    length_ticks: ((start + note.length_ticks).min(end) - start).max(MIN_NOTE_TICKS),
+                    length_ticks: ((start + note.length_ticks).min(end) - start)
+                        .max(MIN_NOTE_TICKS),
                     ..note.clone()
                 });
             }
@@ -1066,18 +1265,18 @@ impl SongPattern {
         out
     }
 
-    /// The chord track laid out across the whole pattern, the same way as
-    /// [`SongPattern::looped_notes`].
-    pub fn looped_chords(&self) -> crate::chord_track::ChordTrack {
+    /// Schema ≤ 9 only: the pattern's chord track laid out across the whole pattern, the same
+    /// way as [`SongPattern::legacy_looped_notes`].
+    fn legacy_looped_chords(&self) -> Vec<ChordEvent> {
         let total = self.length_ticks.max(1);
-        let turn = self.chord_loop();
-        if turn >= total || self.chords.is_empty() {
-            return self.chords.clone();
+        let turn = self.usable_loop(self.legacy_chord_loop_ticks);
+        if turn >= total || self.legacy_chords.is_empty() {
+            return self.legacy_chords.chords().to_vec();
         }
         let mut out = Vec::new();
         for (rep, base) in turns(turn, total) {
             let end = (base + turn).min(total);
-            for chord in self.chords.chords() {
+            for chord in self.legacy_chords.chords() {
                 let start = base + chord.start_tick;
                 let cut = (start + chord.length_ticks).min(end);
                 if cut <= start {
@@ -1094,7 +1293,7 @@ impl SongPattern {
                 });
             }
         }
-        crate::chord_track::ChordTrack::new(out)
+        out
     }
 
     /// Beat fields from an older file folded into the tick fields, this pattern's own and
@@ -1105,27 +1304,35 @@ impl SongPattern {
             self.length_ticks = default_pattern_length();
         }
         if let Some(legacy) = self.legacy_track_loop_beats.take() {
-            if self.track_loop_ticks.is_empty() {
-                self.track_loop_ticks = legacy.into_iter().map(|(id, b)| (id, beats_to_ticks(b))).collect();
+            if self.legacy_track_loop_ticks.is_empty() {
+                self.legacy_track_loop_ticks = legacy
+                    .into_iter()
+                    .map(|(id, b)| (id, beats_to_ticks(b)))
+                    .collect();
             }
         }
         if let Some(beats) = self.legacy_chord_loop_beats.take() {
-            if self.chord_loop_ticks.is_none() {
-                self.chord_loop_ticks = Some(beats_to_ticks(beats));
+            if self.legacy_chord_loop_ticks.is_none() {
+                self.legacy_chord_loop_ticks = Some(beats_to_ticks(beats));
             }
         }
-        for notes in self.notes_by_track.values_mut() {
+        for n in self.notes.iter_mut() {
+            n.migrated();
+        }
+        for notes in self.legacy_notes_by_track.values_mut() {
             for n in notes.iter_mut() {
                 n.migrated();
             }
         }
-        self.chords.migrated();
+        self.legacy_chords.migrated();
     }
 }
 
 /// `(repetition, start tick)` for every turn of a `turn`-long loop inside `total` ticks.
 fn turns(turn: i64, total: i64) -> impl Iterator<Item = (u64, i64)> {
-    (0u64..).map(move |rep| (rep, rep as i64 * turn)).take_while(move |&(_, base)| base < total)
+    (0u64..)
+        .map(move |rep| (rep, rep as i64 * turn))
+        .take_while(move |&(_, base)| base < total)
 }
 
 /// Repetition 0 keeps the source id so an unlooped pattern is byte-identical to its notes;
@@ -1271,7 +1478,10 @@ pub struct TimeSignature {
 
 impl Default for TimeSignature {
     fn default() -> Self {
-        TimeSignature { numerator: 4, denominator: 4 }
+        TimeSignature {
+            numerator: 4,
+            denominator: 4,
+        }
     }
 }
 
@@ -1288,11 +1498,10 @@ fn default_tempo() -> f64 {
 fn default_schema() -> u32 {
     SCHEMA_VERSION
 }
-fn default_tracks() -> Vec<Track> {
-    vec![Track::new("melody")]
-}
-fn default_patterns() -> Vec<SongPattern> {
-    vec![SongPattern::new("pattern 1")]
+
+/// The song's hard end for a new project, in ticks.
+fn default_song_length() -> i64 {
+    DEFAULT_SONG_BARS as i64 * beats_to_ticks(TimeSignature::default().beats_per_bar())
 }
 
 /// The full serializable project.
@@ -1305,12 +1514,12 @@ pub struct ProjectModel {
     pub tempo: f64,
     #[serde(default)]
     pub key: KeyState,
-    #[serde(default = "default_tracks")]
+    #[serde(default)]
     pub tracks: Vec<Track>,
-    #[serde(default = "default_patterns")]
+    /// Every pattern of every track (a track may have none).
+    #[serde(default)]
     pub patterns: Vec<SongPattern>,
-    /// The song: clips placed on the timeline (all tracks share the clip lane, since a
-    /// pattern holds every track's notes).
+    /// The song: clips placed on the timeline. A clip plays on its pattern's track.
     #[serde(default)]
     pub clips: Vec<Clip>,
     /// Every audio file the project refers to. Kept even when nothing points at one, so an
@@ -1342,6 +1551,13 @@ pub struct ProjectModel {
     /// base tempo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tempo_points: Vec<crate::tempo::TempoPoint>,
+    /// The project's chord progression in song ticks: sorted, non-overlapping. It drives the
+    /// tiering everywhere and the (monitor-only) chord bed.
+    #[serde(default)]
+    pub chords: crate::chord_track::ChordTrack,
+    /// The hard end of the song, at least one bar. Clips never reach past it.
+    #[serde(default = "default_song_length")]
+    pub song_length_ticks: i64,
     /// The master effect chain, in order, ahead of the master bus processing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub master_inserts: Vec<Insert>,
@@ -1363,15 +1579,88 @@ impl Default for ProjectModel {
     }
 }
 
+/// Clean up a chord progression: drop chords with a bad position or length, fold the pitch
+/// classes into 0–11 without duplicates (keeping their order, so the root stays first), sort
+/// by start, and cut each chord at the next one's start (the later chord wins, as in
+/// [`crate::chord_track::ChordTrack::chord_at`]) so none overlap.
+pub fn tidy_chords(chords: Vec<ChordEvent>) -> Vec<ChordEvent> {
+    let mut chords: Vec<ChordEvent> = chords
+        .into_iter()
+        .filter(|c| c.start_tick >= 0 && c.length_ticks > 0)
+        .map(|mut c| {
+            let mut seen = Vec::with_capacity(c.pitch_classes.len());
+            for pc in c
+                .pitch_classes
+                .iter()
+                .map(|&pc| crate::theory::normalize(pc))
+            {
+                if !seen.contains(&pc) {
+                    seen.push(pc);
+                }
+            }
+            c.pitch_classes = seen;
+            c
+        })
+        .collect();
+    chords.sort_by_key(|c| c.start_tick);
+    let starts: Vec<i64> = chords.iter().map(|c| c.start_tick).collect();
+    for (i, c) in chords.iter_mut().enumerate() {
+        if let Some(&next) = starts.get(i + 1) {
+            c.length_ticks = c.length_ticks.min(next - c.start_tick);
+        }
+    }
+    chords.retain(|c| c.length_ticks > 0);
+    chords
+}
+
+/// Repeat a progression written over `[0, period)` back to back up to `end`, cutting the last
+/// pass there. Every copy gets fresh chord ids.
+pub fn tile_chords(progression: &[ChordEvent], period: i64, end: i64) -> Vec<ChordEvent> {
+    let mut out = Vec::new();
+    if period <= 0 {
+        return out;
+    }
+    let mut at = 0;
+    while at < end {
+        for c in progression {
+            let start = at + c.start_tick;
+            if start >= end {
+                continue;
+            }
+            out.push(ChordEvent::new(
+                start,
+                c.length_ticks.min(end - start),
+                c.pitch_classes.clone(),
+                c.name.clone(),
+            ));
+        }
+        at += period;
+    }
+    out
+}
+
+/// The starter melody: one phrase per chord of I–IV–V–vi in C, as `(start, length, pitch,
+/// velocity)` in beats inside a 4-beat chord slot. Mostly chord tones, plus two tensions (D
+/// over C, B leaning into C over Am) so the roll shows more than one tier on the first look.
+const STARTER_MELODY: [[(f64, f64, i32, i32); 3]; 4] = [
+    [(0.0, 1.5, 76, 100), (1.5, 0.5, 74, 80), (2.0, 2.0, 72, 96)], // C:  E  D  C
+    [(0.0, 1.0, 69, 100), (1.0, 1.0, 72, 88), (2.0, 2.0, 77, 96)], // F:  A  C  F
+    [(0.0, 1.5, 74, 100), (1.5, 0.5, 71, 80), (2.0, 2.0, 67, 96)], // G:  D  B  G
+    [(0.0, 1.5, 72, 100), (1.5, 0.5, 71, 80), (2.0, 2.0, 69, 96)], // Am: C  B  A
+];
+
 impl ProjectModel {
-    /// A brand-new project: one melody track, one empty pattern, no key.
+    /// A brand-new project: one melody track with one empty pattern, no key, no chords, and a
+    /// [`DEFAULT_SONG_BARS`]-bar song.
     pub fn empty() -> Self {
+        let track = Track::new("melody");
+        let pattern = SongPattern::new(track.id, "melody 1");
         ProjectModel {
             schema_version: SCHEMA_VERSION,
             tempo: default_tempo(),
             key: KeyState::NONE,
-            tracks: default_tracks(),
-            patterns: default_patterns(),
+            tracks: vec![track],
+            patterns: vec![pattern],
             clips: vec![],
             audio_sources: vec![],
             audio_clips: vec![],
@@ -1382,6 +1671,8 @@ impl ProjectModel {
             swing: default_swing(),
             swing_grid_ticks: default_swing_grid(),
             tempo_points: vec![],
+            chords: Default::default(),
+            song_length_ticks: default_song_length(),
             master_inserts: vec![],
             legacy_swing_grid: None,
         }
@@ -1392,17 +1683,84 @@ impl ProjectModel {
         crate::tempo::TempoMap::new(self.tempo, &self.tempo_points)
     }
 
-    /// A new project pre-seeded with a I–IV–V–vi progression in C in its first pattern,
-    /// plus a drum track, so the first loop is seconds away.
+    /// Ticks in one bar of the project's meter.
+    pub fn bar_ticks(&self) -> i64 {
+        beats_to_ticks(self.time_signature.beats_per_bar()).max(1)
+    }
+
+    /// A new project that plays music the moment space is pressed: I–IV–V–vi in C (key
+    /// locked), a short melody over it and a drum groove, each in its own 4-bar 4/4 pattern
+    /// looping through a [`DEFAULT_SONG_BARS`]-bar song. See [`ProjectModel::starter_shaped`].
     pub fn starter() -> Self {
+        Self::starter_shaped(16 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT, DEFAULT_SONG_BARS)
+    }
+
+    /// The starter at any pattern length, bar size and song length (the new-project defaults).
+    /// The four chords split the pattern evenly and the melody stretches with them, so every
+    /// note keeps its tier; the progression is tiled across the whole song. The groove repeats
+    /// per bar at its own speed instead of stretching. Each track's pattern is placed once from
+    /// tick 0 to the song end.
+    pub fn starter_shaped(length_ticks: i64, bar_ticks: i64, song_bars: u32) -> Self {
+        let length = if length_ticks > 0 {
+            length_ticks
+        } else {
+            default_pattern_length()
+        };
+        let bar = if bar_ticks > 0 {
+            bar_ticks
+        } else {
+            4 * TICKS_PER_BEAT
+        };
         let mut model = ProjectModel::empty();
-        let chords =
-            crate::theory::harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, 16 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT);
-        model.patterns[0].chords = crate::chord_track::ChordTrack::new(chords);
-        model.tracks.push(Track::drums("drums"));
-        let p = &model.patterns[0];
-        model.clips = vec![Clip::new(p.id, 0, p.length_ticks)];
+        model.key = KeyState::locked(0, ScaleType::Major);
+        model.song_length_ticks = song_bars.max(1) as i64 * bar;
+        let slot = length / STARTER_MELODY.len() as i64;
+        let progression =
+            crate::theory::harmony::progression(&[0, 3, 4, 5], 0, ScaleType::Major, length, slot);
+        model.chords = crate::chord_track::ChordTrack::new(tile_chords(
+            &progression,
+            length,
+            model.song_length_ticks,
+        ));
+
+        model.tracks[0].voice = "pluck".into();
+        model.tracks[0].reverb_send = 0.2;
+        let scale = slot as f64 / (4.0 * TICKS_PER_BEAT as f64);
+        model.patterns[0].length_ticks = length;
+        model.patterns[0].notes = STARTER_MELODY
+            .iter()
+            .enumerate()
+            .flat_map(|(i, phrase)| {
+                phrase.iter().map(move |&(start, len, pitch, vel)| {
+                    NoteEvent::new(
+                        i as i64 * slot + beats_to_ticks(start * scale),
+                        beats_to_ticks(len * scale),
+                        pitch,
+                    )
+                    .with_velocity(vel)
+                })
+            })
+            .collect();
+
+        let drums = Track::drums("drums");
+        let mut groove = SongPattern::new(drums.id, "drums 1");
+        groove.length_ticks = length;
+        groove.notes = crate::vibes::Groove::Backbeat.hits(length, bar);
+        model.tracks.push(drums);
+        model.patterns.push(groove);
+        model.place_every_pattern_across_the_song();
         model
+    }
+
+    /// One clip per pattern from tick 0 to the song end (the pattern loops to fill it). Used by
+    /// the starter and the vibes, where every track has exactly one pattern.
+    pub(crate) fn place_every_pattern_across_the_song(&mut self) {
+        let end = self.song_length_ticks;
+        self.clips = self
+            .patterns
+            .iter()
+            .map(|p| Clip::new(p.id, 0, end))
+            .collect();
     }
 
     pub fn clip(&self, id: &Uuid) -> Option<&Clip> {
@@ -1413,19 +1771,40 @@ impl ProjectModel {
         self.sections.iter().find(|s| &s.id == id)
     }
 
-    /// End of the last clip (0 for an empty song).
-    pub fn song_length(&self) -> i64 {
-        self.clips.iter().map(Clip::end_tick).max().unwrap_or(0)
+    /// The patterns that belong to one track, in project order.
+    pub fn patterns_of<'a>(
+        &'a self,
+        track_id: &'a Uuid,
+    ) -> impl Iterator<Item = &'a SongPattern> + 'a {
+        self.patterns
+            .iter()
+            .filter(move |p| &p.track_id == track_id)
+    }
+
+    /// Hold the song's hard end: clips starting at or after it go, clips crossing it are cut.
+    pub(crate) fn fit_clips_to_song(&mut self) {
+        let end = self.song_length_ticks;
+        self.clips.retain(|c| c.start_tick < end);
+        for c in &mut self.clips {
+            if c.end_tick() > end {
+                c.length_ticks = end - c.start_tick;
+            }
+        }
     }
 
     /// The section containing `tick` (the last one starting at or before it).
     pub fn section_at(&self, tick: i64) -> Option<&Section> {
-        self.sections.iter().filter(|s| s.start_tick <= tick).max_by_key(|s| s.start_tick)
+        self.sections
+            .iter()
+            .filter(|s| s.start_tick <= tick)
+            .max_by_key(|s| s.start_tick)
     }
 
     /// The key in force at `tick`: the section's key if it has one, else the project key.
     pub fn key_at(&self, tick: i64) -> KeyState {
-        self.section_at(tick).and_then(|s| s.key).unwrap_or(self.key)
+        self.section_at(tick)
+            .and_then(|s| s.key)
+            .unwrap_or(self.key)
     }
 
     pub fn track(&self, id: &Uuid) -> Option<&Track> {
@@ -1454,63 +1833,69 @@ impl ProjectModel {
 
     /// Every audio clip on one track, in timeline order.
     pub fn audio_clips_on(&self, track_id: Uuid) -> impl Iterator<Item = &AudioClip> {
-        self.audio_clips.iter().filter(move |c| c.track_id == track_id)
+        self.audio_clips
+            .iter()
+            .filter(move |c| c.track_id == track_id)
     }
 
     /// Normalize after decoding a foreign/older file: fold schema ≤ 8 beat fields into ticks,
-    /// bump the schema, make sure there is at least one track and one pattern, clamp every
-    /// note, and drop references to things that aren't in the project any more.
+    /// split schema ≤ 9 patterns into one per track, bump the schema, make sure there is at
+    /// least one track, clamp every note, tidy the chords, hold the song length to at least a
+    /// bar with every clip inside it, and drop references to things that aren't in the project
+    /// any more (patterns of a missing track, clips of a missing pattern).
     pub fn normalized(mut self) -> Self {
         self.migrate_beats();
+        // Before the v10 split, while the arrangement's pattern ids still name patterns that
+        // exist: the split mints new ids and repoints the clips it finds.
+        self.fold_legacy_arrangement();
+        self.migrate_v10();
         // Only ever bump forward: relabelling a newer file as ours would make the next save
         // overwrite it with fields this version dropped.
         self.schema_version = self.schema_version.max(SCHEMA_VERSION);
         if self.tracks.is_empty() {
-            self.tracks = default_tracks();
-        }
-        if self.patterns.is_empty() {
-            self.patterns = default_patterns();
+            let fresh = ProjectModel::empty();
+            self.tracks = fresh.tracks;
+            self.patterns = fresh.patterns;
         }
         let track_ids: Vec<Uuid> = self.tracks.iter().map(|t| t.id).collect();
+        // A pattern of a track that no longer exists is invisible and never played, but would
+        // survive every save; drop it instead of growing the file forever.
+        self.patterns.retain(|p| track_ids.contains(&p.track_id));
         for pattern in &mut self.patterns {
-            // Notes keyed by a track that no longer exists are invisible and never played, but
-            // survive every save; drop them instead of growing the file forever.
-            pattern.notes_by_track.retain(|tid, _| track_ids.contains(tid));
-            pattern.track_loop_ticks.retain(|tid, t| track_ids.contains(tid) && *t > 0);
-            if pattern.chord_loop_ticks.is_none_or(|t| t <= 0) {
-                pattern.chord_loop_ticks = None;
-            }
-            for notes in pattern.notes_by_track.values_mut() {
-                for n in notes.iter_mut() {
-                    *n = n.clone().sanitized();
-                }
+            for n in pattern.notes.iter_mut() {
+                *n = n.clone().sanitized();
             }
         }
         let pattern_ids: Vec<Uuid> = self.patterns.iter().map(|p| p.id).collect();
-        // Legacy flat arrangement → clips, back to back.
-        if self.clips.is_empty() && !self.arrangement.is_empty() {
-            let mut at = 0;
-            for pid in &self.arrangement {
-                if let Some(p) = self.patterns.iter().find(|p| &p.id == pid) {
-                    self.clips.push(Clip::new(p.id, at, p.length_ticks));
-                    at += p.length_ticks;
-                }
-            }
-        }
-        self.arrangement.clear();
         if !self.swing.is_finite() {
             self.swing = default_swing();
         }
         self.swing = self.swing.clamp(50.0, 75.0);
-        if !(self.swing_grid_ticks == TICKS_PER_BEAT / 2 || self.swing_grid_ticks == TICKS_PER_BEAT / 4) {
+        if !(self.swing_grid_ticks == TICKS_PER_BEAT / 2
+            || self.swing_grid_ticks == TICKS_PER_BEAT / 4)
+        {
             self.swing_grid_ticks = default_swing_grid();
         }
-        self.tempo_points.retain(|p| p.tick >= 0 && p.bpm.is_finite());
+        self.tempo_points
+            .retain(|p| p.tick >= 0 && p.bpm.is_finite());
         for p in &mut self.tempo_points {
-            p.bpm = p.bpm.clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM);
+            p.bpm = p
+                .bpm
+                .clamp(crate::tempo::Tempo::MIN_BPM, crate::tempo::Tempo::MAX_BPM);
         }
         self.tempo_points.sort_by_key(|p| p.tick);
-        self.clips.retain(|c| pattern_ids.contains(&c.pattern_id) && c.length_ticks > 0 && c.start_tick >= 0);
+        self.chords = crate::chord_track::ChordTrack::new(tidy_chords(self.chords.take()));
+        if self.song_length_ticks <= 0 {
+            self.song_length_ticks = default_song_length();
+        }
+        self.song_length_ticks = self.song_length_ticks.max(self.bar_ticks());
+        self.clips.retain(|c| {
+            pattern_ids.contains(&c.pattern_id) && c.length_ticks > 0 && c.start_tick >= 0
+        });
+        for c in &mut self.clips {
+            c.offset_ticks = c.offset_ticks.max(0);
+        }
+        self.fit_clips_to_song();
         self.clips.sort_by_key(|c| c.start_tick);
         // An audio track is never also a drum track, and always carries a rig; a note track
         // never does. The combinations the UI cannot produce are still reachable by hand-editing
@@ -1526,7 +1911,12 @@ impl ProjectModel {
             sanitize_inserts(&mut t.inserts);
         }
         sanitize_inserts(&mut self.master_inserts);
-        let audio_track_ids: Vec<Uuid> = self.tracks.iter().filter(|t| t.is_audio).map(|t| t.id).collect();
+        let audio_track_ids: Vec<Uuid> = self
+            .tracks
+            .iter()
+            .filter(|t| t.is_audio)
+            .map(|t| t.id)
+            .collect();
         let source_ids: Vec<Uuid> = self.audio_sources.iter().map(|s| s.id).collect();
         // Unreferenced sources stay: undoing the clip that used one must not force a re-decode.
         self.audio_clips = std::mem::take(&mut self.audio_clips)
@@ -1559,6 +1949,92 @@ impl ProjectModel {
         for point in &mut self.tempo_points {
             point.migrated();
         }
+        // The song progression is written in beats by every build before ticks; without this
+        // its chords would decode with no position or length and be dropped as nonsense.
+        self.chords.migrated();
+    }
+
+    /// Schema ≤ 3 named the song as an ordered list of pattern ids; lay those out as clips,
+    /// back to back. A file that already has clips keeps them.
+    fn fold_legacy_arrangement(&mut self) {
+        if self.clips.is_empty() && !self.arrangement.is_empty() {
+            let mut at = 0;
+            for pid in &self.arrangement {
+                if let Some(p) = self.patterns.iter().find(|p| &p.id == pid) {
+                    self.clips.push(Clip::new(p.id, at, p.length_ticks));
+                    at += p.length_ticks;
+                }
+            }
+        }
+        self.arrangement.clear();
+    }
+
+    /// Split every schema ≤ 9 pattern — one pattern held every track's notes and its own chord
+    /// track — into one pattern per track that had notes, repoint that pattern's clips at each
+    /// of them, and lift its chords onto the song timeline under those same clips (tiling the
+    /// pattern across a longer clip, as playback did). A file already on v10 passes through.
+    fn migrate_v10(&mut self) {
+        if !self.patterns.iter().any(|p| p.track_id.is_nil()) {
+            return;
+        }
+        let track_order: Vec<(Uuid, String)> =
+            self.tracks.iter().map(|t| (t.id, t.name.clone())).collect();
+        let old_clips = std::mem::take(&mut self.clips);
+        let mut patterns = Vec::new();
+        let mut clips = Vec::new();
+        let mut lifted = Vec::new();
+        for old in std::mem::take(&mut self.patterns) {
+            if !old.track_id.is_nil() {
+                clips.extend(old_clips.iter().filter(|c| c.pattern_id == old.id).cloned());
+                patterns.push(old);
+                continue;
+            }
+            let mine: Vec<&Clip> = old_clips
+                .iter()
+                .filter(|c| c.pattern_id == old.id)
+                .collect();
+            let period = old.length_ticks.max(1);
+            let chords = old.legacy_looped_chords();
+            for clip in &mine {
+                let span = clip.offset_ticks + clip.length_ticks;
+                for c in tile_chords(&chords, period, span) {
+                    let start = clip.start_tick + c.start_tick - clip.offset_ticks;
+                    let cut = (start + c.length_ticks).min(clip.end_tick());
+                    if cut > start.max(clip.start_tick) {
+                        let start = start.max(clip.start_tick);
+                        lifted.push(ChordEvent::new(
+                            start,
+                            cut - start,
+                            c.pitch_classes.clone(),
+                            c.name.clone(),
+                        ));
+                    }
+                }
+            }
+            for (track_id, track_name) in &track_order {
+                let notes = old.legacy_looped_notes(track_id);
+                if notes.is_empty() {
+                    continue;
+                }
+                let mut split = SongPattern::new(*track_id, format!("{} {}", track_name, old.name));
+                split.length_ticks = old.length_ticks;
+                split.notes = notes;
+                clips.extend(mine.iter().map(|c| Clip {
+                    id: Uuid::new_v4(),
+                    pattern_id: split.id,
+                    ..(*c).clone()
+                }));
+                patterns.push(split);
+            }
+        }
+        self.patterns = patterns;
+        self.clips = clips;
+        let mut all = self.chords.take();
+        all.extend(lifted);
+        self.chords = crate::chord_track::ChordTrack::new(tidy_chords(all));
+        // A pre-v10 file never said how long the song was: it ended with its last clip.
+        let end = self.clips.iter().map(Clip::end_tick).max().unwrap_or(0);
+        self.song_length_ticks = self.song_length_ticks.max(end);
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
@@ -1566,13 +2042,19 @@ impl ProjectModel {
     }
 
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
+        Self::from_value(serde_json::from_str(json)?)
+    }
+
+    /// Decode an already-parsed project (an autosave carries one inside its own JSON).
+    pub fn from_value(value: serde_json::Value) -> serde_json::Result<Self> {
         use serde::de::Error;
         // Every field defaults, and serde also accepts a struct in sequence form — so `[]` and
         // `[1,2]` would both decode as a blank project and the next save would destroy whatever
         // file the user actually opened. A project is an object.
-        let value: serde_json::Value = serde_json::from_str(json)?;
         if !value.is_object() {
-            return Err(serde_json::Error::custom("not a dissonant project: expected a JSON object"));
+            return Err(serde_json::Error::custom(
+                "not a dissonant project: expected a JSON object",
+            ));
         }
         let decoded: ProjectModel = serde_json::from_value(value)?;
         if decoded.schema_version > SCHEMA_VERSION {

@@ -53,7 +53,14 @@ impl Biquad {
         let w0 = 2.0 * PI * fc / sample_rate;
         let (sin, cos) = w0.sin_cos();
         let alpha = sin / (2.0 * q);
-        self.set((1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha);
+        self.set(
+            (1.0 - cos) / 2.0,
+            1.0 - cos,
+            (1.0 - cos) / 2.0,
+            1.0 + alpha,
+            -2.0 * cos,
+            1.0 - alpha,
+        );
     }
 
     pub fn highpass(&mut self, sample_rate: f32, cutoff: f32, q: f32) {
@@ -61,7 +68,14 @@ impl Biquad {
         let w0 = 2.0 * PI * fc / sample_rate;
         let (sin, cos) = w0.sin_cos();
         let alpha = sin / (2.0 * q);
-        self.set((1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha);
+        self.set(
+            (1.0 + cos) / 2.0,
+            -(1.0 + cos),
+            (1.0 + cos) / 2.0,
+            1.0 + alpha,
+            -2.0 * cos,
+            1.0 - alpha,
+        );
     }
 
     /// `gain_db` boost/cut at `freq`, bandwidth from `q`.
@@ -242,7 +256,11 @@ impl Adsr {
                 self.level -= (1.0 - target).max(0.0) * self.rate(self.params.decay);
                 if self.level <= target + 1e-5 {
                     self.level = target;
-                    self.stage = if target <= 1e-4 { Stage::Idle } else { Stage::Sustain };
+                    self.stage = if target <= 1e-4 {
+                        Stage::Idle
+                    } else {
+                        Stage::Sustain
+                    };
                 }
                 self.level
             }
@@ -421,10 +439,19 @@ impl Reverb {
         let spread = 23;
         let s = |n: usize| ((n as f32) * scale) as usize;
         Reverb {
-            combs_l: comb_lens.iter().map(|&n| Comb::new(s(n), 0.84, 0.2)).collect(),
-            combs_r: comb_lens.iter().map(|&n| Comb::new(s(n + spread), 0.84, 0.2)).collect(),
+            combs_l: comb_lens
+                .iter()
+                .map(|&n| Comb::new(s(n), 0.84, 0.2))
+                .collect(),
+            combs_r: comb_lens
+                .iter()
+                .map(|&n| Comb::new(s(n + spread), 0.84, 0.2))
+                .collect(),
             allpass_l: allpass_lens.iter().map(|&n| Allpass::new(s(n))).collect(),
-            allpass_r: allpass_lens.iter().map(|&n| Allpass::new(s(n + spread))).collect(),
+            allpass_r: allpass_lens
+                .iter()
+                .map(|&n| Allpass::new(s(n + spread)))
+                .collect(),
             wet: 0.0,
         }
     }
@@ -605,14 +632,21 @@ pub struct DelayLine {
 
 impl DelayLine {
     pub fn new(max_samples: usize) -> Self {
-        DelayLine { buf: vec![0.0; max_samples.max(2)], idx: 0 }
+        DelayLine {
+            buf: vec![0.0; max_samples.max(2)],
+            idx: 0,
+        }
     }
 
     /// Write one sample and advance. Call once per sample, after every `read` for that sample.
     #[inline]
     pub fn write(&mut self, x: f32) {
         self.buf[self.idx] = x;
-        self.idx = if self.idx + 1 == self.buf.len() { 0 } else { self.idx + 1 };
+        self.idx = if self.idx + 1 == self.buf.len() {
+            0
+        } else {
+            self.idx + 1
+        };
     }
 
     /// The sample `delay_samples` ago, interpolated. 0 reads what was just written.
@@ -644,7 +678,11 @@ pub struct EnvFollower {
 
 impl EnvFollower {
     pub fn new(sample_rate: f32, attack_ms: f32, release_ms: f32) -> Self {
-        let mut e = EnvFollower { a_coef: 0.0, r_coef: 0.0, level: 0.0 };
+        let mut e = EnvFollower {
+            a_coef: 0.0,
+            r_coef: 0.0,
+            level: 0.0,
+        };
         e.set(sample_rate, attack_ms, release_ms);
         e
     }
@@ -657,7 +695,11 @@ impl EnvFollower {
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
         let rectified = x.abs();
-        let coef = if rectified > self.level { self.a_coef } else { self.r_coef };
+        let coef = if rectified > self.level {
+            self.a_coef
+        } else {
+            self.r_coef
+        };
         self.level = rectified + coef * (self.level - rectified);
         self.level
     }
@@ -740,7 +782,11 @@ impl NoiseGate {
     pub fn process(&mut self, x: f32) -> f32 {
         let level = self.env.process(x);
         let target = if level > self.threshold { 1.0 } else { 0.0 };
-        let coef = if target > self.gain { self.open_coef } else { self.close_coef };
+        let coef = if target > self.gain {
+            self.open_coef
+        } else {
+            self.close_coef
+        };
         self.gain = target + coef * (self.gain - target);
         x * self.gain
     }
@@ -953,7 +999,12 @@ impl TriodeCurves {
             }
             let inner = KP * (1.0 / MU + vgk / (KVB + vpk * vpk).sqrt());
             // `ln(1+e^x)` saturates to `x`; past 50 the exponential would overflow for nothing.
-            let e1 = (vpk / KP) * if inner < 50.0 { (inner.exp()).ln_1p() } else { inner };
+            let e1 = (vpk / KP)
+                * if inner < 50.0 {
+                    (inner.exp()).ln_1p()
+                } else {
+                    inner
+                };
             if e1 <= 0.0 {
                 0.0
             } else {
@@ -995,8 +1046,13 @@ impl TriodeCurves {
             // Grid current, in amps. Only exists once the grid goes positive against the cathode.
             *g = (vgk.max(0.0) / GRID_R) as f32;
         }
-        let small_signal = ((plate_volts(BIAS - 0.05) - plate_volts(BIAS + 0.05)) / 0.1 / swing) as f32;
-        TriodeCurves { plate, grid, small_signal }
+        let small_signal =
+            ((plate_volts(BIAS - 0.05) - plate_volts(BIAS + 0.05)) / 0.1 / swing) as f32;
+        TriodeCurves {
+            plate,
+            grid,
+            small_signal,
+        }
     }
 
     /// Read one curve at `v` volts off the operating point, interpolating between table points
@@ -1087,7 +1143,11 @@ impl TubeStage {
             let vg = s * drive + bias - *blocking;
             let droop = TriodeCurves::read(&curves.grid, vg) * BLOCKING_OHMS;
             // Charge fast while the grid conducts, bleed back whenever it does not.
-            *blocking += if droop > *blocking { (droop - *blocking) * charge } else { -*blocking * bleed };
+            *blocking += if droop > *blocking {
+                (droop - *blocking) * charge
+            } else {
+                -*blocking * bleed
+            };
             TriodeCurves::read(&curves.plate, vg) - TriodeCurves::read(&curves.plate, bias)
         });
         self.post.process(y)
@@ -1139,12 +1199,24 @@ pub struct ToneStackParts {
 
 impl ToneStack {
     pub fn new() -> Self {
-        ToneStack { b: [1.0, 0.0, 0.0, 0.0], a: [0.0; 3], z: [0.0; 3], makeup: 1.0 }
+        ToneStack {
+            b: [1.0, 0.0, 0.0, 0.0],
+            a: [0.0; 3],
+            z: [0.0; 3],
+            makeup: 1.0,
+        }
     }
 
     /// `treble`, `mid` and `bass` are 0…1 pot positions. The bass pot is a log taper on a real
     /// amp, and without that its whole useful range crowds into the first tenth of the sweep.
-    pub fn set(&mut self, sample_rate: f32, parts: ToneStackParts, treble: f32, mid: f32, bass: f32) {
+    pub fn set(
+        &mut self,
+        sample_rate: f32,
+        parts: ToneStackParts,
+        treble: f32,
+        mid: f32,
+        bass: f32,
+    ) {
         let l = (10f64.powf(bass.clamp(0.0, 1.0) as f64) - 1.0) / 9.0;
         let (t, m) = (treble.clamp(0.0, 1.0) as f64, mid.clamp(0.0, 1.0) as f64);
         let (b, a) = Self::discretise(sample_rate as f64, parts, t, m, l);
@@ -1153,7 +1225,13 @@ impl ToneStack {
         // Level every topology by what it does across the guitar's range with its pots at noon,
         // not by one frequency: pinning the scoop's own floor to unity would boost everything
         // either side of it by ten decibels. Switching stack then changes the voice, not the fader.
-        let (nb, na) = Self::discretise(sample_rate as f64, parts, 0.5, 0.5, (10f64.sqrt() - 1.0) / 9.0);
+        let (nb, na) = Self::discretise(
+            sample_rate as f64,
+            parts,
+            0.5,
+            0.5,
+            (10f64.sqrt() - 1.0) / 9.0,
+        );
         let mut sum = 0.0;
         for i in 0..BAND_POINTS {
             let f = BAND_LOW * (BAND_HIGH / BAND_LOW).powf(i as f32 / (BAND_POINTS - 1) as f32);
@@ -1164,7 +1242,15 @@ impl ToneStack {
     }
 
     fn discretise(sr: f64, p: ToneStackParts, t: f64, m: f64, l: f64) -> ([f32; 4], [f32; 3]) {
-        let ToneStackParts { c1, c2, c3, r1, r2, r3, r4 } = p;
+        let ToneStackParts {
+            c1,
+            c2,
+            c3,
+            r1,
+            r2,
+            r3,
+            r4,
+        } = p;
         let b1 = t * c1 * r1 + m * c3 * r3 + l * (c1 * r2 + c2 * r2) + (c1 * r3 + c2 * r3);
         let b2 = t * (c1 * c2 * r1 * r4 + c1 * c3 * r1 * r4)
             - m * m * (c1 * c3 * r3 * r3 + c2 * c3 * r3 * r3)
@@ -1179,8 +1265,11 @@ impl ToneStack {
             - t * m * c1 * c2 * c3 * r1 * r3 * r4
             + t * l * c1 * c2 * c3 * r1 * r2 * r4;
         let a0 = 1.0;
-        let a1 = (c1 * r1 + c1 * r3 + c2 * r3 + c2 * r4 + c3 * r4) + m * c3 * r3 + l * (c1 * r2 + c2 * r2);
-        let a2 = m * (c1 * c3 * r1 * r3 - c2 * c3 * r3 * r4 + c1 * c3 * r3 * r3 + c2 * c3 * r3 * r3)
+        let a1 = (c1 * r1 + c1 * r3 + c2 * r3 + c2 * r4 + c3 * r4)
+            + m * c3 * r3
+            + l * (c1 * r2 + c2 * r2);
+        let a2 = m
+            * (c1 * c3 * r1 * r3 - c2 * c3 * r3 * r4 + c1 * c3 * r3 * r3 + c2 * c3 * r3 * r3)
             + l * m * (c1 * c3 * r2 * r3 + c2 * c3 * r2 * r3)
             - m * m * (c1 * c3 * r3 * r3 + c2 * c3 * r3 * r3)
             + l * (c1 * c2 * r2 * r4 + c1 * c2 * r1 * r2 + c1 * c3 * r2 * r4 + c2 * c3 * r2 * r4)
@@ -1192,7 +1281,8 @@ impl ToneStack {
                 + c2 * c3 * r3 * r4);
         let a3 = l * m * (c1 * c2 * c3 * r1 * r2 * r3 + c1 * c2 * c3 * r2 * r3 * r4)
             - m * m * (c1 * c2 * c3 * r1 * r3 * r3 + c1 * c2 * c3 * r3 * r3 * r4)
-            + m * (c1 * c2 * c3 * r3 * r3 * r4 + c1 * c2 * c3 * r1 * r3 * r3 - c1 * c2 * c3 * r1 * r3 * r4)
+            + m * (c1 * c2 * c3 * r3 * r3 * r4 + c1 * c2 * c3 * r1 * r3 * r3
+                - c1 * c2 * c3 * r1 * r3 * r4)
             + l * c1 * c2 * c3 * r1 * r2 * r4
             + c1 * c2 * c3 * r1 * r3 * r4;
 
@@ -1212,7 +1302,12 @@ impl ToneStack {
         ];
         let n = az[0];
         (
-            [(bz[0] / n) as f32, (bz[1] / n) as f32, (bz[2] / n) as f32, (bz[3] / n) as f32],
+            [
+                (bz[0] / n) as f32,
+                (bz[1] / n) as f32,
+                (bz[2] / n) as f32,
+                (bz[3] / n) as f32,
+            ],
             [(az[1] / n) as f32, (az[2] / n) as f32, (az[3] / n) as f32],
         )
     }
@@ -1358,9 +1453,17 @@ impl CabIr {
             tz * (1.0 - tx),
             tz * tx,
         ];
-        let corners = [&self.grid[z0][x0], &self.grid[z0][x1], &self.grid[z1][x0], &self.grid[z1][x1]];
+        let corners = [
+            &self.grid[z0][x0],
+            &self.grid[z0][x1],
+            &self.grid[z1][x0],
+            &self.grid[z1][x1],
+        ];
         for (i, tap) in self.active.iter_mut().enumerate() {
-            *tap = w[0] * corners[0][i] + w[1] * corners[1][i] + w[2] * corners[2][i] + w[3] * corners[3][i];
+            *tap = w[0] * corners[0][i]
+                + w[1] * corners[1][i]
+                + w[2] * corners[2][i]
+                + w[3] * corners[3][i];
         }
     }
 
@@ -1400,7 +1503,14 @@ impl Default for CabIr {
 /// because the cone beams its highs straight ahead, the dust cap is bright and aggressive because
 /// that beam is pointed at the capsule, and close in there is a proximity bass lift that
 /// disappears as you pull away.
-fn measure(ir: &mut [f32; CAB_TAPS], sample_rate: f32, speaker: SpeakerVoice, mic: MicVoice, x: f32, z: f32) {
+fn measure(
+    ir: &mut [f32; CAB_TAPS],
+    sample_rate: f32,
+    speaker: SpeakerVoice,
+    mic: MicVoice,
+    x: f32,
+    z: f32,
+) {
     let mut chain = [Biquad::identity(); 10];
     chain[0].highpass(sample_rate, speaker.resonance_hz, 0.9);
     chain[1].peaking(sample_rate, speaker.resonance_hz, speaker.resonance_db, 1.4);
@@ -1412,10 +1522,19 @@ fn measure(ir: &mut [f32; CAB_TAPS], sample_rate: f32, speaker: SpeakerVoice, mi
     // pattern, not a resonance — and it leaves the midrange alone, which is why moving the mic
     // changes the brightness of a tone without changing which note you are hearing.
     chain[4].high_shelf(sample_rate, 2_500.0, -10.0 * (1.0 - x), 0.707);
-    chain[5].lowpass(sample_rate, speaker.top_hz * (0.5 + 0.5 * x) * (1.0 - 0.15 * z), 0.9);
+    chain[5].lowpass(
+        sample_rate,
+        speaker.top_hz * (0.5 + 0.5 * x) * (1.0 - 0.15 * z),
+        0.9,
+    );
     chain[6].low_shelf(sample_rate, 140.0, 6.0 * (1.0 - z), 0.707);
     chain[7].high_shelf(sample_rate, 7_000.0, -3.5 * z, 0.707);
-    chain[8].peaking(sample_rate, mic.presence_hz, mic.presence_db, mic.presence_q);
+    chain[8].peaking(
+        sample_rate,
+        mic.presence_hz,
+        mic.presence_db,
+        mic.presence_q,
+    );
     chain[9].lowpass(sample_rate, mic.top_hz, 0.707);
 
     let delay = (z * CAB_FAR_SECONDS * sample_rate).round() as usize;
@@ -1507,7 +1626,12 @@ mod tests {
 
     #[test]
     fn oscillators_stay_in_range() {
-        for wf in [Waveform::Saw, Waveform::Square, Waveform::Triangle, Waveform::Sine] {
+        for wf in [
+            Waveform::Saw,
+            Waveform::Square,
+            Waveform::Triangle,
+            Waveform::Sine,
+        ] {
             let mut o = Oscillator::new(wf);
             o.set_frequency(440.0, 44_100.0);
             for _ in 0..10_000 {
@@ -1540,7 +1664,10 @@ mod tests {
                 .collect();
             tone_amplitude(&out[4_000..], hz, sr)
         };
-        assert!((amplitude_at(1_000.0) - 1.0).abs() < 0.05, "centre is not unity");
+        assert!(
+            (amplitude_at(1_000.0) - 1.0).abs() < 0.05,
+            "centre is not unity"
+        );
         assert!(amplitude_at(100.0) < 0.15);
         assert!(amplitude_at(10_000.0) < 0.15);
     }
@@ -1556,7 +1683,11 @@ mod tests {
         assert!((d.read(9.0) - 1.0).abs() < 1e-6, "got {}", d.read(9.0));
         assert!(d.read(0.0).abs() < 1e-6);
         // Halfway between the impulse and its neighbour.
-        assert!((d.read(8.5) - 0.5).abs() < 1e-6, "interpolation is off: {}", d.read(8.5));
+        assert!(
+            (d.read(8.5) - 0.5).abs() < 1e-6,
+            "interpolation is off: {}",
+            d.read(8.5)
+        );
         // Reading past the buffer clamps instead of panicking.
         let _ = d.read(1e9);
         d.reset();
@@ -1572,7 +1703,10 @@ mod tests {
         let quiet = db_to_linear(-60.0);
         let mut out = 0.0f32;
         for n in 0..48_000 {
-            out = g.process(quiet * (2.0 * PI * 220.0 * n as f32 / sr).sin()).abs().max(out);
+            out = g
+                .process(quiet * (2.0 * PI * 220.0 * n as f32 / sr).sin())
+                .abs()
+                .max(out);
         }
         assert!(out < quiet * 0.05, "gate leaked {out} of {quiet}");
 
@@ -1580,9 +1714,15 @@ mod tests {
         let loud = db_to_linear(-12.0);
         let mut peak = 0.0f32;
         for n in 0..240 {
-            peak = g.process(loud * (2.0 * PI * 220.0 * n as f32 / sr).sin()).abs().max(peak);
+            peak = g
+                .process(loud * (2.0 * PI * 220.0 * n as f32 / sr).sin())
+                .abs()
+                .max(peak);
         }
-        assert!(peak > loud * 0.5, "gate was too slow to open: {peak} of {loud}");
+        assert!(
+            peak > loud * 0.5,
+            "gate was too slow to open: {peak} of {loud}"
+        );
     }
 
     #[test]
@@ -1603,7 +1743,10 @@ mod tests {
         };
         // 24 dB in becomes far less than 24 dB out at 4:1 above the threshold.
         let span = steady(-4.0) - steady(-28.0);
-        assert!(span > 2.0 && span < 16.0, "24 dB of input became {span} dB of output");
+        assert!(
+            span > 2.0 && span < 16.0,
+            "24 dB of input became {span} dB of output"
+        );
         // Below the threshold it is a wire.
         assert!((steady(-40.0) + 40.0).abs() < 1.0);
     }
@@ -1613,7 +1756,9 @@ mod tests {
         // 7 kHz hard-driven at 44.1 kHz: the 5th harmonic at 35 kHz folds back to 9.1 kHz,
         // which is inharmonic and plainly audible. Oversampling filters it before it folds.
         let sr = 44_100.0;
-        let tone: Vec<f32> = (0..16_384).map(|n| 0.8 * (2.0 * PI * 7_000.0 * n as f32 / sr).sin()).collect();
+        let tone: Vec<f32> = (0..16_384)
+            .map(|n| 0.8 * (2.0 * PI * 7_000.0 * n as f32 / sr).sin())
+            .collect();
         let mut shape = |x: f32| (x * 10.0).tanh();
 
         let naive: Vec<f32> = tone.iter().map(|&x| shape(x)).collect();
@@ -1625,8 +1770,14 @@ mod tests {
         let alias_os = tone_amplitude(&oversampled[tail..], 9_100.0, sr);
         let fundamental = tone_amplitude(&oversampled[tail..], 7_000.0, sr);
 
-        assert!(fundamental > 0.3, "oversampling swallowed the signal: {fundamental}");
-        assert!(alias_naive > fundamental * 0.05, "the naive case should alias audibly: {alias_naive}");
+        assert!(
+            fundamental > 0.3,
+            "oversampling swallowed the signal: {fundamental}"
+        );
+        assert!(
+            alias_naive > fundamental * 0.05,
+            "the naive case should alias audibly: {alias_naive}"
+        );
         assert!(
             alias_os < fundamental * 0.01,
             "fold-back survived oversampling: {alias_os} against {fundamental} (naive {alias_naive})"
@@ -1654,7 +1805,10 @@ mod tests {
             let _ = (l, rr);
             energy
         };
-        assert!(tail_energy(1.0) > tail_energy(0.2) * 10.0, "decay did not change the tail");
+        assert!(
+            tail_energy(1.0) > tail_energy(0.2) * 10.0,
+            "decay did not change the tail"
+        );
     }
 
     fn test_speaker() -> SpeakerVoice {
@@ -1669,7 +1823,12 @@ mod tests {
     }
 
     fn test_mic() -> MicVoice {
-        MicVoice { presence_hz: 4_500.0, presence_db: 5.0, presence_q: 1.1, top_hz: 7_500.0 }
+        MicVoice {
+            presence_hz: 4_500.0,
+            presence_db: 5.0,
+            presence_q: 1.1,
+            top_hz: 7_500.0,
+        }
     }
 
     #[test]
@@ -1701,7 +1860,10 @@ mod tests {
         for z in 0..CAB_Z {
             for x in 0..CAB_X {
                 let ir = &cab.grid[z][x];
-                assert!(ir.iter().all(|t| t.is_finite()), "position ({x}, {z}) measured a non-finite tap");
+                assert!(
+                    ir.iter().all(|t| t.is_finite()),
+                    "position ({x}, {z}) measured a non-finite tap"
+                );
                 // Pinned at 1 kHz, so moving the mic is a tone control and never a fader.
                 let w = 2.0 * PI * CAB_REFERENCE_HZ / 48_000.0;
                 let (mut re, mut im) = (0.0f32, 0.0f32);
@@ -1711,7 +1873,10 @@ mod tests {
                     im -= tap * s;
                 }
                 let gain = (re * re + im * im).sqrt();
-                assert!((gain - 1.0).abs() < 0.01, "position ({x}, {z}) is {gain} at 1 kHz, not unity");
+                assert!(
+                    (gain - 1.0).abs() < 0.01,
+                    "position ({x}, {z}) is {gain} at 1 kHz, not unity"
+                );
             }
         }
     }
@@ -1731,7 +1896,12 @@ mod tests {
             out.push(cab.process(0.0));
         }
         for i in 0..CAB_TAPS {
-            assert!((out[i] - ir[i]).abs() < 1e-7, "tap {i} came back as {} rather than {}", out[i], ir[i]);
+            assert!(
+                (out[i] - ir[i]).abs() < 1e-7,
+                "tap {i} came back as {} rather than {}",
+                out[i],
+                ir[i]
+            );
         }
     }
 
@@ -1739,7 +1909,15 @@ mod tests {
     fn a_tone_stack_scoops_its_mids_and_its_knobs_interact() {
         // The '59 Bassman parts. At noon the network digs a hole in the upper mids; closing the
         // mid pot deepens it, and because it is one network that also moves the treble.
-        let parts = ToneStackParts { c1: 0.25e-9, c2: 20e-9, c3: 20e-9, r1: 250e3, r2: 1e6, r3: 25e3, r4: 56e3 };
+        let parts = ToneStackParts {
+            c1: 0.25e-9,
+            c2: 20e-9,
+            c3: 20e-9,
+            r1: 250e3,
+            r2: 1e6,
+            r3: 25e3,
+            r4: 56e3,
+        };
         let response = |mid: f32, freq: f32| {
             let mut stack = ToneStack::new();
             stack.set(48_000.0, parts, 0.5, mid, 0.5);
@@ -1770,6 +1948,9 @@ mod tests {
         }
         // 1e-2 against a full-scale offset is 40 dB of rejection; the rest is `f32` rounding on a
         // pole that sits a ten-thousandth away from the unit circle.
-        assert!(last.abs() < 1e-2, "the stack passes DC, which a coupling capacitor cannot: {last}");
+        assert!(
+            last.abs() < 1e-2,
+            "the stack passes DC, which a coupling capacitor cannot: {last}"
+        );
     }
 }

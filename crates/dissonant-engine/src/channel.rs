@@ -112,7 +112,11 @@ impl std::fmt::Debug for InsertSlot {
 impl InsertSlot {
     /// A slot starts enabled; a bypassed one is set so by its own command right after.
     pub fn new(id: Uuid, unit: Option<Box<PluginAudioUnit>>) -> Self {
-        InsertSlot { id, enabled: true, unit }
+        InsertSlot {
+            id,
+            enabled: true,
+            unit,
+        }
     }
 
     /// The unit this slot would run this block, or `None` when there is nothing to run.
@@ -188,7 +192,11 @@ impl Channel {
         } else if track.is_drum {
             Instrument::Drums(DrumKit::new(sample_rate))
         } else {
-            Instrument::Synth(PolySynth::new(VoicePreset::named(&track.voice), sample_rate, 12))
+            Instrument::Synth(PolySynth::new(
+                VoicePreset::named(&track.voice),
+                sample_rate,
+                12,
+            ))
         }
     }
 
@@ -207,7 +215,9 @@ impl Channel {
             sample_rate,
             stereo: (vec![0.0; 8192], vec![0.0; 8192]),
             inserts: Vec::new(),
-            audio: track.is_audio.then(|| Box::new(AudioLane::new(track.id, sample_rate))),
+            audio: track
+                .is_audio
+                .then(|| Box::new(AudioLane::new(track.id, sample_rate))),
             peak: 0.0,
         };
         c.apply(track);
@@ -222,7 +232,9 @@ impl Channel {
     pub fn apply(&mut self, track: &SequenceTrack) {
         let hosts_plugin = matches!(self.instrument, Instrument::Plugin(_));
         let kind_changed = track.is_drum != self.is_drum || track.is_audio != self.is_audio;
-        if !hosts_plugin && (kind_changed || (!track.is_drum && !track.is_audio && track.voice != self.voice)) {
+        if !hosts_plugin
+            && (kind_changed || (!track.is_drum && !track.is_audio && track.voice != self.voice))
+        {
             self.instrument = Self::built_in_instrument(track, self.sample_rate);
         }
         self.is_drum = track.is_drum;
@@ -239,7 +251,8 @@ impl Channel {
         }
         let tone_hz = track.tone.clamp(200.0, 20_000.0) as f32;
         if (tone_hz - self.tone_hz).abs() > 0.5 {
-            self.tone.configure(|b| b.lowpass(self.sample_rate, tone_hz, 0.707));
+            self.tone
+                .configure(|b| b.lowpass(self.sample_rate, tone_hz, 0.707));
             self.tone_hz = tone_hz;
         }
         // A note's Mod X is an offset from the track's own voicing, so the voices need to know
@@ -279,7 +292,10 @@ impl Channel {
             return;
         }
 
-        if self.instrument.is_silent() && self.reverb.wet <= 0.0001 && chain_is_silent(&self.inserts) {
+        if self.instrument.is_silent()
+            && self.reverb.wet <= 0.0001
+            && chain_is_silent(&self.inserts)
+        {
             // Nothing to render, but the meter still has to fall back to zero — otherwise it
             // freezes at whatever the last audible block measured and the UI stays lit.
             self.hold_peak(0.0, frames);
@@ -414,11 +430,16 @@ impl Master {
             return;
         }
         let sr = self.sample_rate;
-        self.low_cut.configure(|b| b.highpass(sr, s.low_cut_hz as f32, 0.707));
-        self.eq_low.configure(|b| b.low_shelf(sr, 120.0, linear_to_db(s.low_eq as f32), 0.7));
-        self.eq_mid.configure(|b| b.peaking(sr, 1_000.0, linear_to_db(s.mid_eq as f32), 0.7));
-        self.eq_high.configure(|b| b.high_shelf(sr, 6_000.0, linear_to_db(s.high_eq as f32), 0.7));
-        self.high_cut.configure(|b| b.lowpass(sr, s.high_cut_hz as f32, 0.707));
+        self.low_cut
+            .configure(|b| b.highpass(sr, s.low_cut_hz as f32, 0.707));
+        self.eq_low
+            .configure(|b| b.low_shelf(sr, 120.0, linear_to_db(s.low_eq as f32), 0.7));
+        self.eq_mid
+            .configure(|b| b.peaking(sr, 1_000.0, linear_to_db(s.mid_eq as f32), 0.7));
+        self.eq_high
+            .configure(|b| b.high_shelf(sr, 6_000.0, linear_to_db(s.high_eq as f32), 0.7));
+        self.high_cut
+            .configure(|b| b.lowpass(sr, s.high_cut_hz as f32, 0.707));
         self.reverb.wet = s.reverb_wet.clamp(0.0, 1.0) as f32;
         self.gain = s.gain.clamp(0.0, 1.5) as f32;
         self.settings = s.clone();

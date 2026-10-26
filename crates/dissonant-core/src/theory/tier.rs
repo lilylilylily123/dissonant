@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(c.tier(9, &chord, None), Tier::Tension);
         assert_eq!(c.tier(5, &chord, None), Tier::Dissonance); // half step above E
         assert_eq!(c.tier(1, &chord, None), Tier::Dissonance); // half step above C
-        // Half step *below* a chord tone is a leading tone, not an avoid note.
+                                                               // Half step *below* a chord tone is a leading tone, not an avoid note.
         assert_eq!(c.tier(11, &chord, None), Tier::Tension); // B under C = maj7
         assert_eq!(c.tier(3, &chord, None), Tier::Tension); // D# under E = #9
     }
@@ -92,7 +92,10 @@ mod tests {
         // A# over C major triad: a whole step from C and three from G → tension by interval,
         // but out of key.
         assert_eq!(c.tier(10, &[0, 4, 7], None), Tier::Tension);
-        assert_eq!(c.tier(10, &[0, 4, 7], Some(&C_MAJOR_SCALE)), Tier::Dissonance);
+        assert_eq!(
+            c.tier(10, &[0, 4, 7], Some(&C_MAJOR_SCALE)),
+            Tier::Dissonance
+        );
     }
 
     #[test]

@@ -54,8 +54,12 @@ impl Default for KeyDetector {
 }
 
 // Krumhansl–Kessler profiles.
-const MAJOR_PROFILE: [f64; 12] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-const MINOR_PROFILE: [f64; 12] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+const MAJOR_PROFILE: [f64; 12] = [
+    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+];
+const MINOR_PROFILE: [f64; 12] = [
+    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+];
 
 impl KeyDetector {
     pub fn detect(&self, pitch_classes: &[i32]) -> KeyDetectionResult {
@@ -92,7 +96,10 @@ impl KeyDetector {
         let is_confident = pitch_classes.len() >= self.min_notes_for_confidence
             && distinct >= self.min_distinct_pitch_classes
             && gap >= self.min_score_gap;
-        KeyDetectionResult { candidates, is_confident }
+        KeyDetectionResult {
+            candidates,
+            is_confident,
+        }
     }
 }
 

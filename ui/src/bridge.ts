@@ -10,6 +10,7 @@ import type {
   AudioStatusEvent,
   CatalogEntry,
   ChordEvent,
+  Clip,
   ExportProgress,
   ExportRequest,
   ExportResult,
@@ -36,27 +37,29 @@ import type {
   SongPattern,
   TrackParam,
   TemplateInfo,
+  KeyState,
+  ScaleType,
+  VibeInfo,
 } from "./types";
 import {
+  beatsPerBar,
   beatsToTicks,
-  chordLoop,
   defaultAmpRig,
   DEFAULT_SWING_GRID_TICKS,
   EQ_MODELS,
   hostPlatforms,
+  layOutLoop,
   MAX_CLIP_GAIN,
   MAX_FADE_SECONDS,
   MAX_INSERTS,
   MAX_PEDALS,
   MIC_MODELS,
-  MIN_LOOP_TICKS,
   MIN_NOTE_TICKS,
   TICKS_PER_BEAT,
-  trackLoop,
   uuid,
   withDefaults,
 } from "./types";
-import { normalize, progression, STARTERS } from "./theory";
+import { chordAt, normalize, progression } from "./theory";
 
 export interface Bridge {
   readonly isTauri: boolean;
@@ -70,10 +73,23 @@ export interface Bridge {
   commitGesture(): Promise<Snapshot>;
   undo(): Promise<Snapshot>;
   redo(): Promise<Snapshot>;
+  /** `starter` picks starter or empty; leave it out to follow the "new project opens" setting. */
   newProject(starter?: boolean): Promise<Snapshot>;
   openProject(path: string): Promise<Snapshot>;
   saveProject(path?: string): Promise<Snapshot>;
-  setPlaybackContext(mode: PlayMode, patternId: string | null): Promise<void>;
+  /**
+   * What ▶ plays. In pattern mode `chordOffsetTicks` is the song tick the pattern's bar 1 sits
+   * on: the chord bed and tiering use the project chords from there.
+   * `ghostPatternId`: another pattern looped along in pattern mode, heard while you write, at
+   * `ghostLevel` (0…1.5, 1 = its track's own level).
+   */
+  setPlaybackContext(
+    mode: PlayMode,
+    patternId: string | null,
+    chordOffsetTicks: number,
+    ghostPatternId?: string | null,
+    ghostLevel?: number,
+  ): Promise<void>;
   /** Start playing; with `countInBars` the metronome counts first and the transport starts after. */
   play(countInBars?: number): Promise<void>;
   stop(): Promise<void>;
@@ -93,11 +109,16 @@ export interface Bridge {
   exportWav(request: ExportRequest): Promise<ExportResult>;
   onExportProgress(cb: (p: ExportProgress) => void): () => void;
   exportMidi(path: string, scope: "song" | "pattern"): Promise<string>;
-  importMidi(path: string, patternId: string): Promise<Snapshot>;
+  /** Each MIDI track becomes a new track with one pattern and one clip at beat 0. */
+  importMidi(path: string): Promise<Snapshot>;
   listTemplates(): Promise<TemplateInfo[]>;
   saveTemplate(name: string): Promise<TemplateInfo>;
   deleteTemplate(name: string): Promise<void>;
   newFromTemplate(name: string): Promise<Snapshot>;
+  /** The built-in vibes (`list_vibes`). */
+  listVibes(): Promise<VibeInfo[]>;
+  /** A new untitled project from a vibe (`new_from_vibe`). */
+  newFromVibe(id: string): Promise<Snapshot>;
   onPlayhead(cb: (e: PlayheadEvent) => void): () => void;
   /** The backend changed the document on its own (e.g. a recorded note landed). */
   onDocument(cb: (s: Snapshot) => void): () => void;
@@ -272,13 +293,25 @@ async function tauriBridge(): Promise<Bridge> {
     commitGesture: () => invoke<Snapshot>("commit_gesture"),
     undo: () => invoke<Snapshot>("undo"),
     redo: () => invoke<Snapshot>("redo"),
-    newProject: (starter = true) =>
-      invoke<Snapshot>("new_project", { starter }),
+    newProject: (starter) =>
+      invoke<Snapshot>("new_project", { starter: starter ?? null }),
     openProject: (path) => invoke<Snapshot>("open_project", { path }),
     saveProject: (path) =>
       invoke<Snapshot>("save_project", { path: path ?? null }),
-    setPlaybackContext: (mode, patternId) =>
-      invoke("set_playback_context", { mode, patternId }),
+    setPlaybackContext: (
+      mode,
+      patternId,
+      chordOffsetTicks,
+      ghostPatternId = null,
+      ghostLevel = 1,
+    ) =>
+      invoke("set_playback_context", {
+        mode,
+        patternId,
+        chordOffsetTicks,
+        ghostPatternId,
+        ghostLevel,
+      }),
     play: (countInBars) =>
       invoke("transport_play", { countInBars: countInBars ?? null }),
     stop: () => invoke("transport_stop"),
@@ -294,12 +327,13 @@ async function tauriBridge(): Promise<Bridge> {
     exportWav: (request) => invoke<ExportResult>("export_wav", { request }),
     onExportProgress: (cb) => subscribe<ExportProgress>("export-progress", cb),
     exportMidi: (path, scope) => invoke<string>("export_midi", { path, scope }),
-    importMidi: (path, patternId) =>
-      invoke<Snapshot>("import_midi", { path, patternId }),
+    importMidi: (path) => invoke<Snapshot>("import_midi", { path }),
     listTemplates: () => invoke<TemplateInfo[]>("list_templates"),
     saveTemplate: (name) => invoke<TemplateInfo>("save_template", { name }),
     deleteTemplate: (name) => invoke("delete_template", { name }),
     newFromTemplate: (name) => invoke<Snapshot>("new_from_template", { name }),
+    listVibes: () => invoke<VibeInfo[]>("list_vibes"),
+    newFromVibe: (id) => invoke<Snapshot>("new_from_vibe", { id }),
     onPlayhead: (cb) => subscribe<PlayheadEvent>("playhead", cb),
     onDocument: (cb) => subscribe<Snapshot>("document", cb),
     onMidiActivity: (cb) => subscribe<number>("midi-activity", cb),
@@ -429,7 +463,6 @@ const NO_SUCH_PATTERN = "no such pattern";
 const NO_SUCH_CLIP = "no such clip";
 const NO_SUCH_SECTION = "no such section";
 const LAST_TRACK = "a project needs at least one track";
-const LAST_PATTERN = "a project needs at least one pattern";
 const INVALID_VALUE = "invalid value";
 const NO_PLUGIN = "track has no plugin";
 const NO_SUCH_PLUGIN = "no such plugin";
@@ -441,6 +474,9 @@ const NO_SUCH_AUDIO_SOURCE = "no such audio source";
 const NOT_AN_AUDIO_TRACK = "not an audio track";
 const NO_SUCH_INSERT = "no such insert";
 const TOO_MANY_INSERTS = `an insert chain holds at most ${MAX_INSERTS} effects`;
+const PAST_SONG_END = "that is past the end of the song";
+/** `ProjectModel` decoding refuses a schema it cannot migrate with this text. */
+export const OLD_SCHEMA = "This project was made with an older version of dissonant and can't be opened.";
 
 function fail(message: string): never {
   // A plain string, not an `Error`: that is what Tauri's `invoke` rejects with.
@@ -667,60 +703,212 @@ function sanitizeRig(r: AmpRig): AmpRig | null {
   };
 }
 
-function newPattern(name: string): SongPattern {
-  return {
-    id: uuid(),
-    name,
-    lengthTicks: 16 * TICKS_PER_BEAT,
-    chords: { chords: [] },
-    notesByTrack: {},
-    trackLoopTicks: {},
-    chordLoopTicks: null,
-  };
+function newPattern(trackId: string, name: string): SongPattern {
+  return { id: uuid(), trackId, name, lengthTicks: 16 * TICKS_PER_BEAT, notes: [] };
 }
 
-/** `ProjectModel::empty()`: one melody track, one empty pattern, no key, nothing arranged. */
-function emptyModel(): ProjectModel {
+/** `"<track name> <n>"`: the next free number among that track's patterns. */
+function nextPatternName(m: ProjectModel, track: Track): string {
+  const names = new Set(m.patterns.filter((p) => p.trackId === track.id).map((p) => p.name));
+  let n = names.size + 1;
+  while (names.has(`${track.name} ${n}`)) n++;
+  return `${track.name} ${n}`;
+}
+
+/** A copy of a pattern on the same track: fresh ids, `"<name> copy"`. */
+function copyPattern(p: SongPattern): SongPattern {
+  const copy = clone(p);
+  copy.id = uuid();
+  copy.name = `${p.name} copy`;
+  for (const n of copy.notes) n.id = uuid();
+  return copy;
+}
+
+/** A clip of `patternId` from tick 0 to the song end (loop-extended). */
+function songClip(patternId: string, songLengthTicks: number): Clip {
+  return { id: uuid(), patternId, startTick: 0, lengthTicks: songLengthTicks, offsetTicks: 0, muted: false };
+}
+
+/** Ticks per bar of the model's time signature. */
+const barOf = (m: ProjectModel) => beatsToTicks(beatsPerBar(m.timeSignature));
+
+/** The 4/4 bar and the four-bar pattern the starter and the vibes are written in. */
+const BAR_TICKS = 4 * TICKS_PER_BEAT;
+const PATTERN_TICKS = 4 * BAR_TICKS;
+
+/** The mock's stand-in for `settings.json`. */
+const SETTINGS_KEY = "dissonant.mock.settings";
+
+function mockSettings(): Settings {
+  try {
+    return withDefaults(JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null"));
+  } catch {
+    return withDefaults(null);
+  }
+}
+
+/** `editing.defaultSongBars`: how long every fresh project's song is. */
+const defaultSongBars = () => Math.max(1, Math.round(mockSettings().editing.defaultSongBars) || 32);
+
+/** `ProjectModel::empty()`: one melody track with one empty pattern, no key, nothing arranged. */
+function emptyModel(songBars = defaultSongBars()): ProjectModel {
+  const melody = newTrack(false, "melody");
   return {
     schemaVersion: SCHEMA_VERSION,
     tempo: 120,
     key: { rootPitchClass: null, scale: "major", isLocked: false },
-    tracks: [newTrack(false, "melody")],
-    patterns: [newPattern("pattern 1")],
+    tracks: [melody],
+    patterns: [newPattern(melody.id, "melody 1")],
     clips: [],
     audioSources: [],
     audioClips: [],
     sections: [],
-    master: {
-      gain: 1,
-      reverbWet: 0,
-      lowCutHz: 20,
-      highCutHz: 18000,
-      lowEq: 1,
-      midEq: 1,
-      highEq: 1,
-    },
+    master: { gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 },
+    chords: [],
+    songLengthTicks: songBars * BAR_TICKS,
   };
 }
 
-/** `ProjectModel::starter()`: `empty()` plus a I–IV–V–vi progression, a drum track and a clip. */
-function starterModel(): ProjectModel {
-  const m = emptyModel();
-  m.patterns[0].chords = {
-    chords: progression([0, 3, 4, 5], 0, "major", 16 * TICKS_PER_BEAT),
-  };
-  m.tracks.push(newTrack(true, "drums"));
-  const p = m.patterns[0];
-  m.clips = [
-    {
-      id: uuid(),
-      patternId: p.id,
-      startTick: 0,
-      lengthTicks: p.lengthTicks,
-      offsetTicks: 0,
-      muted: false,
-    },
+/** `STARTER_MELODY` in model.rs: (start, length, pitch, velocity) per 4-beat chord slot, in beats. */
+const STARTER_MELODY: [number, number, number, number][][] = [
+  [[0, 1.5, 76, 100], [1.5, 0.5, 74, 80], [2, 2, 72, 96]], // C:  E  D  C
+  [[0, 1, 69, 100], [1, 1, 72, 88], [2, 2, 77, 96]], // F:  A  C  F
+  [[0, 1.5, 74, 100], [1.5, 0.5, 71, 80], [2, 2, 67, 96]], // G:  D  B  G
+  [[0, 1.5, 72, 100], [1.5, 0.5, 71, 80], [2, 2, 69, 96]], // Am: C  B  A
+];
+
+type Groove = "backbeat" | "fourOnFloor" | "boomBap" | "halfTime" | "motorik" | "sparse";
+const [KICK, SNARE, CLAP, HAT] = [36, 38, 39, 42];
+const eighths = (on: number, off: number): [number, number, number][] => Array.from({ length: 8 }, (_, i) => [i * 0.5, HAT, i % 2 === 0 ? on : off]);
+
+/** `Groove::bar` in vibes.rs for a 4/4 bar: (offset in beats, pitch, velocity). */
+const GROOVE_BARS: Record<Groove, [number, number, number][]> = {
+  backbeat: [[0, KICK, 120], [1, SNARE, 100], [2, KICK, 120], [3, SNARE, 100], ...eighths(80, 60)],
+  fourOnFloor: [[0, KICK, 120], [1, KICK, 115], [2, KICK, 120], [3, KICK, 115], [1, CLAP, 100], [3, CLAP, 100], ...[0.5, 1.5, 2.5, 3.5].map((o): [number, number, number] => [o, HAT, 85])],
+  boomBap: [[0, KICK, 120], [1.5, KICK, 100], [2.5, KICK, 110], [1, SNARE, 105], [3, SNARE, 105], ...eighths(70, 50)],
+  halfTime: [[0, KICK, 120], [2.5, KICK, 100], [2, SNARE, 110], ...eighths(70, 55)],
+  motorik: [[0, KICK, 115], [2, KICK, 115], [2.5, KICK, 95], [1, SNARE, 100], [3, SNARE, 100], ...eighths(80, 75)],
+  sparse: [[0, KICK, 90], [2, HAT, 45]],
+};
+
+/** `Groove::hits(PATTERN_TICKS, BAR_TICKS)`: four bars of 4/4, sorted by time then pitch. */
+function grooveHits(groove: Groove): NoteEvent[] {
+  const hits: NoteEvent[] = [];
+  for (let bar = 0; bar < PATTERN_TICKS; bar += BAR_TICKS) {
+    for (const [offset, pitch, velocity] of GROOVE_BARS[groove])
+      hits.push({ id: uuid(), startTick: bar + beatsToTicks(offset), lengthTicks: TICKS_PER_BEAT / 4, pitch, velocity });
+  }
+  return hits.sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch);
+}
+
+/** `vibes::bass_line` over four 4/4 bars: the chord root under each hit, G♯1–G2. */
+function bassLine(chords: ChordEvent[], rhythm: [number, number][]): NoteEvent[] {
+  const notes: NoteEvent[] = [];
+  for (let bar = 0; bar < PATTERN_TICKS; bar += BAR_TICKS) {
+    rhythm.forEach(([offset, len], i) => {
+      const start = bar + beatsToTicks(offset);
+      const chord = chordAt(chords, start);
+      if (!chord || !chord.pitchClasses.length) return;
+      const pc = normalize(chord.pitchClasses[0]);
+      notes.push({
+        id: uuid(),
+        startTick: start,
+        lengthTicks: Math.min(beatsToTicks(len), PATTERN_TICKS - start),
+        pitch: 36 + pc - (pc >= 8 ? 12 : 0),
+        velocity: i === 0 ? 105 : 92,
+      });
+    });
+  }
+  return notes;
+}
+
+type Sound = [voice: string, tone: number, reverb: number];
+const SOUND: Record<string, Sound> = {
+  softKeys: ["triangle", 6000, 0.25],
+  warmPad: ["pad", 4000, 0.45],
+  glassPluck: ["pluck", 12000, 0.3],
+  buzzyBass: ["saw", 1200, 0],
+  roundBass: ["sine", 2000, 0],
+  leadWithBite: ["square", 9000, 0.15],
+};
+
+interface MockVibe extends VibeInfo {
+  swing: number;
+  /** The swing grid in ticks, like `ProjectModel.swingGridTicks`. */
+  swingGridTicks: number;
+  degrees: number[];
+  chordTicks: number;
+  groove: Groove;
+  bass: [number, number][];
+  bassSound: Sound;
+  leadName: string;
+  leadSound: Sound;
+}
+
+const lockedKey = (rootPitchClass: number, scale: ScaleType): KeyState => ({ rootPitchClass, scale, isLocked: true });
+const EIGHTH_BASS: [number, number][] = Array.from({ length: 8 }, (_, i) => [i * 0.5, 0.45]);
+
+/** `VIBES` in vibes.rs. `bridge.test.ts` pins the same values `vibe_values_shared_with_the_ui` does. */
+const MOCK_VIBES: MockVibe[] = [
+  { id: "lofi", name: "lo-fi bedroom", blurb: "dusty, swung and slow: jazzy chords, lazy drums, room for a melody", tempo: 80, key: lockedKey(5, "major"), swing: 60, swingGridTicks: TICKS_PER_BEAT / 4, degrees: [1, 4, 0, 5], chordTicks: BAR_TICKS, groove: "boomBap", bass: [[0, 1.25], [1.5, 1.5], [3.5, 0.5]], bassSound: SOUND.roundBass, leadName: "keys", leadSound: SOUND.softKeys },
+  { id: "postpunk", name: "post-punk", blurb: "fast, tense and driving: 8th-note bass, motorik drums, minor chords", tempo: 148, key: lockedKey(4, "minor"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 5, 2, 6], chordTicks: BAR_TICKS, groove: "motorik", bass: EIGHTH_BASS, bassSound: SOUND.buzzyBass, leadName: "lead", leadSound: SOUND.leadWithBite },
+  { id: "ambient", name: "ambient texture", blurb: "a slow two-chord drift: barely a beat, long notes, lots of space", tempo: 70, key: lockedKey(2, "major"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 3], chordTicks: 8 * TICKS_PER_BEAT, groove: "sparse", bass: [[0, 4]], bassSound: SOUND.roundBass, leadName: "pad", leadSound: SOUND.warmPad },
+  { id: "songwriter", name: "songwriter demo", blurb: "four friendly chords and a plain beat to sing or play over", tempo: 96, key: lockedKey(7, "major"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 4, 5, 3], chordTicks: BAR_TICKS, groove: "backbeat", bass: [[0, 2], [2, 2]], bassSound: SOUND.roundBass, leadName: "melody", leadSound: SOUND.glassPluck },
+  { id: "club", name: "club loop", blurb: "four-on-the-floor, offbeat bass and a minor loop that keeps going", tempo: 124, key: lockedKey(9, "minor"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 6, 5, 6], chordTicks: BAR_TICKS, groove: "fourOnFloor", bass: [[0.5, 0.4], [1.5, 0.4], [2.5, 0.4], [3.5, 0.4]], bassSound: SOUND.buzzyBass, leadName: "lead", leadSound: SOUND.leadWithBite },
+];
+
+const withSound = (t: Track, [voice, tone, reverb]: Sound): Track => ({ ...t, voice, tone, reverbSend: reverb });
+
+/**
+ * `ProjectModel::from_vibe`: one pattern per track ("keys 1", "bass 1", "drums 1"), the
+ * progression tiled across the whole song, one clip per track from 0 to the song end.
+ */
+function vibeModel(id: string, songBars = defaultSongBars()): ProjectModel | null {
+  const v = MOCK_VIBES.find((x) => x.id === id);
+  if (!v) return null;
+  const m = emptyModel(songBars);
+  m.tempo = v.tempo;
+  m.swing = v.swing;
+  m.swingGridTicks = v.swingGridTicks;
+  m.key = { ...v.key };
+  m.chords = progression(v.degrees, v.key.rootPitchClass!, v.key.scale, m.songLengthTicks, v.chordTicks);
+  const lead = withSound({ ...m.tracks[0], name: v.leadName }, v.leadSound);
+  const bass = withSound(newTrack(false, "bass"), v.bassSound);
+  const drums = newTrack(true, "drums");
+  m.tracks = [lead, bass, drums];
+  m.patterns = [
+    newPattern(lead.id, `${lead.name} 1`),
+    { ...newPattern(bass.id, "bass 1"), notes: bassLine(m.chords, v.bass) },
+    { ...newPattern(drums.id, "drums 1"), notes: grooveHits(v.groove) },
   ];
+  m.clips = m.patterns.map((p) => songClip(p.id, m.songLengthTicks));
+  return m;
+}
+
+/**
+ * `ProjectModel::starter()`: I–IV–V–vi in C (key locked) across the whole song, a pluck melody
+ * pattern and a drum pattern, each placed from 0 to the song end so ▶ plays music at once.
+ */
+function starterModel(songBars = defaultSongBars()): ProjectModel {
+  const m = emptyModel(songBars);
+  m.key = { rootPitchClass: 0, scale: "major", isLocked: true };
+  m.chords = progression([0, 3, 4, 5], 0, "major", m.songLengthTicks);
+  const melody = m.tracks[0];
+  melody.voice = "pluck";
+  melody.reverbSend = 0.2;
+  const drums = newTrack(true, "drums");
+  m.tracks.push(drums);
+  m.patterns[0].notes = STARTER_MELODY.flatMap((phrase, i) =>
+    phrase.map(([start, lengthBeats, pitch, velocity]) => ({
+      id: uuid(),
+      startTick: i * BAR_TICKS + beatsToTicks(start),
+      lengthTicks: beatsToTicks(lengthBeats),
+      pitch,
+      velocity,
+    })),
+  );
+  m.patterns.push({ ...newPattern(drums.id, "drums 1"), notes: grooveHits("backbeat") });
+  m.clips = m.patterns.map((p) => songClip(p.id, m.songLengthTicks));
   return m;
 }
 
@@ -750,8 +938,27 @@ function sanitizeNote(n: NoteEvent): NoteEvent {
 
 /** The schema this build writes; mirrors `SCHEMA_VERSION` in crates/dissonant-core/src/model.rs.
  *  7 added `Track::plugin`; 8 added audio tracks, sources and clips; 9 moved musical time from
- *  beats to ticks. */
-const SCHEMA_VERSION = 9;
+ *  beats to ticks; 10 gave every pattern one track and moved the chords onto the song. */
+const SCHEMA_VERSION = 10;
+
+/** A stored pattern from a schema ≤ 9 file: one pattern held every track and its own chords. */
+interface LegacyPattern {
+  trackId?: string;
+  notesByTrack?: Record<string, NoteEvent[]>;
+  trackLoopTicks?: Record<string, number>;
+  chordLoopTicks?: number | null;
+  /** Written as `{ chords: [...] }` by schema ≤ 9 and as a bare array by the Rust side today. */
+  chords?: { chords?: ChordEvent[] } | ChordEvent[];
+}
+
+/** The legacy fields of `p`, which the current `SongPattern` no longer declares. */
+const legacy = (p: SongPattern): LegacyPattern => p as SongPattern & LegacyPattern;
+
+/** A legacy pattern's own chord progression, whatever shape it was stored in. */
+function legacyChords(p: SongPattern): ChordEvent[] {
+  const c = legacy(p).chords;
+  return (Array.isArray(c) ? c : (c?.chords ?? [])) ?? [];
+}
 
 /**
  * `migrate_beats` in crates/dissonant-core/src/model.rs: a project written before schema 9 keeps
@@ -775,24 +982,29 @@ function migrateBeats(m: ProjectModel): ProjectModel {
   for (const p of m.patterns) {
     fold(p, "lengthBeats", "lengthTicks");
     fold(p, "chordLoopBeats", "chordLoopTicks");
+    const old = legacy(p);
     const loops = loose(p).trackLoopBeats;
-    if (loops && typeof loops === "object" && !p.trackLoopTicks) {
-      p.trackLoopTicks = Object.fromEntries(
+    if (loops && typeof loops === "object" && !old.trackLoopTicks) {
+      old.trackLoopTicks = Object.fromEntries(
         Object.entries(loops).map(([id, v]) => [id, beatsToTicks(Number(v))]),
       );
     }
     delete loose(p).trackLoopBeats;
-    for (const notes of Object.values(p.notesByTrack ?? {})) {
+    for (const notes of [...Object.values(old.notesByTrack ?? {}), p.notes ?? []]) {
       for (const n of notes) {
         fold(n, "startBeat", "startTick");
         fold(n, "lengthBeats", "lengthTicks");
         fold(n, "shift", "shiftTicks");
       }
     }
-    for (const ch of p.chords?.chords ?? []) {
+    for (const ch of legacyChords(p)) {
       fold(ch, "startBeat", "startTick");
       fold(ch, "lengthBeats", "lengthTicks");
     }
+  }
+  for (const ch of m.chords ?? []) {
+    fold(ch, "startBeat", "startTick");
+    fold(ch, "lengthBeats", "lengthTicks");
   }
   for (const c of m.clips ?? []) {
     fold(c, "startBeat", "startTick");
@@ -802,38 +1014,95 @@ function migrateBeats(m: ProjectModel): ProjectModel {
   for (const s of m.sections ?? []) fold(s, "startBeat", "startTick");
   for (const c of m.audioClips ?? []) fold(c, "startBeat", "startTick");
   for (const t of m.tempoPoints ?? []) fold(t, "beat", "tick");
+  fold(m, "songLengthBeats", "songLengthTicks");
   fold(m, "swingGrid", "swingGridTicks");
   return m;
 }
 
-/** `ProjectModel::normalized`, run on anything read back from storage. */
+/** A progression written over `[0, period)` repeated up to `end`, cut there. Mirrors `tile_chords`. */
+function tileChords(progression: ChordEvent[], period: number, end: number): ChordEvent[] {
+  const out: ChordEvent[] = [];
+  if (period <= 0) return out;
+  for (let at = 0; at < end; at += period) {
+    for (const c of progression) {
+      const start = at + c.startTick;
+      const stop = Math.min(start + c.lengthTicks, end);
+      if (stop > start) out.push({ ...c, id: uuid(), startTick: start, lengthTicks: stop - start });
+    }
+  }
+  return out;
+}
+
+/**
+ * `migrate_v10`: a pattern used to hold every track's notes and its own looping chord track.
+ * Each one becomes a pattern per track (clips repointed, loops flattened), and its chords are
+ * lifted onto the song wherever a clip of it played.
+ */
+function migrateV10(m: ProjectModel): void {
+  if (!m.patterns.some((p) => !legacy(p).trackId)) return;
+  const oldClips = m.clips ?? [];
+  const patterns: SongPattern[] = [];
+  const clips: Clip[] = [];
+  const lifted: ChordEvent[] = [];
+  for (const old of m.patterns) {
+    const mine = oldClips.filter((c) => c.patternId === old.id);
+    if (legacy(old).trackId) {
+      clips.push(...mine);
+      patterns.push(old);
+      continue;
+    }
+    const period = Math.max(1, old.lengthTicks);
+    const turn = loopTurn(legacy(old).chordLoopTicks, period);
+    const chords = layOutLoop(legacyChords(old), turn, period);
+    for (const clip of mine) {
+      for (const c of tileChords(chords, period, clip.offsetTicks + clip.lengthTicks)) {
+        const start = Math.max(clip.startTick + c.startTick - clip.offsetTicks, clip.startTick);
+        const cut = Math.min(clip.startTick + c.startTick - clip.offsetTicks + c.lengthTicks, clip.startTick + clip.lengthTicks);
+        if (cut > start) lifted.push({ ...c, startTick: start, lengthTicks: cut - start });
+      }
+    }
+    for (const t of m.tracks) {
+      const own = legacy(old).notesByTrack?.[t.id] ?? [];
+      if (own.length === 0) continue;
+      const split: SongPattern = {
+        ...newPattern(t.id, `${old.name} ${t.name}`),
+        lengthTicks: old.lengthTicks,
+        notes: layOutLoop(own, loopTurn(legacy(old).trackLoopTicks?.[t.id], period), period),
+      };
+      clips.push(...mine.map((c) => ({ ...c, id: uuid(), patternId: split.id })));
+      patterns.push(split);
+    }
+  }
+  m.patterns = patterns;
+  m.clips = clips;
+  m.chords = [...(m.chords ?? []), ...lifted];
+  // A pre-v10 file never said how long the song was: it ended with its last clip.
+  const end = clips.reduce((max, c) => Math.max(max, c.startTick + c.lengthTicks), 0);
+  m.songLengthTicks = Math.max(m.songLengthTicks ?? 0, end);
+}
+
+/** A legacy loop length made usable: inside the pattern, or the whole pattern when unset. */
+function loopTurn(ticks: number | null | undefined, period: number): number {
+  return ticks != null && Number.isFinite(ticks) && ticks > 0 ? Math.min(ticks, period) : period;
+}
+
+/**
+ * Decoding plus `ProjectModel::normalized`, run on anything read back from storage. A file
+ * older than schema 6 is refused: there is no migration from patterns that hold every track.
+ */
 function normalizedModel(m: ProjectModel): ProjectModel {
   // Only ever bump forward, like `normalized()`: relabelling a newer file as ours would make the
   // next save overwrite it with the fields this build dropped.
   migrateBeats(m);
+  migrateV10(m);
   m.schemaVersion = Math.max(m.schemaVersion ?? 0, SCHEMA_VERSION);
   if (m.tracks.length === 0) m.tracks = [newTrack(false, "melody")];
-  if (m.patterns.length === 0) m.patterns = [newPattern("pattern 1")];
   // `#[serde(default)]` on the Rust side: a project saved before plugins existed has no field.
   for (const t of m.tracks) t.plugin ??= null;
   const trackIds = new Set(m.tracks.map((t) => t.id));
-  for (const p of m.patterns) {
-    p.trackLoopTicks ??= {};
-    p.chordLoopTicks ??= null;
-    // Notes keyed by a track that no longer exists are invisible and never played.
-    for (const id of Object.keys(p.notesByTrack)) {
-      if (!trackIds.has(id)) delete p.notesByTrack[id];
-    }
-    for (const id of Object.keys(p.trackLoopTicks)) {
-      if (!trackIds.has(id) || !(p.trackLoopTicks[id] > 0))
-        delete p.trackLoopTicks[id];
-    }
-    if (!(p.chordLoopTicks != null && p.chordLoopTicks > 0))
-      p.chordLoopTicks = null;
-    for (const notes of Object.values(p.notesByTrack)) {
-      for (let i = 0; i < notes.length; i++) notes[i] = sanitizeNote(notes[i]);
-    }
-  }
+  // A pattern of a track that no longer exists is invisible and never played.
+  m.patterns = (m.patterns ?? []).filter((p) => trackIds.has(p.trackId));
+  for (const p of m.patterns) p.notes = (p.notes ?? []).map(sanitizeNote);
   // An audio track is never also a drum track, and always carries a rig; a note track never
   // does. Hand-edited files can carry either combination.
   for (const t of m.tracks) {
@@ -845,9 +1114,14 @@ function normalizedModel(m: ProjectModel): ProjectModel {
       t.amp = null;
     }
   }
-  m.clips = (m.clips ?? []).filter((c) =>
-    m.patterns.some((p) => p.id === c.patternId),
-  );
+  m.chords = m.chords ?? [];
+  m.songLengthTicks = Number.isFinite(m.songLengthTicks)
+    ? Math.max(barOf(m), m.songLengthTicks)
+    : defaultSongBars() * barOf(m);
+  m.clips = (m.clips ?? [])
+    .filter((c) => m.patterns.some((p) => p.id === c.patternId))
+    .filter((c) => c.startTick < m.songLengthTicks)
+    .map((c) => ({ ...c, lengthTicks: Math.min(c.lengthTicks, m.songLengthTicks - c.startTick) }));
   // Unreferenced sources stay: undoing the clip that used one must not force a re-decode.
   m.audioSources ??= [];
   const audioTrackIds = new Set(
@@ -864,6 +1138,25 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   for (const t of m.tracks) if (t.inserts) t.inserts = sanitizeInserts(t.inserts);
   if (m.masterInserts) m.masterInserts = sanitizeInserts(m.masterInserts);
   return m;
+}
+
+/**
+ * `AddClip` / `UpdateClip` clamping: a clip may not start at or after the song end, and its end
+ * is cut back to it. Returns the clamped length in ticks.
+ */
+function clampToSong(m: ProjectModel, startTick: number, lengthTicks: number): number {
+  if (startTick >= m.songLengthTicks) fail(PAST_SONG_END);
+  return Math.min(lengthTicks, m.songLengthTicks - startTick);
+}
+
+/** `UpdateClip`: the clip id, then values; the pattern never changes (a clip stays on its track). */
+function updateClip(m: ProjectModel, clip: Clip): void {
+  const i = m.clips.findIndex((cl) => cl.id === clip.id);
+  if (i < 0) fail(NO_SUCH_CLIP);
+  if (!allFinite(clip.startTick, clip.lengthTicks, clip.offsetTicks)) fail(INVALID_VALUE);
+  if (clip.startTick < 0 || clip.lengthTicks <= 0 || clip.offsetTicks < 0) fail(INVALID_VALUE);
+  const lengthTicks = clampToSong(m, clip.startTick, clip.lengthTicks);
+  m.clips[i] = { ...clip, patternId: m.clips[i].patternId, lengthTicks };
 }
 
 function clone<T>(x: T): T {
@@ -888,11 +1181,13 @@ function reduce(m: ProjectModel, c: Command): void {
     case "setKey":
       m.key = { ...c.key };
       break;
-    case "addTrack":
-      m.tracks.push(
-        newTrack(c.isDrum, c.isDrum ? "drums" : `track ${m.tracks.length + 1}`),
-      );
+    case "addTrack": {
+      // A new track comes with one empty pattern, so there is something to open right away.
+      const t = newTrack(c.isDrum, c.isDrum ? "drums" : `track ${m.tracks.length + 1}`);
+      m.tracks.push(t);
+      m.patterns.push(newPattern(t.id, `${t.name} 1`));
       break;
+    }
     case "setTrackColor":
       if (c.color !== null && !/^#[0-9a-f]{6}$/i.test(c.color))
         fail(INVALID_VALUE);
@@ -903,10 +1198,10 @@ function reduce(m: ProjectModel, c: Command): void {
       const before = m.tracks.length;
       m.tracks = m.tracks.filter((t) => t.id !== c.id);
       if (m.tracks.length === before) fail(NO_SUCH_TRACK);
-      for (const p of m.patterns) {
-        delete p.notesByTrack[c.id];
-        delete p.trackLoopTicks[c.id];
-      }
+      // Its patterns go with it, and their clips with them.
+      const gone = new Set(m.patterns.filter((p) => p.trackId === c.id).map((p) => p.id));
+      m.patterns = m.patterns.filter((p) => !gone.has(p.id));
+      m.clips = m.clips.filter((cl) => !gone.has(cl.patternId));
       m.audioClips = (m.audioClips ?? []).filter((a) => a.trackId !== c.id);
       break;
     }
@@ -999,34 +1294,17 @@ function reduce(m: ProjectModel, c: Command): void {
       insertMut(m, c.target, c.insertId).state = c.state;
       break;
     }
-    case "addPattern": {
-      const p = newPattern(`pattern ${m.patterns.length + 1}`);
-      const root = m.key.rootPitchClass ?? 0;
-      p.chords = {
-        chords: progression(
-          STARTERS[0].degrees,
-          root,
-          m.key.scale,
-          p.lengthTicks,
-        ),
-      };
-      m.patterns.push(p);
+    case "addPattern":
+      m.patterns.push(newPattern(c.trackId, nextPatternName(m, track(c.trackId))));
       break;
-    }
     case "duplicatePattern": {
       const i = m.patterns.findIndex((p) => p.id === c.id);
       if (i < 0) fail(NO_SUCH_PATTERN);
-      const copy = clone(m.patterns[i]);
-      copy.id = uuid();
-      copy.name = `${copy.name} copy`;
-      for (const notes of Object.values(copy.notesByTrack))
-        for (const n of notes) n.id = uuid();
-      for (const ch of copy.chords.chords) ch.id = uuid();
-      m.patterns.splice(i + 1, 0, copy);
+      m.patterns.splice(i + 1, 0, copyPattern(m.patterns[i]));
       break;
     }
     case "deletePattern": {
-      if (m.patterns.length <= 1) fail(LAST_PATTERN);
+      // No last-pattern guard: a track may end up with no patterns at all.
       const before = m.patterns.length;
       m.patterns = m.patterns.filter((p) => p.id !== c.id);
       if (m.patterns.length === before) fail(NO_SUCH_PATTERN);
@@ -1041,104 +1319,70 @@ function reduce(m: ProjectModel, c: Command): void {
       if (!allFinite(c.ticks) || c.ticks < TICKS_PER_BEAT) fail(INVALID_VALUE);
       pattern(c.id).lengthTicks = c.ticks;
       break;
-    case "setTrackLoop": {
-      track(c.trackId); // Rust checks the track before the pattern.
-      if (c.ticks !== null && (!allFinite(c.ticks) || c.ticks < MIN_LOOP_TICKS))
-        fail(INVALID_VALUE);
-      const p = pattern(c.patternId);
-      if (c.ticks === null) delete p.trackLoopTicks[c.trackId];
-      else p.trackLoopTicks[c.trackId] = c.ticks;
-      // The loop is the track's whole extent: cut what no longer fits inside it.
-      const turn = trackLoop(p, c.trackId);
-      const kept = (p.notesByTrack[c.trackId] ?? [])
-        .filter((n) => n.startTick < turn)
-        .map((n) => ({
-          ...n,
-          lengthTicks: Math.max(
-            MIN_NOTE_TICKS,
-            Math.min(n.lengthTicks, turn - n.startTick),
-          ),
-        }));
-      if (kept.length === 0) delete p.notesByTrack[c.trackId];
-      else p.notesByTrack[c.trackId] = kept;
-      break;
-    }
-    case "setChordLoop": {
-      if (c.ticks !== null && (!allFinite(c.ticks) || c.ticks < MIN_LOOP_TICKS))
-        fail(INVALID_VALUE);
-      const p = pattern(c.patternId);
-      p.chordLoopTicks = c.ticks;
-      const turn = chordLoop(p);
-      p.chords = {
-        chords: p.chords.chords
-          .filter((ch) => ch.startTick < turn)
-          .map((ch) => ({
-            ...ch,
-            lengthTicks: Math.min(ch.lengthTicks, turn - ch.startTick),
-          })),
-      };
-      break;
-    }
-    case "setNotes": {
-      track(c.trackId); // Rust checks the track before the pattern.
-      const p = pattern(c.patternId);
-      const notes: NoteEvent[] = c.notes
+    case "setNotes":
+      pattern(c.patternId).notes = c.notes
         .map(sanitizeNote)
         .sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch);
-      if (notes.length === 0) delete p.notesByTrack[c.trackId];
-      else p.notesByTrack[c.trackId] = notes;
       break;
-    }
-    case "setChords": {
-      const p = pattern(c.patternId);
-      const chords: ChordEvent[] = c.chords
-        .filter((ch) => ch.lengthTicks > 0 && ch.startTick >= 0)
-        .map((ch) => ({
-          ...ch,
-          pitchClasses: [...new Set(ch.pitchClasses.map(normalize))].sort(
-            (a, b) => a - b,
-          ),
-        }))
-        .sort((a, b) => a.startTick - b.startTick);
-      p.chords = { chords };
+    case "setChords":
+      // The project progression, in song ticks.
+      // Mirrors `tidy_chords`: pitch classes keep their order (root first), each chord is cut
+      // at the next one's start.
+      m.chords = c.chords
+        .filter((ch) => allFinite(ch.startTick, ch.lengthTicks) && ch.lengthTicks > 0 && ch.startTick >= 0)
+        .map((ch) => ({ ...ch, pitchClasses: [...new Set(ch.pitchClasses.map(normalize))] }))
+        .sort((a, b) => a.startTick - b.startTick)
+        .map((ch, i, all) => (all[i + 1] ? { ...ch, lengthTicks: Math.min(ch.lengthTicks, all[i + 1].startTick - ch.startTick) } : ch))
+        .filter((ch) => ch.lengthTicks > 0);
       break;
-    }
     case "addClip": {
       const p = pattern(c.patternId);
       const length = c.lengthTicks ?? p.lengthTicks;
-      if (!allFinite(c.startTick, length) || c.startTick < 0 || length <= 0)
-        fail(INVALID_VALUE);
-      m.clips.push({
-        id: uuid(),
-        patternId: p.id,
-        startTick: c.startTick,
-        lengthTicks: length,
-        offsetTicks: 0,
-        muted: false,
-      });
+      if (!allFinite(c.startTick, length) || c.startTick < 0 || length <= 0) fail(INVALID_VALUE);
+      const lengthTicks = clampToSong(m, c.startTick, length);
+      m.clips.push({ id: uuid(), patternId: p.id, startTick: c.startTick, lengthTicks, offsetTicks: 0, muted: false });
       m.clips.sort((a, b) => a.startTick - b.startTick);
       break;
     }
-    case "updateClip": {
-      pattern(c.clip.patternId); // Rust validates the pattern, then the values, then the clip id.
-      if (!allFinite(c.clip.startTick, c.clip.lengthTicks, c.clip.offsetTicks))
-        fail(INVALID_VALUE);
-      if (
-        c.clip.startTick < 0 ||
-        c.clip.lengthTicks <= 0 ||
-        c.clip.offsetTicks < 0
-      )
-        fail(INVALID_VALUE);
-      const i = m.clips.findIndex((cl) => cl.id === c.clip.id);
-      if (i < 0) fail(NO_SUCH_CLIP);
-      m.clips[i] = { ...c.clip };
+    case "updateClip":
+      updateClip(m, c.clip);
       m.clips.sort((a, b) => a.startTick - b.startTick);
       break;
-    }
+    case "updateClips":
+      // One command, so one undo step: a group move.
+      for (const clip of c.clips) updateClip(m, clip);
+      m.clips.sort((a, b) => a.startTick - b.startTick);
+      break;
     case "removeClip": {
       const before = m.clips.length;
       m.clips = m.clips.filter((cl) => cl.id !== c.id);
       if (m.clips.length === before) fail(NO_SUCH_CLIP);
+      break;
+    }
+    case "removeClips": {
+      // Unknown ids are skipped, as in the Rust document.
+      const ids = new Set(c.ids);
+      m.clips = m.clips.filter((cl) => !ids.has(cl.id));
+      break;
+    }
+    case "makeClipUnique": {
+      // Fork the clip's pattern (like duplicatePattern) and point just this clip at the copy.
+      const clip = m.clips.find((cl) => cl.id === c.id) ?? fail(NO_SUCH_CLIP);
+      const i = m.patterns.findIndex((p) => p.id === clip.patternId);
+      if (i < 0) fail(NO_SUCH_PATTERN);
+      const copy = copyPattern(m.patterns[i]);
+      m.patterns.splice(i + 1, 0, copy);
+      clip.patternId = copy.id;
+      break;
+    }
+    case "setSongLength": {
+      if (!allFinite(c.ticks)) fail(INVALID_VALUE);
+      const end = Math.max(barOf(m), Math.round(c.ticks));
+      m.songLengthTicks = end;
+      // Clips starting at or after the new end go; clips crossing it are trimmed.
+      m.clips = m.clips
+        .filter((cl) => cl.startTick < end)
+        .map((cl) => (cl.startTick + cl.lengthTicks > end ? { ...cl, lengthTicks: end - cl.startTick } : cl));
       break;
     }
     case "addSection":
@@ -1295,6 +1539,7 @@ const MAX_UNDO = 200;
 
 /** The mock's stand-in for the filesystem: one slot, written by save, read by open. */
 const STORAGE_KEY = "dissonant.mock.project";
+const TEMPLATES_KEY = "dissonant.mock.templates";
 
 // ─── The mock's plugin world ───────────────────────────────────────────────────────────────
 
@@ -1924,16 +2169,10 @@ function mockBridge(): Bridge {
     });
   }
 
+  /** Song mode ends at the song's hard end; pattern mode loops the context pattern. */
   const loopLength = () => {
-    if (mode === "song" && model.clips.length > 0) {
-      return model.clips.reduce(
-        (max, c) => Math.max(max, c.startTick + c.lengthTicks),
-        0,
-      );
-    }
-    const p =
-      model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
-    return p?.lengthTicks ?? 16 * TICKS_PER_BEAT;
+    if (mode === "song") return model.songLengthTicks;
+    return model.patterns.find((x) => x.id === patternId)?.lengthTicks ?? 16 * TICKS_PER_BEAT;
   };
 
   const frame = () => {
@@ -2137,8 +2376,17 @@ function mockBridge(): Bridge {
       }
       return snapshot();
     },
-    newProject: async (starter = true) => {
-      replace(starter ? starterModel() : emptyModel(), null);
+    newProject: async (starter) => {
+      // Like `new_project`: no explicit choice means the "new project opens" setting.
+      let useStarter = starter;
+      if (useStarter === undefined) {
+        try {
+          useStarter = mockSettings().editing.newProject === "starter";
+        } catch {
+          useStarter = true;
+        }
+      }
+      replace(useStarter ? starterModel() : emptyModel(), null);
       return snapshot();
     },
     openProject: async (p) => {
@@ -2160,6 +2408,7 @@ function mockBridge(): Bridge {
       }
       return snapshot();
     },
+    // The mock plays no sound, so the chord offset and the ghost only matter to the engine.
     setPlaybackContext: async (m, pid) => {
       if (m !== mode || pid !== patternId) playTick = 0;
       mode = m;
@@ -2204,33 +2453,31 @@ function mockBridge(): Bridge {
     },
     listTemplates: async () => {
       try {
-        return Object.keys(
-          JSON.parse(localStorage.getItem("dissonant.mock.templates") ?? "{}"),
-        ).map((name) => ({ name, path: name }));
+        return Object.keys(JSON.parse(localStorage.getItem(TEMPLATES_KEY) ?? "{}")).map((name) => ({ name, path: name }));
       } catch {
         return [];
       }
     },
     saveTemplate: async (name) => {
-      const all = JSON.parse(
-        localStorage.getItem("dissonant.mock.templates") ?? "{}",
-      ) as Record<string, ProjectModel>;
+      const all = JSON.parse(localStorage.getItem(TEMPLATES_KEY) ?? "{}") as Record<string, ProjectModel>;
       all[name] = clone(model);
-      localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
+      localStorage.setItem(TEMPLATES_KEY, JSON.stringify(all));
       return { name, path: name };
     },
     deleteTemplate: async (name) => {
-      const all = JSON.parse(
-        localStorage.getItem("dissonant.mock.templates") ?? "{}",
-      ) as Record<string, ProjectModel>;
+      const all = JSON.parse(localStorage.getItem(TEMPLATES_KEY) ?? "{}") as Record<string, ProjectModel>;
       delete all[name];
-      localStorage.setItem("dissonant.mock.templates", JSON.stringify(all));
+      localStorage.setItem(TEMPLATES_KEY, JSON.stringify(all));
+    },
+    listVibes: async () => MOCK_VIBES.map(({ id, name, blurb, tempo, key }) => ({ id, name, blurb, tempo, key: { ...key } })),
+    newFromVibe: async (id) => {
+      replace(vibeModel(id) ?? fail(`no vibe called ${id}`), null);
+      return snapshot();
     },
     newFromTemplate: async (name) => {
-      const all = JSON.parse(
-        localStorage.getItem("dissonant.mock.templates") ?? "{}",
-      ) as Record<string, ProjectModel>;
-      if (all[name]) replace(clone(all[name]), null);
+      const all = JSON.parse(localStorage.getItem(TEMPLATES_KEY) ?? "{}") as Record<string, ProjectModel>;
+      // A template is a project file: an old one is refused like any other.
+      if (all[name]) replace(normalizedModel(clone(all[name])), null);
       return snapshot();
     },
     onPlayhead: (cb) => {
@@ -2266,17 +2513,14 @@ function mockBridge(): Bridge {
       const h = held.get(pitch);
       held.delete(pitch);
       if (!h) return;
-      const track = liveTrack ?? model.tracks[0]?.id;
-      const p =
-        model.patterns.find((x) => x.id === patternId) ?? model.patterns[0];
-      if (!track || !p) return;
+      // Recording lands in the context pattern, and only while the live track is its track.
+      const p = model.patterns.find((x) => x.id === patternId);
+      if (!p || (liveTrack ?? model.tracks[0]?.id) !== p.trackId) return;
       const grid = quantize > 0 ? quantize : TICKS_PER_BEAT / 32;
       let len = playTick - h.start;
       if (len < 0) len += p.lengthTicks;
       const start = Math.round((h.start % p.lengthTicks) / grid) * grid;
-      const notes = (p.notesByTrack[track] ?? []).filter(
-        (n) => !(n.pitch === pitch && Math.abs(n.startTick - start) < grid / 2),
-      );
+      const notes = p.notes.filter((n) => !(n.pitch === pitch && Math.abs(n.startTick - start) < grid / 2));
       notes.push({
         id: uuid(),
         startTick: Math.min(start, p.lengthTicks - grid),
@@ -2287,12 +2531,7 @@ function mockBridge(): Bridge {
       pushUndo(clone(model), "record notes");
       redo.length = 0;
       redoLabels.length = 0;
-      reduce(model, {
-        type: "setNotes",
-        patternId: p.id,
-        trackId: track,
-        notes,
-      });
+      reduce(model, { type: "setNotes", patternId: p.id, notes });
       notifyDoc();
     },
     setLoop: async (s, e) => {
@@ -2333,21 +2572,10 @@ function mockBridge(): Bridge {
     restoreAutosave: async () => snapshot(),
     discardAutosave: async () => {},
     autosaveNow: async () => null,
-    getSettings: async () => {
-      try {
-        return withDefaults(
-          JSON.parse(localStorage.getItem("dissonant.mock.settings") ?? "null"),
-        );
-      } catch {
-        return withDefaults(null);
-      }
-    },
+    getSettings: async () => mockSettings(),
     setSettings: async (settings) => {
       try {
-        localStorage.setItem(
-          "dissonant.mock.settings",
-          JSON.stringify(settings),
-        );
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
       } catch {
         /* storage unavailable */
       }

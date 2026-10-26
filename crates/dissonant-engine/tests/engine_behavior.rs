@@ -8,7 +8,9 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
-use dissonant_core::{MasterSettings, NoteEvent, ProjectModel, Sequence, TICKS_PER_BEAT};
+use dissonant_core::{
+    Clip, MasterSettings, NoteEvent, ProjectModel, Sequence, SongPattern, TICKS_PER_BEAT,
+};
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
 use dissonant_engine::render::{render_to_buffer, RenderOptions};
 
@@ -26,13 +28,31 @@ fn model(voice: &str, length_ticks: i64) -> ProjectModel {
     m
 }
 
+/// Put `notes` in the track's own pattern, making one (as long as the first) on first use.
 fn set_notes(m: &mut ProjectModel, track: usize, notes: Vec<NoteEvent>) {
     let id = m.tracks[track].id;
-    m.patterns[0].notes_by_track.insert(id, notes);
+    let length = m.patterns[0].length_ticks;
+    match m.patterns.iter_mut().find(|p| p.track_id == id) {
+        Some(p) => p.notes = notes,
+        None => {
+            let mut p = SongPattern::new(id, "p");
+            p.length_ticks = length;
+            p.notes = notes;
+            m.patterns.push(p);
+        }
+    }
 }
 
+/// The first pattern's loop with every track's own pattern playing along at pattern-local
+/// ticks, as if each were placed at tick 0 (so multi-track mixes can be measured).
 fn sequence(m: &ProjectModel) -> Arc<Sequence> {
-    Arc::new(Sequence::from_pattern(m, &m.patterns[0].id).expect("pattern exists"))
+    let mut seq = Sequence::from_pattern(m, &m.patterns[0].id, 0).expect("pattern exists");
+    for t in &mut seq.tracks {
+        if let Some(p) = m.patterns.iter().find(|p| p.track_id == t.id) {
+            t.notes = p.notes.clone();
+        }
+    }
+    Arc::new(seq)
 }
 
 /// Offline render of the model's first pattern. Returns de-interleaved (left, right).
@@ -40,7 +60,6 @@ fn render(m: &ProjectModel, tail_seconds: f64) -> (Vec<f32>, Vec<f32>) {
     let opts = RenderOptions {
         sample_rate: SR as u32,
         tail_seconds,
-        hear_chords: false,
         master: m.master.clone(),
         // Measurements below compare raw sample values, so no normalising, dither or extra loops.
         ..RenderOptions::default()
@@ -144,12 +163,18 @@ fn pan_moves_energy_between_channels() {
     let (center_l, center_r) = panned_peaks(0.0);
     let (hard_r_left, hard_r_right) = panned_peaks(1.0);
 
-    assert!(hard_l_left > 0.01, "pan -1 produced no left signal: {hard_l_left}");
+    assert!(
+        hard_l_left > 0.01,
+        "pan -1 produced no left signal: {hard_l_left}"
+    );
     assert!(
         hard_l_right < hard_l_left * 1e-3,
         "pan -1 leaked into the right channel: l={hard_l_left} r={hard_l_right}"
     );
-    assert!(hard_r_right > 0.01, "pan +1 produced no right signal: {hard_r_right}");
+    assert!(
+        hard_r_right > 0.01,
+        "pan +1 produced no right signal: {hard_r_right}"
+    );
     assert!(
         hard_r_left < hard_r_right * 1e-3,
         "pan +1 leaked into the left channel: l={hard_r_left} r={hard_r_right}"
@@ -264,7 +289,10 @@ fn reverb_send_adds_a_tail_and_zero_adds_none() {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
     }
 }
@@ -307,7 +335,10 @@ fn a_fully_wet_track_does_not_slam_the_master_clamp() {
         set_notes(&mut m, 0, vec![NoteEvent::new(0, 6 * B, 69)]);
         let (l, _) = render(&m, 1.0);
         // 6 beats = 3 s; measure once the reverb has fully built up.
-        (peak(&l[secs(1.8)..secs(2.8)]), rms(&l[secs(1.8)..secs(2.8)]))
+        (
+            peak(&l[secs(1.8)..secs(2.8)]),
+            rms(&l[secs(1.8)..secs(2.8)]),
+        )
     };
     let (dry_peak, dry_rms) = bus(0.0);
     for send in [0.25f64, 0.5, 1.0] {
@@ -342,19 +373,28 @@ fn two_track_model() -> ProjectModel {
 fn track_energies(m: &ProjectModel) -> (f64, f64) {
     let (l, _) = render(m, 0.5);
     let w = l[secs(0.10)..secs(0.40)].to_vec();
-    (tone_amplitude(&w, midi_hz(A_PITCH)), tone_amplitude(&w, midi_hz(B_PITCH)))
+    (
+        tone_amplitude(&w, midi_hz(A_PITCH)),
+        tone_amplitude(&w, midi_hz(B_PITCH)),
+    )
 }
 
 #[test]
 fn mute_silences_only_that_track() {
     let m = two_track_model();
     let (a0, b0) = track_energies(&m);
-    assert!(a0 > 0.01 && b0 > 0.01, "baseline should have both tracks: {a0} / {b0}");
+    assert!(
+        a0 > 0.01 && b0 > 0.01,
+        "baseline should have both tracks: {a0} / {b0}"
+    );
 
     let mut muted = two_track_model();
     muted.tracks[0].muted = true;
     let (a1, b1) = track_energies(&muted);
-    assert!(a1 < a0 * 0.01, "muted track A still sounds: {a1} (was {a0})");
+    assert!(
+        a1 < a0 * 0.01,
+        "muted track A still sounds: {a1} (was {a0})"
+    );
     assert!(
         (b1 - b0).abs() < b0 * 0.01,
         "muting A changed B: {b1} (was {b0})"
@@ -367,8 +407,14 @@ fn solo_silences_every_non_soloed_track() {
     let mut soloed = two_track_model();
     soloed.tracks[1].soloed = true;
     let (a, b) = track_energies(&soloed);
-    assert!(a < base.0 * 0.01, "track A still sounds while B is soloed: {a}");
-    assert!((b - base.1).abs() < base.1 * 0.01, "soloed track B changed level: {b}");
+    assert!(
+        a < base.0 * 0.01,
+        "track A still sounds while B is soloed: {a}"
+    );
+    assert!(
+        (b - base.1).abs() < base.1 * 0.01,
+        "soloed track B changed level: {b}"
+    );
 }
 
 #[test]
@@ -379,7 +425,10 @@ fn solo_beats_mute_exactly_as_sequence_track_audible_says() {
     let seq = sequence(&m);
     assert!(seq.any_solo());
     // The contract: with any solo active, `audible` ignores `muted`.
-    assert!(seq.tracks[0].audible(true), "contract changed: solo should beat mute");
+    assert!(
+        seq.tracks[0].audible(true),
+        "contract changed: solo should beat mute"
+    );
     assert!(!seq.tracks[1].audible(true));
 
     let base = track_energies(&two_track_model());
@@ -429,7 +478,10 @@ fn length_ticks_is_honored_not_a_fixed_duration() {
     let (short, short_sustain) = probe(B / 4); // ends at 0.125 s
     let (long, long_sustain) = probe(3 * B); // ends at 1.500 s
 
-    assert!(short_sustain > 1e-3 && long_sustain > 1e-3, "note died before its end tick");
+    assert!(
+        short_sustain > 1e-3 && long_sustain > 1e-3,
+        "note died before its end tick"
+    );
     assert!(
         short > 0.125 && short < 0.125 + 0.21,
         "a 0.25-beat note sounded for {short:.3} s; expected its 0.125 s plus at most one 0.2 s release"
@@ -477,7 +529,10 @@ fn repeated_same_pitch_notes_retrigger() {
     let (l, _) = render(&m, 0.5);
     // Second note runs 0.5 s → 1.0 s. If it never retriggered, the first note's 0.2 s release
     // would have ended by 0.7 s.
-    assert!(rms(&l[secs(0.80)..secs(0.95)]) > 1e-3, "the second note never fired");
+    assert!(
+        rms(&l[secs(0.80)..secs(0.95)]) > 1e-3,
+        "the second note never fired"
+    );
     assert!(
         rms(&l[secs(1.30)..secs(2.0)]) < 1e-6,
         "the retriggered note is stuck past its end tick"
@@ -547,18 +602,22 @@ fn looping_retriggers_at_the_loop_point() {
         );
     }
 }
-/// The headline case, heard rather than inspected: a track looping at 2 beats inside an
-/// 8-beat pattern sounds four times per pass, on the beat each turn starts.
+/// The headline case, heard rather than inspected: a track's own 2-beat pattern, placed
+/// across 8 beats of song, sounds four times, on the beat each turn starts. A track loops at
+/// its pattern's length — there is no separate per-track loop.
 #[test]
-fn a_track_looping_shorter_than_its_pattern_sounds_on_every_turn() {
-    let mut m = model("sine", 8 * B);
+fn a_pattern_shorter_than_its_clip_sounds_on_every_turn() {
+    let mut m = model("sine", 2 * B);
     set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
-    let track_id = m.tracks[0].id;
-    m.patterns[0].track_loop_ticks.insert(track_id, 2 * B);
+    m.song_length_ticks = 8 * B;
+    m.clips = vec![Clip::new(m.patterns[0].id, 0, 8 * B)];
 
-    let (mut e, _) = engine_with(&m);
+    let mut e = Engine::new(SR, Arc::new(Shared::default()), &m.master);
+    e.handle(EngineCommand::SetSequence(Arc::new(Sequence::from_song(
+        &m,
+    ))));
     e.handle(EngineCommand::Play);
-    // 8 beats @120 bpm = 4.0 s; stop short of the pattern's own loop point.
+    // 8 beats @120 bpm = 4.0 s; stop short of the song's own loop point.
     let (l, _) = run(&mut e, secs(3.9), 512);
     let o = onsets(&l, 1e-3);
     assert_eq!(o.len(), 4, "expected one hit per 2-beat turn, found {o:?}");
@@ -583,7 +642,10 @@ fn a_note_crossing_the_loop_end_does_not_leak_into_the_next_cycle() {
     // Cycle 2 spans 1.0–2.0 s; the note restarts at 1.75 s. Between the loop seam's release
     // tail (<= 1.25 s) and 1.75 s the track must be silent — otherwise the voice leaked.
     let gap = rms(&l[secs(1.30)..secs(1.72)]);
-    assert!(gap < 1e-6, "a voice leaked across the loop seam (rms {gap})");
+    assert!(
+        gap < 1e-6,
+        "a voice leaked across the loop seam (rms {gap})"
+    );
     assert!(
         rms(&l[secs(1.80)..secs(1.95)]) > 1e-3,
         "the crossing note did not restart in the next cycle"
@@ -598,7 +660,11 @@ fn disabling_looping_plays_the_sequence_once() {
     e.handle(EngineCommand::SetLooping(false));
     e.handle(EngineCommand::Play);
     let (l, _) = run(&mut e, secs(3.0), 512);
-    assert_eq!(onsets(&l, 1e-3).len(), 1, "non-looping playback repeated itself");
+    assert_eq!(
+        onsets(&l, 1e-3).len(),
+        1,
+        "non-looping playback repeated itself"
+    );
 }
 
 // ─── 6. voice stealing ───────────────────────────────────────────────────────────────────────
@@ -650,7 +716,11 @@ fn voice_stealing_stays_in_range_and_free_of_nan() {
     let (l, r) = render(&m, 1.0);
     assert_finite(&l, "left");
     assert_finite(&r, "right");
-    assert!(peak(&l) > 0.5, "the overloaded render went quiet: {}", peak(&l));
+    assert!(
+        peak(&l) > 0.5,
+        "the overloaded render went quiet: {}",
+        peak(&l)
+    );
 }
 
 #[test]
@@ -737,15 +807,18 @@ fn master_eq_bands_each_move_their_own_band() {
     // low shelf @120 Hz, peaking @1 kHz, high shelf @6 kHz. Probe each with a tone that sits
     // squarely inside that band, and check the other bands leave it alone.
     let cases: [EqCase; 3] = [
-        (31, |s| s.low_eq = 2.0, "low"),   //  49 Hz
-        (83, |s| s.mid_eq = 2.0, "mid"),   // 988 Hz
+        (31, |s| s.low_eq = 2.0, "low"),    //  49 Hz
+        (83, |s| s.mid_eq = 2.0, "mid"),    // 988 Hz
         (127, |s| s.high_eq = 2.0, "high"), // 12.5 kHz
     ];
     for (pitch, boost, name) in cases {
         let f = midi_hz(pitch);
         let flat = tone_amplitude(&master_render(pitch, "sine", |_| {}), f);
         let boosted = tone_amplitude(&master_render(pitch, "sine", boost), f);
-        assert!(flat > 1e-4, "{name} probe tone ({f:.0} Hz) did not render: {flat}");
+        assert!(
+            flat > 1e-4,
+            "{name} probe tone ({f:.0} Hz) did not render: {flat}"
+        );
         assert!(
             boosted / flat > 1.5,
             "{name} EQ at 2.0 only moved {f:.0} Hz by {:.2}x",
@@ -768,7 +841,9 @@ fn master_clamp_never_emits_nan() {
         mid_eq: 4.0,
         high_eq: 4.0,
     };
-    let notes: Vec<NoteEvent> = (0..16).map(|i| NoteEvent::new(0, 2 * B, 40 + i * 4)).collect();
+    let notes: Vec<NoteEvent> = (0..16)
+        .map(|i| NoteEvent::new(0, 2 * B, 40 + i * 4))
+        .collect();
     set_notes(&mut m, 0, notes);
     let (l, r) = render(&m, 1.0);
     assert_finite(&l, "left");
@@ -801,10 +876,16 @@ fn master_peak_tracks_each_block_then_falls_back_to_zero() {
             pl >= block - 1e-6,
             "master meter reads {pl} but the block peaked at {block}"
         );
-        assert!(pl <= running + 1e-6, "master meter reads {pl}, above the running max {running}");
+        assert!(
+            pl <= running + 1e-6,
+            "master meter reads {pl}, above the running max {running}"
+        );
         ever_lit |= pl > 0.0;
     }
-    assert!(ever_lit && running > 0.05, "nothing was rendered to meter: {running}");
+    assert!(
+        ever_lit && running > 0.05,
+        "nothing was rendered to meter: {running}"
+    );
 
     run(&mut e, secs(2.0), 256);
     assert_eq!(
@@ -851,9 +932,16 @@ fn a_drum_track_meter_also_returns_to_zero() {
     e.handle(EngineCommand::SetLooping(false));
     e.handle(EngineCommand::Play);
     run(&mut e, secs(0.2), 4096);
-    assert!(shared.track_peak(0) > 0.0, "drum meter is dead while the kick sounds");
+    assert!(
+        shared.track_peak(0) > 0.0,
+        "drum meter is dead while the kick sounds"
+    );
     run(&mut e, secs(8.0), 4096);
-    assert_eq!(shared.track_peak(0), 0.0, "drum meter froze after the one-shot ended");
+    assert_eq!(
+        shared.track_peak(0),
+        0.0,
+        "drum meter froze after the one-shot ended"
+    );
 }
 
 #[test]
@@ -878,15 +966,24 @@ fn seeking_into_a_sustained_note_sounds_it() {
     set_notes(&mut m, 0, vec![NoteEvent::new(0, 6 * B, 69)]);
     let (mut e, _shared) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));
-    e.handle(EngineCommand::Seek { tick: (3 * B) as f64 });
+    e.handle(EngineCommand::Seek {
+        tick: (3 * B) as f64,
+    });
     e.handle(EngineCommand::Play);
 
     let (left, _) = run(&mut e, secs(0.5), 512);
-    assert!(peak(&left) > 0.01, "seeking into the note gave silence: peak {}", peak(&left));
+    assert!(
+        peak(&left) > 0.01,
+        "seeking into the note gave silence: peak {}",
+        peak(&left)
+    );
 
     // It is the note under the playhead, at its own pitch (A4 = 440 Hz), not a retrigger of the
     // pattern from the top.
-    assert!(tone_amplitude(&left, 440.0) > 0.01, "the resumed note is not sounding its pitch");
+    assert!(
+        tone_amplitude(&left, 440.0) > 0.01,
+        "the resumed note is not sounding its pitch"
+    );
 
     // And it still ends where it should rather than hanging: 3 beats left at 120 bpm = 1.5 s,
     // plus the voice's release.
@@ -895,7 +992,6 @@ fn seeking_into_a_sustained_note_sounds_it() {
     assert!(peak(&tail[end..]) < 1e-3, "the resumed note never stopped");
 }
 
-
 /// Starting playback (not just seeking) from inside a note must sound it too — stop, scrub,
 /// play is the ordinary way to audition the middle of a pattern.
 #[test]
@@ -903,13 +999,18 @@ fn playing_from_inside_a_note_sounds_it() {
     let mut m = model("sine", 8 * B);
     set_notes(&mut m, 0, vec![NoteEvent::new(2 * B, 4 * B, 69)]);
     let (mut e, _shared) = engine_with(&m);
-    e.handle(EngineCommand::Seek { tick: (4 * B) as f64 });
+    e.handle(EngineCommand::Seek {
+        tick: (4 * B) as f64,
+    });
     let (before, _) = run(&mut e, secs(0.2), 512);
     assert_eq!(peak(&before), 0.0, "a stopped engine must stay silent");
 
     e.handle(EngineCommand::Play);
     let (left, _) = run(&mut e, secs(0.2), 512);
-    assert!(peak(&left) > 0.01, "playback from inside a note gave silence");
+    assert!(
+        peak(&left) > 0.01,
+        "playback from inside a note gave silence"
+    );
 }
 
 /// A drum hit is a one-shot; resuming must not retrigger it from the middle.
@@ -920,10 +1021,16 @@ fn seeking_does_not_retrigger_a_drum_hit() {
     m.tracks[0].is_drum = true;
     set_notes(&mut m, 0, vec![NoteEvent::new(0, 4 * B, 36)]);
     let (mut e, _shared) = engine_with(&m);
-    e.handle(EngineCommand::Seek { tick: (2 * B) as f64 });
+    e.handle(EngineCommand::Seek {
+        tick: (2 * B) as f64,
+    });
     e.handle(EngineCommand::Play);
     let (left, _) = run(&mut e, secs(0.4), 512);
-    assert!(peak(&left) < 1e-3, "seeking past a drum hit replayed it: peak {}", peak(&left));
+    assert!(
+        peak(&left) < 1e-3,
+        "seeking past a drum hit replayed it: peak {}",
+        peak(&left)
+    );
 }
 
 // ─── muted tracks still release their meter ──────────────────────────────────────────────────
@@ -944,8 +1051,15 @@ fn muting_a_sounding_track_lets_its_meter_fall() {
     let (left, _) = run(&mut e, secs(2.0), 512);
     // The voice releases rather than cutting dead, so judge the steady state, not the tail.
     let settled = secs(0.5);
-    assert!(peak(&left[settled..]) < 1e-3, "a muted track was still audible");
-    assert_eq!(shared.track_peak(0), 0.0, "the muted track's meter froze lit");
+    assert!(
+        peak(&left[settled..]) < 1e-3,
+        "a muted track was still audible"
+    );
+    assert_eq!(
+        shared.track_peak(0),
+        0.0,
+        "the muted track's meter froze lit"
+    );
 }
 
 // ─── meter ballistics are a time constant, not a per-call factor ─────────────────────────────
@@ -969,7 +1083,10 @@ fn meter_release_does_not_depend_on_the_buffer_size() {
         }
         lit.push(elapsed as f64 / SRD);
     }
-    let (min, max) = (lit.iter().cloned().fold(f64::MAX, f64::min), lit.iter().cloned().fold(0.0, f64::max));
+    let (min, max) = (
+        lit.iter().cloned().fold(f64::MAX, f64::min),
+        lit.iter().cloned().fold(0.0, f64::max),
+    );
     assert!(
         max - min < 0.15,
         "meter release swings with the buffer size: {lit:?} seconds for 128/512/4096 frames"

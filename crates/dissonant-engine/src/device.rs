@@ -49,11 +49,16 @@ const COMMON_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000
 pub fn list_output_devices() -> Vec<OutputDeviceInfo> {
     let host = cpal::default_host();
     let default_name = host.default_output_device().map(|d| device_name(&d));
-    let Ok(devices) = host.output_devices() else { return vec![] };
+    let Ok(devices) = host.output_devices() else {
+        return vec![];
+    };
     devices
         .map(|d| {
             let name = device_name(&d);
-            let default_rate = d.default_output_config().map(|c| c.sample_rate()).unwrap_or(44_100);
+            let default_rate = d
+                .default_output_config()
+                .map(|c| c.sample_rate())
+                .unwrap_or(44_100);
             let mut rates: Vec<u32> = d
                 .supported_output_configs()
                 .map(|cfgs| {
@@ -61,7 +66,10 @@ pub fn list_output_devices() -> Vec<OutputDeviceInfo> {
                     COMMON_RATES
                         .iter()
                         .copied()
-                        .filter(|r| cfgs.iter().any(|c| c.min_sample_rate() <= *r && *r <= c.max_sample_rate()))
+                        .filter(|r| {
+                            cfgs.iter()
+                                .any(|c| c.min_sample_rate() <= *r && *r <= c.max_sample_rate())
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -133,11 +141,16 @@ impl AudioDevice {
 
     /// Open the requested device / rate / buffer size, falling back to the device defaults
     /// for whatever it refuses.
-    pub fn start_with(master: MasterSettings, config: AudioConfig, io: Option<EngineIo>) -> Result<AudioDevice, DeviceError> {
+    pub fn start_with(
+        master: MasterSettings,
+        config: AudioConfig,
+        io: Option<EngineIo>,
+    ) -> Result<AudioDevice, DeviceError> {
         let shared = Arc::new(Shared::default());
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(Opened, rtrb::Producer<EngineCommand>), DeviceError>>();
+        let (ready_tx, ready_rx) =
+            mpsc::channel::<Result<(Opened, rtrb::Producer<EngineCommand>), DeviceError>>();
 
         let thread_shared = shared.clone();
         let thread_stop = stop.clone();
@@ -148,7 +161,10 @@ impl AudioDevice {
                 // Attempt the wish first; if a fixed buffer size is refused, the host default.
                 let mut attempts = vec![config.clone()];
                 if config.buffer_size.is_some() {
-                    attempts.push(AudioConfig { buffer_size: None, ..config.clone() });
+                    attempts.push(AudioConfig {
+                        buffer_size: None,
+                        ..config.clone()
+                    });
                 }
                 // The rings move into whichever attempt succeeds; a refused attempt never
                 // reaches the engine, so they are still here for the next one.
@@ -168,7 +184,10 @@ impl AudioDevice {
                     match &result {
                         Ok(_) => break,
                         Err(e) if i + 1 < attempts.len() => {
-                            log::warn!("buffer size {:?} refused ({e}); trying the device default", attempt.buffer_size);
+                            log::warn!(
+                                "buffer size {:?} refused ({e}); trying the device default",
+                                attempt.buffer_size
+                            );
                         }
                         Err(_) => {}
                     }
@@ -265,7 +284,12 @@ fn build_stream(
                     .filter(|c| c.min_sample_rate() <= rate && rate <= c.max_sample_rate())
                     .collect();
                 // Prefer the default's channel count and format so nothing else changes.
-                cfgs.sort_by_key(|c| (c.channels() != default.channels(), c.sample_format() != default.sample_format()));
+                cfgs.sort_by_key(|c| {
+                    (
+                        c.channels() != default.channels(),
+                        c.sample_format() != default.sample_format(),
+                    )
+                });
                 cfgs.into_iter().next().map(|c| c.with_sample_rate(rate))
             })
             .unwrap_or(default),
@@ -284,13 +308,32 @@ fn build_stream(
         engine.attach_io(input, capture);
     }
     let stream = match format {
-        SampleFormat::F32 => make_stream::<f32>(&device, &stream_config, channels, engine, consumer, failed),
-        SampleFormat::I16 => make_stream::<i16>(&device, &stream_config, channels, engine, consumer, failed),
-        SampleFormat::U16 => make_stream::<u16>(&device, &stream_config, channels, engine, consumer, failed),
-        SampleFormat::I32 => make_stream::<i32>(&device, &stream_config, channels, engine, consumer, failed),
-        other => return Err(DeviceError::Cpal(format!("unsupported sample format {other:?}"))),
+        SampleFormat::F32 => {
+            make_stream::<f32>(&device, &stream_config, channels, engine, consumer, failed)
+        }
+        SampleFormat::I16 => {
+            make_stream::<i16>(&device, &stream_config, channels, engine, consumer, failed)
+        }
+        SampleFormat::U16 => {
+            make_stream::<u16>(&device, &stream_config, channels, engine, consumer, failed)
+        }
+        SampleFormat::I32 => {
+            make_stream::<i32>(&device, &stream_config, channels, engine, consumer, failed)
+        }
+        other => {
+            return Err(DeviceError::Cpal(format!(
+                "unsupported sample format {other:?}"
+            )))
+        }
     }?;
-    Ok((stream, Opened { sample_rate, name, buffer_size }))
+    Ok((
+        stream,
+        Opened {
+            sample_rate,
+            name,
+            buffer_size,
+        },
+    ))
 }
 
 fn make_stream<T>(

@@ -638,3 +638,21 @@ export function euclideanRow(notes: NoteEvent[], grid: StepGrid, onsets: number,
   }
   return replaceRow(notes, grid, row);
 }
+
+/**
+ * A ghost pattern's notes laid under a pattern `lengthTicks` long: looped every
+ * `ghostLengthTicks` the way the song would loop it, cut at the end, muted notes left out
+ * (they aren't heard either). Ids get a `~<loop>` suffix so they stay unique per pass.
+ */
+export function tileGhost(ghost: NoteEvent[], ghostLengthTicks: number, lengthTicks: number): NoteEvent[] {
+  const step = ghostLengthTicks > 0 ? ghostLengthTicks : lengthTicks;
+  const out: NoteEvent[] = [];
+  for (let loop = 0, off = 0; off < lengthTicks; loop++, off += step) {
+    for (const n of ghost) {
+      const start = n.startTick + off;
+      if (n.muted || n.startTick >= step || start >= lengthTicks) continue;
+      out.push({ ...n, id: `${n.id}~${loop}`, startTick: start, lengthTicks: Math.min(n.lengthTicks, lengthTicks - start) });
+    }
+  }
+  return out;
+}
