@@ -3,6 +3,7 @@
 //! undo/redo in one place and re-feeds the engine a fresh [`Sequence`] after every change.
 
 pub mod audio_files;
+pub mod library;
 pub mod plugins;
 pub mod recording;
 pub mod settings;
@@ -1115,6 +1116,36 @@ fn audition_off(state: State<'_, AppState>, track_id: Uuid, pitch: u8) {
     state.send(EngineCommand::AuditionOff { track_id, pitch });
 }
 
+// ─── Sound preview (the SOUND page) ──────────────────────────────────────────────────────────
+
+/// Load a sound into the engine's preview channel, or with `None` release and close it. A drum
+/// is rendered here, at the device rate, so the audio thread only swaps a buffer.
+#[tauri::command]
+fn preview_sound(state: State<'_, AppState>, sound: Option<dissonant_core::Sound>) {
+    let Some(rate) = state.audio.lock().unwrap().as_ref().map(|a| a.sample_rate as f32) else { return };
+    let patch = sound.map(|s| dissonant_engine::PreviewPatch::from_sound(&s.sanitized().patch, rate));
+    state.send(EngineCommand::SetPreview(patch));
+}
+
+#[tauri::command]
+fn preview_note(state: State<'_, AppState>, pitch: u8, velocity: u8, on: bool) {
+    let pitch = pitch.min(127);
+    state.send(if on {
+        EngineCommand::PreviewNoteOn { pitch, velocity: velocity.clamp(1, 127) }
+    } else {
+        EngineCommand::PreviewNoteOff { pitch }
+    });
+}
+
+/// ~512 recent samples of the preview channel, aligned to a rising zero crossing.
+#[tauri::command]
+fn preview_scope(state: State<'_, AppState>) -> Vec<f32> {
+    match state.audio.lock().unwrap().as_ref() {
+        Some(audio) => audio.shared().preview_scope(),
+        None => vec![0.0; dissonant_engine::SCOPE_SAMPLES],
+    }
+}
+
 #[tauri::command]
 fn audio_status(state: State<'_, AppState>) -> AudioStatus {
     state.audio_status()
@@ -1574,6 +1605,31 @@ fn new_from_template(state: State<'_, AppState>, name: String) -> Result<Snapsho
     let model = ProjectModel::from_json(&json).map_err(open_error)?;
     state.load_model(model, None, false);
     Ok(state.snapshot())
+}
+
+// ─── Sound library ───────────────────────────────────────────────────────────────────────────
+
+impl AppState {
+    fn library_path(&self) -> Option<PathBuf> {
+        self.data_dir().map(|d| d.join(library::FILE_NAME))
+    }
+}
+
+/// The global user sound library (`sound-library.json` in app data), shared by every project.
+#[tauri::command]
+fn library_sounds(state: State<'_, AppState>) -> Vec<dissonant_core::Sound> {
+    state.library_path().map(|p| library::load(&p)).unwrap_or_default()
+}
+
+/// Insert or replace a user sound by id; returns the whole library.
+#[tauri::command]
+fn save_library_sound(state: State<'_, AppState>, sound: dissonant_core::Sound) -> Result<Vec<dissonant_core::Sound>, String> {
+    library::save(&state.library_path().ok_or("no app data dir")?, sound)
+}
+
+#[tauri::command]
+fn delete_library_sound(state: State<'_, AppState>, id: String) -> Result<Vec<dissonant_core::Sound>, String> {
+    library::delete(&state.library_path().ok_or("no app data dir")?, &id)
 }
 
 /// The built-in vibe templates, for the new-project screen.
@@ -2582,6 +2638,9 @@ pub fn run() {
             set_hear_chords,
             audition,
             audition_off,
+            preview_sound,
+            preview_note,
+            preview_scope,
             audio_status,
             restart_audio,
             export_wav,
@@ -2632,6 +2691,9 @@ pub fn run() {
             stop_audio_record,
             import_audio,
             audio_peaks,
+            library_sounds,
+            save_library_sound,
+            delete_library_sound,
             list_vibes,
             new_from_vibe,
         ])

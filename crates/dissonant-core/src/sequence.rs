@@ -5,6 +5,7 @@
 use crate::arrangement::Arrangement;
 use crate::chord_track::ChordTrack;
 use crate::model::{AmpRig, Insert, NoteEvent, ProjectModel, Track, TrackPlugin};
+use crate::sound::{ResolvedPad, SynthPatch};
 use crate::tempo::TempoMap;
 use crate::ticks::{bar_ticks, TICKS_PER_BEAT};
 use uuid::Uuid;
@@ -28,10 +29,23 @@ pub struct SequenceTrack {
     /// This track's effect chain, in order, applied pre-fader.
     pub inserts: Vec<Insert>,
     pub notes: Vec<NoteEvent>,
+    /// The synth patch `voice` resolves to (meaningless on drum tracks).
+    pub synth: SynthPatch,
+    /// The drum kit with each pad's sound looked up (empty on synth tracks).
+    pub drum_pads: Vec<ResolvedPad>,
 }
 
 impl SequenceTrack {
-    fn from_track(track: &Track, notes: Vec<NoteEvent>) -> Self {
+    fn from_track(model: &ProjectModel, track: &Track, notes: Vec<NoteEvent>) -> Self {
+        let drum_pads = if track.is_drum {
+            track
+                .drum_pads
+                .iter()
+                .map(|p| ResolvedPad { pitch: p.pitch, choke: p.choke, patch: model.resolve_drum(&p.sound) })
+                .collect()
+        } else {
+            vec![]
+        };
         SequenceTrack {
             id: track.id,
             voice: track.voice.clone(),
@@ -47,6 +61,8 @@ impl SequenceTrack {
             amp: track.amp.clone(),
             inserts: track.inserts.clone(),
             notes,
+            synth: model.resolve_synth(&track.voice),
+            drum_pads,
         }
     }
 
@@ -111,6 +127,7 @@ impl Sequence {
             .iter()
             .map(|t| {
                 SequenceTrack::from_track(
+                    model,
                     t,
                     if t.id == pattern.track_id {
                         pattern.notes.clone()
@@ -134,7 +151,7 @@ impl Sequence {
             tracks: model
                 .tracks
                 .iter()
-                .map(|t| SequenceTrack::from_track(t, vec![]))
+                .map(|t| SequenceTrack::from_track(model, t, vec![]))
                 .collect(),
             chords: ChordTrack::default(),
             length_ticks: length_ticks.max(TICKS_PER_BEAT),
@@ -216,12 +233,14 @@ impl Sequence {
         self
     }
 
+
     pub fn from_song(model: &ProjectModel) -> Self {
         let tracks = model
             .tracks
             .iter()
             .map(|t| {
                 SequenceTrack::from_track(
+                    model,
                     t,
                     Arrangement::flattened_notes(&t.id, &model.patterns, &model.clips),
                 )

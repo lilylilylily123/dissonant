@@ -2,19 +2,24 @@
 //! (master inserts → low-cut → 3-band EQ → high-cut → reverb → gain).
 
 use crate::audio::{AudioLane, BlockContext};
-use crate::drums::DrumKit;
+use crate::drums::{DrumBank, DrumKit};
 use crate::dsp::{linear_to_db, pan_gains, Reverb, StereoBiquad};
 use crate::engine::NoteShape;
-use crate::synth::{PolySynth, VoicePreset};
-use dissonant_core::{MasterSettings, SequenceTrack};
+use crate::synth::PolySynth;
+use dissonant_core::{MasterSettings, SequenceTrack, SynthPatch};
 use dissonant_plugins::PluginAudioUnit;
 use uuid::Uuid;
+
+/// Voices per synth track (and the preview synth).
+pub const SYNTH_POLYPHONY: usize = 12;
 
 /// What makes a track's sound. The built-in voices place themselves in stereo from each note's
 /// own pan; a plugin renders its own stereo, so the channel feeds it the track pan rather than
 /// applying one.
 pub enum Instrument {
-    Synth(PolySynth),
+    /// Boxed for the same reason as `Plugin`: a patch-driven synth carries its whole voice
+    /// pool inline, and a drum or audio channel would otherwise pay for it.
+    Synth(Box<PolySynth>),
     Drums(DrumKit),
     /// A hosted plugin. Boxed because it is an order of magnitude larger than the other two and
     /// every `Channel` would otherwise carry that size whether or not it hosts anything.
@@ -37,6 +42,23 @@ impl std::fmt::Debug for Instrument {
 }
 
 impl Instrument {
+    /// The instrument a track plays, with no plugin involved: an audio track has none, a drum
+    /// track takes its pads' drums from `drums` when they are already rendered there (off the
+    /// audio thread) and renders them here otherwise, and a synth track plays its patch.
+    pub fn for_track(track: &SequenceTrack, sample_rate: f32, drums: Option<&DrumBank>) -> Self {
+        if track.is_audio {
+            Instrument::Silent
+        } else if track.is_drum {
+            Instrument::Drums(DrumKit::with_bank(&track.drum_pads, sample_rate, drums))
+        } else {
+            Instrument::Synth(Box::new(PolySynth::new(
+                &track.synth,
+                sample_rate,
+                SYNTH_POLYPHONY,
+            )))
+        }
+    }
+
     pub fn note_on(&mut self, pitch: u8, velocity: u8, shape: NoteShape) {
         match self {
             Instrument::Synth(s) => s.note_on(pitch, velocity, shape),
@@ -78,7 +100,7 @@ impl Instrument {
             Instrument::Silent => true,
         }
     }
-    fn render_add(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+    pub(crate) fn render_add(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         match self {
             Instrument::Synth(s) => s.render_add(out_l, out_r),
             Instrument::Drums(d) => d.render_add(out_l, out_r),
@@ -160,7 +182,8 @@ pub fn chain_is_silent(chain: &[InsertSlot]) -> bool {
 #[derive(Debug)]
 pub struct Channel {
     pub instrument: Instrument,
-    voice: String,
+    /// The patch the synth was last given, to skip `set_patch` when nothing changed.
+    synth: SynthPatch,
     is_drum: bool,
     is_audio: bool,
     /// The track's tone filter. Stereo, because the built-in voices now place themselves from
@@ -184,27 +207,10 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// The instrument a track gets from its own settings, with no plugin involved. Shared by
-    /// channel creation and by the engine when a plugin is cleared.
-    pub fn built_in_instrument(track: &SequenceTrack, sample_rate: f32) -> Instrument {
-        if track.is_audio {
-            Instrument::Silent
-        } else if track.is_drum {
-            Instrument::Drums(DrumKit::new(sample_rate))
-        } else {
-            Instrument::Synth(PolySynth::new(
-                VoicePreset::named(&track.voice),
-                sample_rate,
-                12,
-            ))
-        }
-    }
-
-    pub fn new(track: &SequenceTrack, sample_rate: f32) -> Self {
-        let instrument = Self::built_in_instrument(track, sample_rate);
+    pub fn new(track: &SequenceTrack, sample_rate: f32, drums: Option<&DrumBank>) -> Self {
         let mut c = Channel {
-            instrument,
-            voice: track.voice.clone(),
+            instrument: Instrument::for_track(track, sample_rate, drums),
+            synth: track.synth,
             is_drum: track.is_drum,
             is_audio: track.is_audio,
             tone: StereoBiquad::identity(),
@@ -220,26 +226,35 @@ impl Channel {
                 .then(|| Box::new(AudioLane::new(track.id, sample_rate))),
             peak: 0.0,
         };
-        c.apply(track);
+        c.apply(track, drums);
         c
     }
 
-    /// Update params from the track; swaps the instrument if the voice/kind changed.
+    /// Update params from the track. A changed synth patch is applied live (held notes keep
+    /// sounding); a changed kit re-renders only the pads whose patch changed; switching
+    /// between kinds builds a new instrument.
     ///
     /// A plugin is never swapped away here: it is installed by `EngineCommand::SetInstrument`
     /// from the app thread, because loading one is far too slow for the audio deadline, and a
-    /// sequence rebuild must not silently replace it with the track's fallback voice.
-    pub fn apply(&mut self, track: &SequenceTrack) {
-        let hosts_plugin = matches!(self.instrument, Instrument::Plugin(_));
-        let kind_changed = track.is_drum != self.is_drum || track.is_audio != self.is_audio;
-        if !hosts_plugin
-            && (kind_changed || (!track.is_drum && !track.is_audio && track.voice != self.voice))
-        {
-            self.instrument = Self::built_in_instrument(track, self.sample_rate);
+    /// sequence rebuild must not silently replace it with the track's own sound.
+    pub fn apply(&mut self, track: &SequenceTrack, drums: Option<&DrumBank>) {
+        match &mut self.instrument {
+            Instrument::Plugin(_) => {}
+            Instrument::Synth(s) if !track.is_drum && !track.is_audio => {
+                if track.synth != self.synth {
+                    s.set_patch(&track.synth);
+                    self.synth = track.synth;
+                }
+            }
+            Instrument::Drums(kit) if track.is_drum => kit.update(&track.drum_pads, drums),
+            Instrument::Silent if track.is_audio => {}
+            _ => {
+                self.instrument = Instrument::for_track(track, self.sample_rate, drums);
+                self.synth = track.synth;
+            }
         }
         self.is_drum = track.is_drum;
         self.is_audio = track.is_audio;
-        self.voice = track.voice.clone();
         match (track.is_audio, &mut self.audio) {
             (true, Some(lane)) => lane.apply(track),
             (true, slot @ None) => {

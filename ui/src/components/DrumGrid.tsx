@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { DRUM_KIT, NOTE_PROPS, noteProp, TICKS_PER_BEAT, trackColor, type NoteEvent, type NoteProp, uuid } from "../types";
+import { padName } from "../drumKit";
+import { NOTE_PROPS, noteProp, TICKS_PER_BEAT, trackColor, type NoteEvent, type NoteProp, uuid } from "../types";
 import {
   clearRow,
   euclideanRow,
@@ -16,6 +17,7 @@ import {
   type StepGrid,
 } from "../noteEditing";
 import { BASE_BEAT_W } from "./ChordLane";
+import { AddPadPicker, SwapPadPicker } from "./AddPadPicker";
 
 /** Geometry shared with the CSS: `.drumrow .dname` width, `.drumcells` gap and left padding. */
 const GUTTER = 64;
@@ -40,12 +42,15 @@ const numStyle: React.CSSProperties = {
 };
 
 /**
- * Step sequencer for a drum track, aligned to the chord lane. Left-click/drag adds hits,
- * right-click/drag removes. Hits are ordinary notes (pitch = kit note), which is why the graph
- * editor below the grid edits exactly the properties the piano roll's lane does — in FL a step
- * *is* a note, and here it already was one. The grid cell stays the step's identity; `shift`
- * only leans how it plays, so a dragged-early hat still lives in its own cell. A ghost pattern
- * shows as outlined steps (another drum pattern) or an onset row (a melodic one).
+ * Step sequencer for a drum track, aligned to the chord lane: one row per kit pad, top to
+ * bottom. Left-click/drag adds hits, right-click/drag removes; click a row name to hear the
+ * pad, ▾ beside it to swap its sound (the hits stay); "+ add sound" under the rows grows the
+ * kit. Hits are ordinary notes (pitch = pad pitch), which is why the graph editor below the
+ * grid edits exactly the properties the piano roll's lane does — in FL a step *is* a note, and
+ * here it already was one. The grid cell stays the step's identity; `shift` only leans how it
+ * plays, so a dragged-early hat still lives in its own cell. Hits on pitches the kit has no pad
+ * for aren't drawn. A ghost pattern shows as outlined steps (another drum pattern) or an onset
+ * row (a melodic one).
  */
 export function DrumGrid() {
   const pattern = useStore(selectedPattern);
@@ -63,10 +68,11 @@ export function DrumGrid() {
   const ghostPattern = useStore((s) => s.snapshot?.model.patterns.find((p) => p.id === ghostPatternId) ?? null);
   const ghostTrack = useStore((s) => (ghostPattern ? (s.snapshot?.model.tracks.find((t) => t.id === ghostPattern.trackId) ?? null) : null));
   const ghostIdx = useStore((s) => (ghostTrack ? (s.snapshot?.model.tracks.indexOf(ghostTrack) ?? 0) : 0));
+  const projectSounds = useStore((s) => s.snapshot?.model.sounds);
   const dragMode = useRef<"add" | "remove" | null>(null);
   const [working, setWorking] = useState<NoteEvent[] | null>(null);
-  /** Which kit row the graph editor and the step tools act on. */
-  const [rowPitch, setRowPitch] = useState(DRUM_KIT[0].pitch);
+  /** Which kit row the graph editor and the step tools act on; null until one is picked. */
+  const [rowPitch, setRowPitch] = useState<number | null>(null);
   const [euclid, setEuclid] = useState({ onsets: 5, rotation: 0 });
   const graphRef = useRef<HTMLCanvasElement>(null);
   const graphDrag = useRef<{ base: NoteEvent[]; ramp: boolean; anchor: { step: number; value: number } } | null>(null);
@@ -87,7 +93,11 @@ export function DrumGrid() {
   const graphW = GUTTER + CELL_PAD + steps * pitchW;
   const spec = NOTE_PROPS[laneProp];
 
-  const grid = useMemo<StepGrid>(() => ({ pitch: rowPitch, stepTicks, steps }), [rowPitch, stepTicks, steps]);
+  // A kit the pick is no longer in (a pad was swapped out, or nothing is picked yet) falls back
+  // to the top row, so the graph editor always has a row.
+  const pads = track?.drumPads ?? [];
+  const padPitch = pads.some((p) => p.pitch === rowPitch) ? rowPitch! : (pads[0]?.pitch ?? 0);
+  const grid = useMemo<StepGrid>(() => ({ pitch: padPitch, stepTicks, steps }), [padPitch, stepTicks, steps]);
 
   /** The selected row's note in each step slot, or null where the slot is empty. */
   const cellsOf = (list: NoteEvent[]): (NoteEvent | null)[] => {
@@ -165,6 +175,8 @@ export function DrumGrid() {
 
   if (!pattern || !track) return null;
   const ghostColor = ghostTrack ? trackColor(ghostTrack, ghostIdx) : "var(--text-4)";
+  const selectedPad = track.drumPads.find((p) => p.pitch === padPitch) ?? track.drumPads[0];
+  const selectedPadName = padName(projectSounds ?? [], selectedPad);
   // Ghost lookups per step: kit hits by pitch (a drum ghost), or onsets (a melodic ghost).
   const ghostIsDrum = !!ghostTrack?.isDrum;
   const stepOf = (tick: number) => Math.floor(tick / stepTicks);
@@ -254,10 +266,9 @@ export function DrumGrid() {
     graphApply(at);
   };
 
-  const selectedDrum = DRUM_KIT.find((d) => d.pitch === rowPitch) ?? DRUM_KIT[0];
-
   return (
-    <div className="drumgrid" onPointerUp={commit} onPointerLeave={commit}>
+    // Past eight pads the rows tighten so a full 16-pad kit mostly fits; the grid scrolls past that.
+    <div className={`drumgrid${track.drumPads.length > 8 ? " dense" : ""}`} onPointerUp={commit} onPointerLeave={commit}>
       {ghostPattern && !ghostIsDrum && ghostNotes.length > 0 && (
         <div className="drumrow ghostrow" title={`${ghostPattern.name}: where its notes start · the ghost`}>
           <span className="dname">ghost</span>
@@ -269,8 +280,8 @@ export function DrumGrid() {
           </div>
         </div>
       )}
-      {DRUM_KIT.map((drum) => {
-        const picked = drum.pitch === rowPitch;
+      {track.drumPads.map((drum) => {
+        const picked = drum.pitch === padPitch;
         return (
           <div className="drumrow" key={drum.pitch} style={picked ? { background: "rgba(255,255,255,.045)" } : undefined}>
             <span
@@ -287,7 +298,12 @@ export function DrumGrid() {
                 setRowPitch(drum.pitch);
               }}
             >
-              {drum.name}
+              <span className="dlabel" title={`pitch ${drum.pitch} · click to hear`} onClick={() => audition(drum.pitch)}>
+                {padName(projectSounds ?? [], drum)}
+              </span>
+              <SwapPadPicker track={track} pitch={drum.pitch} className="dswap">
+                ▾
+              </SwapPadPicker>
             </span>
             <div className="drumcells">
               {Array.from({ length: steps }, (_, step) => {
@@ -327,9 +343,14 @@ export function DrumGrid() {
           </div>
         );
       })}
+      <div className="drumrow addrow">
+        <AddPadPicker track={track} className="dname dadd">
+          + add sound
+        </AddPadPicker>
+      </div>
 
       <div className="steptools" style={{ position: "sticky", left: 0 }}>
-        <span className="lbl" style={{ color }}>{selectedDrum.name}</span>
+        <span className="lbl" style={{ color }}>{selectedPadName}</span>
         <select
           className="lanepick"
           value={laneProp}
@@ -351,7 +372,7 @@ export function DrumGrid() {
         <button className="chip tiny" title="a hit every 8 steps" onClick={() => run(fillEverySteps(committed, grid, 8, 0, defaultVelocity), "fill every 8 steps")}>
           fill /8
         </button>
-        <button className="chip tiny" title="empty this row" onClick={() => run(clearRow(committed, grid), `clear ${selectedDrum.name} steps`)}>
+        <button className="chip tiny" title="empty this row" onClick={() => run(clearRow(committed, grid), `clear ${selectedPadName} steps`)}>
           clear
         </button>
         <button className="chip tiny" title="rotate the row one step earlier" onClick={() => run(rotateRow(committed, grid, -1), "rotate steps left")}>
@@ -404,11 +425,10 @@ export function DrumGrid() {
           onContextMenu={(e) => e.preventDefault()}
         />
       </div>
-
       {notes.length === 0 && <div className="help emptyline">no hits yet: click a step to add one. kick on 1 and 3, snare on 2 and 4 is a fine place to start.</div>}
       <div className="help">
         left-click / drag: add hits · right-click / drag: remove · step {stepTicks === TICKS_PER_BEAT / 2 ? "1/8" : stepTicks === TICKS_PER_BEAT / 4 ? "1/16" : "1/32"} follows snap
-        {` · graph: drag to set ${spec.label} on ${selectedDrum.name}, ⌥-drag to ramp`}
+        {` · graph: drag to set ${spec.label} on ${selectedPadName}, ⌥-drag to ramp`}
       </div>
     </div>
   );

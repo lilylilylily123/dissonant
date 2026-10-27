@@ -113,6 +113,7 @@ export function MenuBar() {
       { label: `${s.screen === "pattern" ? "✓ " : ""}Pattern (piano roll)`, sc: "Tab", action: () => s.setScreen("pattern") },
       { label: `${s.screen === "song" ? "✓ " : ""}Song (arrangement)`, sc: "Tab", action: () => s.setScreen("song") },
       { label: `${s.screen === "guitar" ? "✓ " : ""}Guitar`, sc: "Tab", action: () => s.setScreen("guitar") },
+      { label: `${s.screen === "sound" ? "✓ " : ""}Sound (design sounds)`, action: () => s.setScreen("sound") },
       { sep: true },
       { label: `${s.highlightRows ? "✓ " : ""}Highlight rows by tier`, action: () => s.toggleHighlight() },
       { label: `${s.showLandscape ? "✓ " : ""}Harmonic map`, action: () => s.toggleLandscape() },

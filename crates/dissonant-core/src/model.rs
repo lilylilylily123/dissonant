@@ -388,7 +388,8 @@ pub struct Track {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     pub name: String,
-    /// A synth voice preset name (`saw`, `square`, `triangle`, `sine`, `pad`, `pluck`).
+    /// The synth sound id (a factory slug like `saw`, or an embedded `u-<uuid>`). See
+    /// [`ProjectModel::resolve_synth`].
     #[serde(default = "default_voice")]
     pub voice: String,
     #[serde(default)]
@@ -426,6 +427,9 @@ pub struct Track {
     /// This track's effect chain, in order, applied pre-fader. Empty on a new track.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inserts: Vec<Insert>,
+    /// A drum track's kit, top to bottom (1–16 pads, unique pitches). Ignored on synth tracks.
+    #[serde(default = "crate::sound::default_kit")]
+    pub drum_pads: Vec<crate::sound::DrumPad>,
 }
 
 /// What a track plays. Derived from the booleans rather than replacing them: `isDrum` is in
@@ -455,6 +459,7 @@ impl Track {
             plugin: None,
             amp: None,
             inserts: vec![],
+            drum_pads: crate::sound::default_kit(),
         }
     }
 
@@ -1561,6 +1566,9 @@ pub struct ProjectModel {
     /// The master effect chain, in order, ahead of the master bus processing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub master_inserts: Vec<Insert>,
+    /// Copies of the non-factory sounds the tracks use, so the project plays anywhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<crate::sound::Sound>,
     /// Schema ≤ 8 only; folded into `swing_grid_ticks` by [`ProjectModel::normalized`].
     #[serde(default, rename = "swingGrid", skip_serializing)]
     pub legacy_swing_grid: Option<f64>,
@@ -1674,6 +1682,7 @@ impl ProjectModel {
             chords: Default::default(),
             song_length_ticks: default_song_length(),
             master_inserts: vec![],
+            sounds: vec![],
             legacy_swing_grid: None,
         }
     }
@@ -1857,6 +1866,15 @@ impl ProjectModel {
             self.tracks = fresh.tracks;
             self.patterns = fresh.patterns;
         }
+        // A hand-edited kit the commands would refuse (empty, too big, repeated pitches) falls
+        // back to the default kit rather than playing half-broken.
+        for t in &mut self.tracks {
+            if !crate::sound::valid_kit(&t.drum_pads) {
+                t.drum_pads = crate::sound::default_kit();
+            }
+        }
+        self.sounds = std::mem::take(&mut self.sounds).into_iter().map(crate::sound::Sound::sanitized).collect();
+        self.prune_sounds();
         let track_ids: Vec<Uuid> = self.tracks.iter().map(|t| t.id).collect();
         // A pattern of a track that no longer exists is invisible and never played, but would
         // survive every save; drop it instead of growing the file forever.

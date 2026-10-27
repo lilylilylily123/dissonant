@@ -1,14 +1,18 @@
 //! The block processor: transport + sample-accurate event scheduling + mixing.
 
 use crate::audio::{AudioPool, BlockContext};
-use crate::channel::{chain_is_silent, run_inserts, Channel, InsertSlot, Instrument, Master};
-use crate::synth::{PolySynth, VoicePreset};
+use crate::channel::{
+    chain_is_silent, run_inserts, Channel, InsertSlot, Instrument, Master, SYNTH_POLYPHONY,
+};
+use crate::drums::{DrumBank, DrumKit, RenderedDrum};
+use crate::dsp::pan_gains;
+use crate::synth::PolySynth;
 use dissonant_core::{
-    swing_warp_ticks, InsertTarget, MasterSettings, NoteEvent, Sequence, Tempo, MAX_INSERTS,
-    TICKS_PER_BEAT,
+    factory_sound, swing_warp_ticks, InsertTarget, MasterSettings, NoteEvent, Sequence, SoundPatch,
+    SynthPatch, Tempo, MAX_INSERTS, TICKS_PER_BEAT,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -23,6 +27,12 @@ pub const MAX_AUDITION_SECS: f32 = 4.0;
 /// 48 kHz this is about five seconds: long enough that one stray glitch costs the player no
 /// lasting latency, short enough that swapping to a better interface is felt right away.
 const CLEAN_BLOCKS_BEFORE_TIGHTENING: u32 = 512;
+
+/// Samples [`Shared::preview_scope`] returns.
+pub const SCOPE_SAMPLES: usize = 512;
+/// The preview scope's history. Readers look at the newest half, so a block written while they
+/// read can't tear the window they return.
+const SCOPE_RING: usize = 4096;
 
 /// What the real-time side publishes for the UI to read without locks.
 #[derive(Debug)]
@@ -54,6 +64,10 @@ pub struct Shared {
     record_start_tick: AtomicU64,
     /// Frames captured into the current take.
     record_frames: AtomicU64,
+    /// The preview channel's mono output as f32 bits, a ring indexed by `scope_written`.
+    scope: [AtomicU32; SCOPE_RING],
+    /// Samples ever written to `scope`.
+    scope_written: AtomicUsize,
 }
 
 impl Default for Shared {
@@ -74,6 +88,8 @@ impl Default for Shared {
             recording: AtomicBool::new(false),
             record_start_tick: AtomicU64::new(0),
             record_frames: AtomicU64::new(0),
+            scope: std::array::from_fn(|_| AtomicU32::new(0)),
+            scope_written: AtomicUsize::new(0),
         }
     }
 }
@@ -145,6 +161,55 @@ impl Shared {
             self.record_frames.load(Ordering::Relaxed),
         )
     }
+
+    /// Audio thread: append a block of the preview channel's output to the scope ring.
+    fn write_scope(&self, samples: &[f32]) {
+        let mut w = self.scope_written.load(Ordering::Relaxed);
+        for s in samples {
+            self.scope[w % SCOPE_RING].store(s.to_bits(), Ordering::Relaxed);
+            w = w.wrapping_add(1);
+        }
+        self.scope_written.store(w, Ordering::Release);
+    }
+
+    /// The latest [`SCOPE_SAMPLES`] of the preview channel, starting on a rising zero crossing
+    /// so a steady tone stands still; just the newest samples when there is none.
+    pub fn preview_scope(&self) -> Vec<f32> {
+        let w = self.scope_written.load(Ordering::Acquire);
+        let span = SCOPE_RING / 2;
+        let mut recent = vec![0.0f32; span];
+        let have = w.min(span);
+        for (i, s) in recent[span - have..].iter_mut().enumerate() {
+            let at = w.wrapping_sub(have).wrapping_add(i);
+            *s = f32::from_bits(self.scope[at % SCOPE_RING].load(Ordering::Relaxed));
+        }
+        // The newest window that opens on a crossing.
+        let last_start = span - SCOPE_SAMPLES;
+        let start = (1..=last_start)
+            .rev()
+            .find(|&i| recent[i - 1] < 0.0 && recent[i] >= 0.0)
+            .unwrap_or(last_start);
+        recent[start..start + SCOPE_SAMPLES].to_vec()
+    }
+}
+
+/// What the preview channel (the SOUND page) plays.
+#[derive(Debug, Clone)]
+pub enum PreviewPatch {
+    Synth(Box<SynthPatch>),
+    /// Rendered by the sender; the engine re-renders only if its sample rate differs.
+    Drum(Arc<RenderedDrum>),
+}
+
+impl PreviewPatch {
+    /// Build from a sound's patch, rendering a drum at `sample_rate` (call off the audio
+    /// thread).
+    pub fn from_sound(patch: &SoundPatch, sample_rate: f32) -> Self {
+        match patch {
+            SoundPatch::Synth(p) => PreviewPatch::Synth(Box::new(*p)),
+            SoundPatch::Drum(p) => PreviewPatch::Drum(Arc::new(RenderedDrum::new(p, sample_rate))),
+        }
+    }
 }
 
 /// Messages from the application to the audio thread.
@@ -177,7 +242,15 @@ pub enum EngineCommand {
     },
     /// Replace what's playing. The old `Arc` is dropped on the audio thread; sequences are
     /// small so this is acceptable for now (a return channel is the real-time-pure fix).
+    ///
+    /// Drum pads are rendered on the spot, which suits offline rendering; `AudioDevice::send`
+    /// turns this into `SetSequenceWithDrums` so a live engine never does that.
     SetSequence(Arc<Sequence>),
+    /// `SetSequence` with the kits' drums already rendered (see [`DrumBank`]).
+    SetSequenceWithDrums {
+        sequence: Arc<Sequence>,
+        drums: Arc<DrumBank>,
+    },
     SetHearChords(bool),
     SetMaster(MasterSettings),
     /// Sound a note on a track right now (placement audition / typing keyboard). `seconds` is
@@ -266,6 +339,19 @@ pub enum EngineCommand {
         id: Uuid,
         param_id: u32,
         value: f64,
+    },
+    /// Load (or with `None`, release and close) the preview channel: an instrument outside the
+    /// track list that sounds whether or not the transport runs, through the master chain,
+    /// untouched by mute / solo / stop. A new synth patch applies to held notes without
+    /// cutting.
+    SetPreview(Option<PreviewPatch>),
+    /// Play the preview. A drum preview plays its sound on any pitch.
+    PreviewNoteOn {
+        pitch: u8,
+        velocity: u8,
+    },
+    PreviewNoteOff {
+        pitch: u8,
     },
 }
 
@@ -442,6 +528,21 @@ pub struct Engine {
     input: Option<rtrb::Consumer<f32>>,
     /// Where recorded samples go to be written to disk. `None` offline.
     capture: Option<rtrb::Producer<f32>>,
+    /// The SOUND page's instrument: outside the track list, audible with the transport
+    /// stopped, and untouched by mute / solo.
+    preview: Option<Instrument>,
+    /// `SetPreview(None)` arrived: let the preview ring out, then drop it.
+    preview_closing: bool,
+    /// Stereo scratch for the preview, and the scope's mono fold.
+    preview_buf: (Vec<f32>, Vec<f32>),
+}
+
+/// The chord bed's sound: the factory pad.
+fn chord_bed_patch() -> SynthPatch {
+    match factory_sound("pad").map(|s| &s.patch) {
+        Some(SoundPatch::Synth(p)) => *p,
+        _ => SynthPatch::default(),
+    }
 }
 
 impl Engine {
@@ -455,7 +556,7 @@ impl Engine {
             sequence: Arc::new(Sequence::default()),
             channels: Vec::new(),
             channel_ids: Vec::new(),
-            chord_bed: PolySynth::new(VoicePreset::named("pad"), sample_rate, 8),
+            chord_bed: PolySynth::new(&chord_bed_patch(), sample_rate, 8),
             hear_chords: false,
             master: Master::new(sample_rate, master),
             master_inserts: Vec::new(),
@@ -486,6 +587,9 @@ impl Engine {
             clean_blocks: 0,
             input: None,
             capture: None,
+            preview: None,
+            preview_closing: false,
+            preview_buf: (vec![0.0; 8192], vec![0.0; 8192]),
         }
     }
 
@@ -611,7 +715,26 @@ impl Engine {
                 self.auditions
                     .retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
-            EngineCommand::SetSequence(seq) => self.set_sequence(seq),
+            EngineCommand::SetSequence(seq) => self.set_sequence(seq, None),
+            EngineCommand::SetSequenceWithDrums { sequence, drums } => {
+                self.set_sequence(sequence, Some(&drums))
+            }
+            EngineCommand::SetPreview(patch) => self.set_preview(patch),
+            EngineCommand::PreviewNoteOn { pitch, velocity } => {
+                match (&mut self.preview, self.preview_closing) {
+                    // A drum preview holds exactly one pad, which every key plays.
+                    (Some(Instrument::Drums(kit)), false) => {
+                        kit.trigger(0, velocity, NoteShape::neutral())
+                    }
+                    (Some(inst), false) => inst.note_on(pitch, velocity, NoteShape::neutral()),
+                    _ => {}
+                }
+            }
+            EngineCommand::PreviewNoteOff { pitch } => {
+                if let Some(inst) = &mut self.preview {
+                    inst.note_off(pitch);
+                }
+            }
             EngineCommand::SetHearChords(on) => {
                 self.hear_chords = on;
                 if !on {
@@ -671,7 +794,9 @@ impl Engine {
                     .tracks
                     .iter()
                     .find(|t| t.id == track_id)
-                    .map(|t| Channel::built_in_instrument(t, self.sample_rate));
+                    // No bank here: a plugin being cleared is rare, and this renders the kit
+                    // the track already describes.
+                    .map(|t| Instrument::for_track(t, self.sample_rate, None));
                 if let (Some(ch), Some(instrument)) = (self.channel_mut(&track_id), fallback) {
                     ch.instrument.all_notes_off();
                     ch.instrument = instrument;
@@ -791,7 +916,76 @@ impl Engine {
             .find(|slot| slot.id == id)
     }
 
-    fn set_sequence(&mut self, seq: Arc<Sequence>) {
+    fn set_preview(&mut self, patch: Option<PreviewPatch>) {
+        let sr = self.sample_rate;
+        match patch {
+            None => {
+                if let Some(inst) = &mut self.preview {
+                    inst.all_notes_off();
+                    self.preview_closing = true;
+                }
+            }
+            Some(PreviewPatch::Synth(p)) => {
+                match &mut self.preview {
+                    Some(Instrument::Synth(s)) => s.set_patch(&p),
+                    _ => {
+                        let synth = Box::new(PolySynth::new(&p, sr, SYNTH_POLYPHONY));
+                        self.preview = Some(Instrument::Synth(synth));
+                    }
+                }
+                self.preview_closing = false;
+            }
+            Some(PreviewPatch::Drum(drum)) => {
+                // The rates differ only around a device restart; rendering here then beats
+                // playing the drum at the wrong speed.
+                let drum = if drum.sample_rate == sr {
+                    drum
+                } else {
+                    Arc::new(RenderedDrum::new(&drum.patch, sr))
+                };
+                match &mut self.preview {
+                    Some(Instrument::Drums(kit)) => kit.set_drum(0, drum),
+                    _ => self.preview = Some(Instrument::Drums(DrumKit::single(drum))),
+                }
+                self.preview_closing = false;
+            }
+        }
+    }
+
+    /// Mix the preview channel into the first `frames` of the mix (centred, like a track at
+    /// pan 0) and feed the scope its mono sum.
+    fn render_preview(&mut self, frames: usize) {
+        if self.preview_buf.0.len() < frames {
+            self.preview_buf.0.resize(frames, 0.0);
+            self.preview_buf.1.resize(frames, 0.0);
+        }
+        let (pl, pr) = (
+            &mut self.preview_buf.0[..frames],
+            &mut self.preview_buf.1[..frames],
+        );
+        pl.fill(0.0);
+        pr.fill(0.0);
+        if let Some(inst) = &mut self.preview {
+            inst.render_add(pl, pr);
+            if self.preview_closing && inst.is_silent() {
+                self.preview = None;
+                self.preview_closing = false;
+            }
+            let (gl, gr) = pan_gains(0.0);
+            for i in 0..frames {
+                self.mix_l[i] += pl[i] * gl;
+                self.mix_r[i] += pr[i] * gr;
+            }
+        }
+        // The scope draws one trace, so it sees the mono sum. `pl` is free to be overwritten:
+        // the mix already has what it needs.
+        for i in 0..frames {
+            pl[i] = 0.5 * (pl[i] + pr[i]);
+        }
+        self.shared.write_scope(pl);
+    }
+
+    fn set_sequence(&mut self, seq: Arc<Sequence>, drums: Option<&DrumBank>) {
         // Rebuild the channel list in sequence order, keeping existing channels (and their
         // sounding voices) for tracks that are still present.
         let mut new_channels = Vec::with_capacity(seq.tracks.len());
@@ -808,9 +1002,9 @@ impl Engine {
                 .and_then(|i| old[i].take());
             let mut ch = match existing {
                 Some(ch) => ch,
-                None => Channel::new(track, self.sample_rate),
+                None => Channel::new(track, self.sample_rate, drums),
             };
-            ch.apply(track);
+            ch.apply(track, drums);
             new_channels.push(ch);
             new_ids.push(track.id);
         }
@@ -931,6 +1125,7 @@ impl Engine {
             }
         }
 
+        self.render_preview(frames);
         let (l, r) = (&mut self.mix_l[..frames], &mut self.mix_r[..frames]);
         // The master's own inserts hear the mixed bus exactly as it leaves the tracks, ahead of
         // the low cut / EQ / reverb / gain the master settings describe.
@@ -2163,5 +2358,183 @@ mod tests {
         e.handle(EngineCommand::Play);
         // 22050 samples per beat: thirds of it are 7350 samples apart, with no remainder.
         assert_eq!(note_on_offsets(&mut e, 44_100), vec![0, 7_350, 14_700]);
+    }
+
+    fn factory_patch(id: &str) -> SoundPatch {
+        factory_sound(id).unwrap().patch.clone()
+    }
+
+    fn peak(x: &[f32]) -> f32 {
+        x.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn a_preview_synth_note_sounds_with_the_transport_stopped() {
+        let shared = Arc::new(Shared::default());
+        let mut e = Engine::new(SR, shared.clone(), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(sequence_with_note(0, B, 4 * B)));
+        assert!(
+            shared.preview_scope().iter().all(|s| *s == 0.0),
+            "nothing previewed yet"
+        );
+        e.handle(EngineCommand::SetPreview(Some(PreviewPatch::from_sound(
+            &factory_patch("saw"),
+            SR,
+        ))));
+        e.handle(EngineCommand::PreviewNoteOn {
+            pitch: 57,
+            velocity: 100,
+        });
+        let held = render(&mut e, 8_000, 512);
+        assert!(
+            !e.is_playing() && e.position() == 0.0,
+            "the transport stayed put"
+        );
+        assert!(peak(&held[4_000..]) > 0.05, "the preview note must sound");
+
+        // The scope shows it, opening on a rising zero crossing.
+        let scope = shared.preview_scope();
+        assert_eq!(scope.len(), SCOPE_SAMPLES);
+        assert!(peak(&scope) > 0.05);
+        assert!(scope[0] >= 0.0, "{}", scope[0]);
+
+        // A new patch reaches the held note without cutting it, and Stop leaves it alone.
+        let SoundPatch::Synth(mut p) = factory_patch("saw") else {
+            unreachable!()
+        };
+        p.osc[0].wave = dissonant_core::sound::OscWave::Square;
+        e.handle(EngineCommand::SetPreview(Some(PreviewPatch::Synth(
+            Box::new(p),
+        ))));
+        e.handle(EngineCommand::Stop);
+        let after = render(&mut e, 2_000, 512);
+        assert!(
+            peak(&after[..200]) > 0.05,
+            "updating the patch cut the held note"
+        );
+
+        e.handle(EngineCommand::PreviewNoteOff { pitch: 57 });
+        let tail = render(&mut e, SR as usize, 512);
+        assert!(peak(&tail[30_000..]) < 1e-4, "released");
+    }
+
+    #[test]
+    fn the_preview_ignores_mute_and_closing_it_rings_out() {
+        let mut model = ProjectModel::empty();
+        model.tracks[0].muted = true;
+        let pid = model.patterns[0].id;
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequence(Arc::new(
+            Sequence::from_pattern(&model, &pid, 0).unwrap(),
+        )));
+        e.handle(EngineCommand::SetPreview(Some(PreviewPatch::from_sound(
+            &factory_patch("sine"),
+            SR,
+        ))));
+        e.handle(EngineCommand::PreviewNoteOn {
+            pitch: 69,
+            velocity: 100,
+        });
+        assert!(
+            peak(&render(&mut e, 4_000, 512)) > 0.05,
+            "muting a track must not mute the preview"
+        );
+        e.handle(EngineCommand::SetPreview(None));
+        let tail = render(&mut e, 2_000, 512);
+        assert!(
+            peak(&tail[..100]) > 0.01,
+            "closing releases rather than cuts"
+        );
+        render(&mut e, SR as usize, 512);
+        assert!(e.preview.is_none(), "dropped once silent");
+        e.handle(EngineCommand::PreviewNoteOn {
+            pitch: 69,
+            velocity: 100,
+        });
+        assert!(e.preview.is_none(), "a closed preview plays nothing");
+    }
+
+    #[test]
+    fn a_drum_preview_plays_on_any_pitch_and_swaps_its_sound() {
+        let shared = Arc::new(Shared::default());
+        let mut e = Engine::new(SR, shared.clone(), &MasterSettings::default());
+        e.handle(EngineCommand::SetPreview(Some(PreviewPatch::from_sound(
+            &factory_patch("kick"),
+            SR,
+        ))));
+        e.handle(EngineCommand::PreviewNoteOn {
+            pitch: 60,
+            velocity: 127,
+        });
+        assert!(peak(&render(&mut e, 4_000, 512)) > 0.1);
+        assert!(peak(&shared.preview_scope()) > 0.05);
+        e.handle(EngineCommand::SetPreview(Some(PreviewPatch::from_sound(
+            &factory_patch("hat"),
+            SR,
+        ))));
+        let Some(Instrument::Drums(kit)) = &e.preview else {
+            panic!("still a drum preview")
+        };
+        assert_eq!(
+            kit.pad_drum(0).unwrap().samples.len(),
+            (0.06 * SR).round() as usize,
+            "now the hat"
+        );
+        // A drum rendered at another rate is re-rendered at the engine's.
+        e.handle(EngineCommand::SetPreview(Some(PreviewPatch::from_sound(
+            &factory_patch("hat"),
+            22_050.0,
+        ))));
+        let Some(Instrument::Drums(kit)) = &e.preview else {
+            panic!()
+        };
+        assert_eq!(kit.pad_drum(0).unwrap().sample_rate, SR);
+    }
+
+    #[test]
+    fn a_prerendered_bank_feeds_the_kits_and_unchanged_pads_survive_an_edit() {
+        let mut model = ProjectModel::starter();
+        let drum = model.tracks.iter().position(|t| t.is_drum).unwrap();
+        let seq = Arc::new(Sequence::silent(&model, 4 * B));
+        let bank = Arc::new(DrumBank::for_sequence(&seq, SR));
+        let mut e = Engine::new(SR, Arc::new(Shared::default()), &MasterSettings::default());
+        e.handle(EngineCommand::SetSequenceWithDrums {
+            sequence: seq.clone(),
+            drums: bank.clone(),
+        });
+        let kit = |e: &Engine| match &e.channels[drum].instrument {
+            Instrument::Drums(k) => k.clone(),
+            _ => panic!("drum track"),
+        };
+        let pads = seq.tracks[drum].drum_pads.clone();
+        for p in &pads {
+            assert!(
+                Arc::ptr_eq(
+                    kit(&e).pad_drum(p.pitch).unwrap(),
+                    bank.get(&p.patch).unwrap()
+                ),
+                "pad {} not from the bank",
+                p.pitch
+            );
+        }
+        // Swap one pad's sound; every other pad keeps its buffer.
+        model.tracks[drum].drum_pads[0].sound = "clap".into();
+        e.handle(EngineCommand::SetSequence(Arc::new(Sequence::silent(
+            &model,
+            4 * B,
+        ))));
+        let k = kit(&e);
+        assert_eq!(
+            k.pad_drum(pads[0].pitch).unwrap().samples.len(),
+            (0.2 * SR).round() as usize,
+            "the clap now"
+        );
+        for p in &pads[1..] {
+            assert!(
+                Arc::ptr_eq(k.pad_drum(p.pitch).unwrap(), bank.get(&p.patch).unwrap()),
+                "pad {} re-rendered",
+                p.pitch
+            );
+        }
     }
 }

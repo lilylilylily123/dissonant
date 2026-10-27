@@ -14,6 +14,7 @@ pub mod document;
 pub mod midi_file;
 pub mod model;
 pub mod sequence;
+pub mod sound;
 pub mod tempo;
 pub mod theory;
 pub mod ticks;
@@ -31,10 +32,13 @@ pub use model::{
     MAX_PEDALS, MAX_SHIFT_TICKS, MIN_NOTE_TICKS, SCHEMA_VERSION,
 };
 pub use sequence::{Sequence, SequenceAudioClip, SequenceTrack};
+pub use sound::{
+    default_kit, factory_sound, factory_sounds, DrumPad, DrumPatch, ResolvedPad, Sound, SoundPatch, SynthPatch, MAX_DRUM_PADS,
+};
 pub use tempo::{swing_warp_ticks, Tempo, TempoMap, TempoPoint};
 pub use theory::harmony::{self, ChordSuggestion, ProgressionStarter};
 pub use theory::highlight::HighlightEngine;
 pub use theory::key_detector::{KeyCandidate, KeyDetectionResult, KeyDetector};
 pub use theory::tier::{Tier, TierClassifier};
 pub use ticks::{bar_ticks, beats_to_ticks, ticks_to_beats, TICKS_PER_BEAT};
-pub use vibes::{vibes, Groove, VibeInfo};
+pub use vibes::{vibe_specs, vibes, Groove, VibeInfo, VibeRole, VibeSpec};

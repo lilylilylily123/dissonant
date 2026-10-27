@@ -9,8 +9,8 @@
 //! audio thread.
 
 use crate::dsp::{
-    db_to_linear, Allpass1, Biquad, CabIr, Compressor, DelayLine, EnvFollower, Lfo, MicVoice,
-    NoiseGate, Over4, Reverb, SpeakerVoice, ToneStack, ToneStackParts, TubeStage,
+    db_to_linear, Allpass1, Biquad, CabIr, Compressor, EnvFollower, MicVoice, NoiseGate, Over4,
+    Reverb, RigDelay, SineLfo, SpeakerVoice, ToneStack, ToneStackParts, TubeStage,
 };
 use dissonant_core::{AmpModel, AmpRig, CabModel, EqModel, MicModel, Pedal, PedalKind};
 
@@ -48,26 +48,26 @@ enum PedalState {
         sample_rate: f32,
     },
     Chorus {
-        line: DelayLine,
-        lfo: Lfo,
+        line: RigDelay,
+        lfo: SineLfo,
         depth_samples: f32,
         centre_samples: f32,
         mix: f32,
     },
     Phaser {
         stages: [Allpass1; 4],
-        lfo: Lfo,
+        lfo: SineLfo,
         feedback: f32,
         depth: f32,
         last: f32,
         sample_rate: f32,
     },
     Tremolo {
-        lfo: Lfo,
+        lfo: SineLfo,
         depth: f32,
     },
     Delay {
-        line: DelayLine,
+        line: RigDelay,
         damp: Biquad,
         delay_samples: f32,
         feedback: f32,
@@ -110,26 +110,26 @@ impl PedalState {
                 sample_rate,
             },
             PedalKind::Chorus => PedalState::Chorus {
-                line: DelayLine::new((MAX_CHORUS_SECONDS * sample_rate) as usize),
-                lfo: Lfo::default(),
+                line: RigDelay::new((MAX_CHORUS_SECONDS * sample_rate) as usize),
+                lfo: SineLfo::default(),
                 depth_samples: 0.0,
                 centre_samples: 0.012 * sample_rate,
                 mix: 0.0,
             },
             PedalKind::Phaser => PedalState::Phaser {
                 stages: [Allpass1::default(); 4],
-                lfo: Lfo::default(),
+                lfo: SineLfo::default(),
                 feedback: 0.0,
                 depth: 0.0,
                 last: 0.0,
                 sample_rate,
             },
             PedalKind::Tremolo => PedalState::Tremolo {
-                lfo: Lfo::default(),
+                lfo: SineLfo::default(),
                 depth: 0.0,
             },
             PedalKind::Delay => PedalState::Delay {
-                line: DelayLine::new((MAX_DELAY_SECONDS * sample_rate) as usize + 2),
+                line: RigDelay::new((MAX_DELAY_SECONDS * sample_rate) as usize + 2),
                 damp: Biquad::default(),
                 delay_samples: 0.0,
                 feedback: 0.0,

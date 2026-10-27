@@ -1,5 +1,7 @@
 // Mirrors the Rust model in crates/dissonant-core (serde camelCase). Keep in sync.
 
+import type { DrumPad, Sound } from "./sound";
+
 /** Ticks per quarter-note beat (PPQ). Mirrors `dissonant_core::ticks::TICKS_PER_BEAT`. */
 export const TICKS_PER_BEAT = 960;
 
@@ -156,6 +158,8 @@ export interface Track {
   inserts?: Insert[];
   /** The guitar rig, on audio tracks only. */
   amp: AmpRig | null;
+  /** A drum track's kit, top to bottom (1–16 pads, unique pitches). Ignored on synth tracks. */
+  drumPads: DrumPad[];
 }
 
 export type TrackKind = "midi" | "drum" | "audio";
@@ -481,6 +485,8 @@ export interface ProjectModel {
   chords: ChordEvent[];
   /** The song's hard end in ticks: clips can't start at or run past it. At least one bar. */
   songLengthTicks: number;
+  /** Copies of the non-factory sounds the tracks use. Absent when empty. */
+  sounds?: Sound[];
 }
 
 export interface TempoPoint {
@@ -769,7 +775,8 @@ export type TrackParam = "volume" | "reverbSend" | "tone" | "pan";
 /** What the engine plays: one pattern (looped) or the whole song. */
 export type PlayMode = "pattern" | "song";
 /** What the window shows. SETUP and SONG both play the song. */
-export type ViewMode = "setup" | "pattern" | "song";
+/** `sound` is the sound designer; it plays like song mode. */
+export type ViewMode = "setup" | "pattern" | "song" | "sound";
 export type Tier = "chordTone" | "tension" | "dissonance";
 
 export type Command =
@@ -782,6 +789,12 @@ export type Command =
   | { type: "setTrackSoloed"; id: string; soloed: boolean }
   | { type: "moveTrack"; id: string; up: boolean }
   | { type: "setTrackVoice"; id: string; voice: string }
+  /** Synth tracks only; a non-factory sound is embedded in the project. */
+  | { type: "setTrackSound"; id: string; sound: Sound }
+  /** Drum tracks only: the whole kit, plus the non-factory drum sounds its pads use. */
+  | { type: "setDrumPads"; id: string; pads: DrumPad[]; sounds: Sound[] }
+  /** Replace the project's embedded copy of a sound. */
+  | { type: "upsertSound"; sound: Sound }
   | { type: "setTrackParam"; id: string; param: TrackParam; value: number }
   | { type: "setTrackColor"; id: string; color: string | null }
   | { type: "setTrackPlugin"; id: string; plugin: TrackPlugin | null }
@@ -1109,6 +1122,7 @@ export interface MidiStatus {
   armed: boolean;
 }
 
+/** The built-in voices offered as chips beside the plugin list. Each is a factory sound id. */
 export const VOICES = [
   "saw",
   "square",
@@ -1118,10 +1132,10 @@ export const VOICES = [
   "pluck",
 ] as const;
 
-/** A sound named by character: a voice plus tone (low-pass Hz) and reverb send. */
+/** A sound named by character: a voice (factory synth sound id) plus tone (low-pass Hz) and reverb send. */
 export interface SoundPreset {
   name: string;
-  voice: (typeof VOICES)[number];
+  voice: string;
   tone: number;
   reverbSend: number;
 }
@@ -1177,14 +1191,6 @@ export function mixHex(hex: string, toward: string, t: number): string {
   const c = a.map((v, i) => Math.round(v + (b[i] - v) * t));
   return `#${c.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
-
-/** Drum kit rows, top to bottom. Mirrors `dissonant_engine::drums::KIT`. */
-export const DRUM_KIT: { name: string; pitch: number }[] = [
-  { name: "hat", pitch: 42 },
-  { name: "clap", pitch: 39 },
-  { name: "snare", pitch: 38 },
-  { name: "kick", pitch: 36 },
-];
 
 export function uuid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto)

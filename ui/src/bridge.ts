@@ -59,7 +59,9 @@ import {
   uuid,
   withDefaults,
 } from "./types";
+import { defaultKit, filledSound, isFactory, lookupSound, validKit, type Sound } from "./sound";
 import { chordAt, normalize, progression } from "./theory";
+import vibesJson from "../../crates/dissonant-core/assets/vibes.json";
 
 export interface Bridge {
   readonly isTauri: boolean;
@@ -256,6 +258,16 @@ export interface Bridge {
   onAudioImport(cb: (p: AudioImportProgress) => void): () => void;
   /** An audio file was dropped onto the window. */
   onAudioDropped(cb: (path: string) => void): () => void;
+  /** The global user sound library (`sound-library.json` in app data). */
+  librarySounds(): Promise<Sound[]>;
+  /** Insert or replace by id; returns the whole library. */
+  saveLibrarySound(sound: Sound): Promise<Sound[]>;
+  deleteLibrarySound(id: string): Promise<Sound[]>;
+  /** Load a patch into the preview channel (SOUND page); `null` stops and clears it. */
+  previewSound(sound: Sound | null): Promise<void>;
+  previewNote(pitch: number, velocity: number, on: boolean): Promise<void>;
+  /** ~512 recent samples of the preview channel, aligned to a rising zero crossing. */
+  previewScope(): Promise<number[]>;
 }
 
 const isTauri =
@@ -387,6 +399,12 @@ async function tauriBridge(): Promise<Bridge> {
       invoke<AudioStatus>("set_settings", { settings }),
     outputDevices: () => invoke<OutputDevice[]>("output_devices"),
     testTone: () => invoke("test_tone"),
+    librarySounds: () => invoke<Sound[]>("library_sounds"),
+    saveLibrarySound: (sound) => invoke<Sound[]>("save_library_sound", { sound }),
+    deleteLibrarySound: (id) => invoke<Sound[]>("delete_library_sound", { id }),
+    previewSound: (sound) => invoke("preview_sound", { sound }),
+    previewNote: (pitch, velocity, on) => invoke("preview_note", { pitch, velocity, on }),
+    previewScope: () => invoke<number[]>("preview_scope"),
     onMidiStatus: (cb) => subscribe<MidiStatus>("midi-status", cb),
     scanPlugins: (rescan = false) =>
       invoke<PluginDescriptor[]>("scan_plugins", { rescan }),
@@ -462,6 +480,7 @@ const NO_SUCH_TRACK = "no such track";
 const NO_SUCH_PATTERN = "no such pattern";
 const NO_SUCH_CLIP = "no such clip";
 const NO_SUCH_SECTION = "no such section";
+const NO_SUCH_SOUND = "no such sound";
 const LAST_TRACK = "a project needs at least one track";
 const INVALID_VALUE = "invalid value";
 const NO_PLUGIN = "track has no plugin";
@@ -555,6 +574,7 @@ function newTrack(isDrum: boolean, name: string): Track {
     color: null,
     plugin: null,
     amp: null,
+    drumPads: defaultKit(),
   };
 }
 
@@ -801,86 +821,127 @@ function grooveHits(groove: Groove): NoteEvent[] {
   return hits.sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch);
 }
 
-/** `vibes::bass_line` over four 4/4 bars: the chord root under each hit, G♯1–G2. */
-function bassLine(chords: ChordEvent[], rhythm: [number, number][]): NoteEvent[] {
+/** One hit of a bass or chord part, every bar: `[offset, length, interval?]`, in beats. */
+type PartHit = number[];
+/** `vibes::DrumLane`: a step string, one character per `step` beats (X accent, x hit, o ghost). */
+interface DrumLane {
+  pitch: number;
+  step?: number;
+  steps: string;
+}
+/** `vibes::VibeTrack`. */
+type VibeTrackSpec = { name: string; sound?: string; tone?: number; reverb?: number; volume?: number; pan?: number } & (
+  | { role: "lead" }
+  | { role: "bass"; rhythm: PartHit[] }
+  | { role: "chords"; low: number; rhythm: PartHit[] }
+  | { role: "drums"; kit: [number, string, number][]; lanes: DrumLane[] }
+);
+/** `vibes::VibeSpec`. The JSON writes musical time in beats; everything built from it is ticks. */
+interface VibeSpec {
+  id: string;
+  name: string;
+  blurb: string;
+  tempo: number;
+  swing: number;
+  /** The swing grid in beats (0.5 = eighths). */
+  swingGrid: number;
+  root: number;
+  scale: ScaleType;
+  degrees: number[];
+  chordBeats: number;
+  tracks: VibeTrackSpec[];
+}
+
+/** The same `assets/vibes.json` `ProjectModel::from_vibe` builds from. */
+const VIBE_SPECS = vibesJson as unknown as VibeSpec[];
+
+const lockedKey = (rootPitchClass: number, scale: ScaleType): KeyState => ({ rootPitchClass, scale, isLocked: true });
+const mod12 = (x: number) => ((x % 12) + 12) % 12;
+
+/** `vibes::per_bar` over the four 4/4 bars of a pattern: every rhythm hit of every bar, in
+ *  ticks, clipped at the pattern's end. */
+function perBar(rhythm: PartHit[], hit: (i: number, startTick: number, lengthTicks: number) => NoteEvent[]): NoteEvent[] {
   const notes: NoteEvent[] = [];
   for (let bar = 0; bar < PATTERN_TICKS; bar += BAR_TICKS) {
     rhythm.forEach(([offset, len], i) => {
+      if (offset === undefined || len === undefined) return;
       const start = bar + beatsToTicks(offset);
-      const chord = chordAt(chords, start);
-      if (!chord || !chord.pitchClasses.length) return;
-      const pc = normalize(chord.pitchClasses[0]);
-      notes.push({
-        id: uuid(),
-        startTick: start,
-        lengthTicks: Math.min(beatsToTicks(len), PATTERN_TICKS - start),
-        pitch: 36 + pc - (pc >= 8 ? 12 : 0),
-        velocity: i === 0 ? 105 : 92,
-      });
+      if (start >= PATTERN_TICKS) return;
+      notes.push(...hit(i, start, Math.max(1, Math.min(beatsToTicks(len), PATTERN_TICKS - start))));
     });
   }
   return notes;
 }
 
-type Sound = [voice: string, tone: number, reverb: number];
-const SOUND: Record<string, Sound> = {
-  softKeys: ["triangle", 6000, 0.25],
-  warmPad: ["pad", 4000, 0.45],
-  glassPluck: ["pluck", 12000, 0.3],
-  buzzyBass: ["saw", 1200, 0],
-  roundBass: ["sine", 2000, 0],
-  leadWithBite: ["square", 9000, 0.15],
-};
-
-interface MockVibe extends VibeInfo {
-  swing: number;
-  /** The swing grid in ticks, like `ProjectModel.swingGridTicks`. */
-  swingGridTicks: number;
-  degrees: number[];
-  chordTicks: number;
-  groove: Groove;
-  bass: [number, number][];
-  bassSound: Sound;
-  leadName: string;
-  leadSound: Sound;
+/** `vibes::bass_line`: the chord root under each hit, G♯1–G2, plus the hit's interval. */
+function bassLine(chords: ChordEvent[], rhythm: PartHit[]): NoteEvent[] {
+  return perBar(rhythm, (i, start, len) => {
+    const chord = chordAt(chords, start);
+    if (!chord || !chord.pitchClasses.length) return [];
+    const pc = normalize(chord.pitchClasses[0]);
+    const pitch = 36 + pc - (pc >= 8 ? 12 : 0) + (rhythm[i][2] ?? 0);
+    return [{ id: uuid(), startTick: start, lengthTicks: len, pitch, velocity: i === 0 ? 105 : 92 }];
+  });
 }
 
-const lockedKey = (rootPitchClass: number, scale: ScaleType): KeyState => ({ rootPitchClass, scale, isLocked: true });
-const EIGHTH_BASS: [number, number][] = Array.from({ length: 8 }, (_, i) => [i * 0.5, 0.45]);
+/** `vibes::chord_part`: the chord voiced close from its root, the root at or above `low`. */
+function chordPart(chords: ChordEvent[], low: number, rhythm: PartHit[]): NoteEvent[] {
+  return perBar(rhythm, (i, start, len) => {
+    const chord = chordAt(chords, start);
+    if (!chord) return [];
+    let below = low - 1;
+    return chord.pitchClasses.map((pc) => {
+      below = below + 1 + mod12(pc - below - 1);
+      return { id: uuid(), startTick: start, lengthTicks: len, pitch: below, velocity: i === 0 ? 92 : 80 };
+    });
+  });
+}
 
-/** `VIBES` in vibes.rs. `bridge.test.ts` pins the same values `vibe_values_shared_with_the_ui` does. */
-const MOCK_VIBES: MockVibe[] = [
-  { id: "lofi", name: "lo-fi bedroom", blurb: "dusty, swung and slow: jazzy chords, lazy drums, room for a melody", tempo: 80, key: lockedKey(5, "major"), swing: 60, swingGridTicks: TICKS_PER_BEAT / 4, degrees: [1, 4, 0, 5], chordTicks: BAR_TICKS, groove: "boomBap", bass: [[0, 1.25], [1.5, 1.5], [3.5, 0.5]], bassSound: SOUND.roundBass, leadName: "keys", leadSound: SOUND.softKeys },
-  { id: "postpunk", name: "post-punk", blurb: "fast, tense and driving: 8th-note bass, motorik drums, minor chords", tempo: 148, key: lockedKey(4, "minor"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 5, 2, 6], chordTicks: BAR_TICKS, groove: "motorik", bass: EIGHTH_BASS, bassSound: SOUND.buzzyBass, leadName: "lead", leadSound: SOUND.leadWithBite },
-  { id: "ambient", name: "ambient texture", blurb: "a slow two-chord drift: barely a beat, long notes, lots of space", tempo: 70, key: lockedKey(2, "major"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 3], chordTicks: 8 * TICKS_PER_BEAT, groove: "sparse", bass: [[0, 4]], bassSound: SOUND.roundBass, leadName: "pad", leadSound: SOUND.warmPad },
-  { id: "songwriter", name: "songwriter demo", blurb: "four friendly chords and a plain beat to sing or play over", tempo: 96, key: lockedKey(7, "major"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 4, 5, 3], chordTicks: BAR_TICKS, groove: "backbeat", bass: [[0, 2], [2, 2]], bassSound: SOUND.roundBass, leadName: "melody", leadSound: SOUND.glassPluck },
-  { id: "club", name: "club loop", blurb: "four-on-the-floor, offbeat bass and a minor loop that keeps going", tempo: 124, key: lockedKey(9, "minor"), swing: 50, swingGridTicks: TICKS_PER_BEAT / 2, degrees: [0, 6, 5, 6], chordTicks: BAR_TICKS, groove: "fourOnFloor", bass: [[0.5, 0.4], [1.5, 0.4], [2.5, 0.4], [3.5, 0.4]], bassSound: SOUND.buzzyBass, leadName: "lead", leadSound: SOUND.leadWithBite },
-];
-
-const withSound = (t: Track, [voice, tone, reverb]: Sound): Track => ({ ...t, voice, tone, reverbSend: reverb });
+/** `DrumLane::hits(PATTERN_TICKS)`. */
+function laneHits(lane: DrumLane): NoteEvent[] {
+  const cells = [...lane.steps].filter((c) => !/\s/.test(c));
+  const step = beatsToTicks(lane.step ?? 0.25);
+  const period = cells.length * step;
+  const velocities: Record<string, number> = { X: 120, x: 96, o: 64 };
+  const hits: NoteEvent[] = [];
+  if (period <= 0) return hits;
+  for (let at = 0; at < PATTERN_TICKS; at += period) {
+    cells.forEach((c, i) => {
+      const start = at + i * step;
+      if (velocities[c] && start < PATTERN_TICKS) hits.push({ id: uuid(), startTick: start, lengthTicks: Math.min(step, PATTERN_TICKS - start), pitch: lane.pitch, velocity: velocities[c] });
+    });
+  }
+  return hits;
+}
 
 /**
- * `ProjectModel::from_vibe`: one pattern per track ("keys 1", "bass 1", "drums 1"), the
- * progression tiled across the whole song, one clip per track from 0 to the song end.
+ * `ProjectModel::from_vibe`: the vibe's tracks in order (the empty lead first), one pattern
+ * each ("bells 1", "reese 1", …), the progression tiled across the whole song, one clip per
+ * track from 0 to the song end.
  */
 function vibeModel(id: string, songBars = defaultSongBars()): ProjectModel | null {
-  const v = MOCK_VIBES.find((x) => x.id === id);
+  const v = VIBE_SPECS.find((x) => x.id === id);
   if (!v) return null;
   const m = emptyModel(songBars);
   m.tempo = v.tempo;
   m.swing = v.swing;
-  m.swingGridTicks = v.swingGridTicks;
-  m.key = { ...v.key };
-  m.chords = progression(v.degrees, v.key.rootPitchClass!, v.key.scale, m.songLengthTicks, v.chordTicks);
-  const lead = withSound({ ...m.tracks[0], name: v.leadName }, v.leadSound);
-  const bass = withSound(newTrack(false, "bass"), v.bassSound);
-  const drums = newTrack(true, "drums");
-  m.tracks = [lead, bass, drums];
-  m.patterns = [
-    newPattern(lead.id, `${lead.name} 1`),
-    { ...newPattern(bass.id, "bass 1"), notes: bassLine(m.chords, v.bass) },
-    { ...newPattern(drums.id, "drums 1"), notes: grooveHits(v.groove) },
-  ];
+  m.swingGridTicks = beatsToTicks(v.swingGrid);
+  m.key = lockedKey(v.root, v.scale);
+  m.chords = progression(v.degrees, v.root, v.scale, m.songLengthTicks, beatsToTicks(v.chordBeats));
+  m.tracks = [];
+  m.patterns = [];
+  for (const t of v.tracks) {
+    const track: Track = { ...newTrack(t.role === "drums", t.name), voice: t.sound ?? "saw", tone: t.tone ?? 18000, reverbSend: t.reverb ?? 0, volume: t.volume ?? 1, pan: t.pan ?? 0 };
+    let notes: NoteEvent[] = [];
+    if (t.role === "bass") notes = bassLine(m.chords, t.rhythm);
+    else if (t.role === "chords") notes = chordPart(m.chords, t.low, t.rhythm);
+    else if (t.role === "drums") {
+      track.drumPads = t.kit.map(([pitch, sound, choke]) => ({ pitch, sound, choke }));
+      notes = t.lanes.flatMap(laneHits).sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch);
+    }
+    m.tracks.push(track);
+    m.patterns.push({ ...newPattern(track.id, `${t.name} 1`), notes });
+  }
   m.clips = m.patterns.map((p) => songClip(p.id, m.songLengthTicks));
   return m;
 }
@@ -1114,6 +1175,11 @@ function normalizedModel(m: ProjectModel): ProjectModel {
       t.amp = null;
     }
   }
+  // A hand-edited kit the commands would refuse (empty, too big, repeated pitches) falls back
+  // to the default kit rather than playing half-broken, and a partial embedded sound is filled.
+  for (const t of m.tracks) if (!validKit(t.drumPads)) t.drumPads = defaultKit();
+  if (m.sounds) m.sounds = m.sounds.map(sanitizedSound);
+  pruneSounds(m);
   m.chords = m.chords ?? [];
   m.songLengthTicks = Number.isFinite(m.songLengthTicks)
     ? Math.max(barOf(m), m.songLengthTicks)
@@ -1194,15 +1260,16 @@ function reduce(m: ProjectModel, c: Command): void {
       track(c.id).color = c.color === null ? null : c.color.toLowerCase();
       break;
     case "deleteTrack": {
+      // Like Rust: an unknown id is "no such track" even when only one track is left.
+      track(c.id);
       if (m.tracks.length <= 1) fail(LAST_TRACK);
-      const before = m.tracks.length;
       m.tracks = m.tracks.filter((t) => t.id !== c.id);
-      if (m.tracks.length === before) fail(NO_SUCH_TRACK);
       // Its patterns go with it, and their clips with them.
       const gone = new Set(m.patterns.filter((p) => p.trackId === c.id).map((p) => p.id));
       m.patterns = m.patterns.filter((p) => !gone.has(p.id));
       m.clips = m.clips.filter((cl) => !gone.has(cl.patternId));
       m.audioClips = (m.audioClips ?? []).filter((a) => a.trackId !== c.id);
+      pruneSounds(m);
       break;
     }
     case "renameTrack":
@@ -1224,7 +1291,38 @@ function reduce(m: ProjectModel, c: Command): void {
     }
     case "setTrackVoice":
       track(c.id).voice = c.voice;
+      pruneSounds(m);
       break;
+    case "setTrackSound": {
+      const sound = sanitizedSound(c.sound);
+      const t = track(c.id);
+      if (t.isDrum || sound.patch.kind !== "synth") fail(INVALID_VALUE);
+      t.voice = sound.id;
+      if (!isFactory(sound.id)) embedSound(m, sound);
+      pruneSounds(m);
+      break;
+    }
+    case "setDrumPads": {
+      const sounds = c.sounds.map(sanitizedSound);
+      // Pitch and choke are `u8` in Rust: anything else fails to decode before `apply_to` runs.
+      const byte = (x: number) => Number.isInteger(x) && x >= 0 && x <= 255;
+      if (!c.pads.every((p) => byte(p.pitch) && byte(p.choke) && typeof p.sound === "string")) fail(INVALID_VALUE);
+      if (!validKit(c.pads) || sounds.some((s) => s.patch.kind !== "drum")) fail(INVALID_VALUE);
+      if (!track(c.id).isDrum) fail(INVALID_VALUE);
+      for (const s of sounds) if (!isFactory(s.id)) embedSound(m, s);
+      if (c.pads.some((p) => lookupSound(m.sounds ?? [], p.sound)?.patch.kind !== "drum")) fail(NO_SUCH_SOUND);
+      track(c.id).drumPads = c.pads.map((p) => ({ pitch: p.pitch, sound: p.sound, choke: p.choke }));
+      pruneSounds(m);
+      break;
+    }
+    case "upsertSound": {
+      const sound = sanitizedSound(c.sound);
+      const i = (m.sounds ?? []).findIndex((s) => s.id === sound.id);
+      if (i < 0) fail(NO_SUCH_SOUND);
+      if (m.sounds![i].patch.kind !== sound.patch.kind) fail(INVALID_VALUE);
+      m.sounds![i] = sound;
+      break;
+    }
     case "setTrackParam": {
       if (!allFinite(c.value)) fail(INVALID_VALUE);
       const [lo, hi] = TRACK_PARAM_RANGE[c.param];
@@ -1536,6 +1634,164 @@ function reduce(m: ProjectModel, c: Command): void {
 
 /** `document::MAX_UNDO`. */
 const MAX_UNDO = 200;
+
+/** Insert or replace an embedded sound by id (mirrors `embed_sound`). */
+function embedSound(m: ProjectModel, sound: Sound) {
+  const sounds = (m.sounds ??= []);
+  const i = sounds.findIndex((s) => s.id === sound.id);
+  if (i >= 0) sounds[i] = structuredClone(sound);
+  else sounds.push(structuredClone(sound));
+}
+
+/** Drop embedded sounds no track uses (mirrors `ProjectModel::prune_sounds`). */
+function pruneSounds(m: ProjectModel) {
+  const used = (s: Sound) => m.tracks.some((t) => (t.isDrum ? t.drumPads.some((p) => p.sound === s.id) : t.voice === s.id));
+  const kept = (m.sounds ?? []).filter(used);
+  if (kept.length) m.sounds = kept;
+  else delete m.sounds;
+}
+
+// ─── Sound sanitizing (mirrors `Sound::sanitized` in crates/dissonant-core/src/sound.rs) ────
+
+/** `[path, lo, hi, integer]`; `*` walks every element of a fixed-length array. */
+type Range = [path: string, lo: number, hi: number, integer?: true];
+const ENVELOPE: Range[] = [["attack", 0, 10], ["decay", 0.001, 10], ["sustain", 0, 1], ["release", 0.001, 10]];
+const under = (prefix: string, ranges: Range[]): Range[] => ranges.map(([p, ...r]) => [prefix + "." + p, ...r]);
+const SYNTH_RANGES: Range[] = [
+  ["osc.*.octave", -3, 3, true],
+  ["osc.*.semi", -12, 12, true],
+  ["osc.*.fine", -100, 100],
+  ["osc.*.level", 0, 1],
+  ["osc.*.pulseWidth", 0.05, 0.95],
+  ["osc.*.unison", 1, 8, true],
+  ["osc.*.detune", 0, 100],
+  ["noiseLevel", 0, 1],
+  ["noiseColor", 0, 1],
+  ["fmAmount", 0, 1],
+  ["ringMod", 0, 1],
+  ["filter.cutoff", 20, 20000],
+  ["filter.resonance", 0, 1],
+  ["filter.drive", 0, 1],
+  ["filter.keyTrack", 0, 1],
+  ["filter.envAmount", -8, 8],
+  ["filter.velocity", 0, 1],
+  ...under("ampEnv", ENVELOPE),
+  ...under("filterEnv", ENVELOPE),
+  ["pitchEnvAmount", -48, 48],
+  ["pitchEnvDecay", 0.001, 2],
+  ["lfo.*.rate", 0.01, 30],
+  ["lfo.*.depth", 0, 1],
+  ["glide", 0, 2],
+  ["velocity", 0, 1],
+  ["drive", 0, 1],
+  ["crush", 0, 1],
+  ["chorus.mix", 0, 1],
+  ["chorus.rate", 0.05, 5],
+  ["chorus.depth", 0, 1],
+  ["delay.mix", 0, 1],
+  ["delay.time", 0.01, 1.5],
+  ["delay.feedback", 0, 0.95],
+  ["level", 0, 1],
+];
+const DRUM_RANGES: Range[] = [
+  ["length", 0.02, 3],
+  ["tune", -24, 24],
+  ["body.level", 0, 1],
+  ["body.startHz", 20, 4000],
+  ["body.endHz", 20, 4000],
+  ["body.pitchDecay", 0.001, 2],
+  ["body.decay", 0.001, 3],
+  ["body.overtoneLevel", 0, 1],
+  ["body.overtoneRatio", 0.5, 8],
+  ["noise.level", 0, 1],
+  ["noise.cutoff", 20, 20000],
+  ["noise.resonance", 0, 1],
+  ["noise.attack", 0, 0.1],
+  ["noise.decay", 0.001, 3],
+  ["noise.bursts", 1, 8, true],
+  ["noise.burstSpacing", 0.002, 0.05],
+  ["metal.level", 0, 1],
+  ["metal.baseHz", 100, 1000],
+  ["metal.decay", 0.001, 3],
+  ["metal.cutoff", 200, 20000],
+  ["click.level", 0, 1],
+  ["click.decay", 0.0005, 0.02],
+  ["click.toneHz", 500, 12000],
+  ["drive", 0, 1],
+  ["crush", 0, 1],
+  ["lowCut", 20, 2000],
+  ["highCut", 200, 20000],
+  ["velocity", 0, 1],
+  ["level", 0, 1],
+];
+
+function clampPath(node: unknown, keys: string[], lo: number, hi: number, integer: boolean): void {
+  const [k, ...rest] = keys;
+  if (k === "*") {
+    for (const item of node as unknown[]) clampPath(item, rest, lo, hi, integer);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  if (rest.length) return clampPath(obj[k], rest, lo, hi, integer);
+  const v = obj[k];
+  // Serde refuses a non-number (or a fraction for an integer field) before the edit runs.
+  if (typeof v !== "number" || (integer && !Number.isInteger(v))) fail(INVALID_VALUE);
+  obj[k] = Number.isFinite(v) ? clamp(v, lo, hi) : lo;
+}
+
+/**
+ * What Rust makes of a sound arriving over IPC: missing fields take their defaults (serde
+ * `default`), unknown ones are dropped, then `Sound::sanitized` clamps every parameter and
+ * names a blank sound "untitled". Always a fresh object.
+ */
+export function sanitizedSound(sound: Sound): Sound {
+  const s = filledSound(structuredClone(sound) as unknown as Parameters<typeof filledSound>[0]);
+  const ranges = s.patch.kind === "drum" ? DRUM_RANGES : SYNTH_RANGES;
+  for (const [path, lo, hi, integer] of ranges) clampPath(s.patch, path.split("."), lo, hi, integer === true);
+  if (!s.name.trim()) s.name = "untitled";
+  return s;
+}
+
+// ─── Mock sound library ─────────────────────────────────────────────────────────────────────
+
+/** The mock's stand-in for the global sound library (`src-tauri/src/library.rs`). */
+const LIBRARY_KEY = "dissonant.mock.soundLibrary";
+
+/** `library::check_id`: the same refusals, word for word. */
+function libraryIdError(id: string): string | null {
+  if (isFactory(id)) return `"${id}" is a factory sound; save a copy under a new id`;
+  if (!id.startsWith("u-")) return `a library sound id must start with "u-" (got "${id}")`;
+  return null;
+}
+
+/** Tolerant like `library::load`: unreadable storage is an empty library, bad entries drop. */
+function loadLibrary(): Sound[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  const lib: Sound[] = [];
+  for (const item of raw) {
+    try {
+      const s = sanitizedSound(item as Sound);
+      if (libraryIdError(s.id) === null && !lib.some((k) => k.id === s.id)) lib.push(s);
+    } catch {
+      // Not a sound this build can read: dropped, like a bad entry in the file.
+    }
+  }
+  return lib;
+}
+
+function storeLibrary(lib: Sound[]) {
+  try {
+    localStorage.setItem(LIBRARY_KEY, JSON.stringify(lib));
+  } catch {
+    // Private window / storage blocked: the library just doesn't persist.
+  }
+}
 
 /** The mock's stand-in for the filesystem: one slot, written by save, read by open. */
 const STORAGE_KEY = "dissonant.mock.project";
@@ -2469,7 +2725,7 @@ function mockBridge(): Bridge {
       delete all[name];
       localStorage.setItem(TEMPLATES_KEY, JSON.stringify(all));
     },
-    listVibes: async () => MOCK_VIBES.map(({ id, name, blurb, tempo, key }) => ({ id, name, blurb, tempo, key: { ...key } })),
+    listVibes: async () => VIBE_SPECS.map(({ id, name, blurb, tempo, root, scale }) => ({ id, name, blurb, tempo, key: lockedKey(root, scale) })),
     newFromVibe: async (id) => {
       replace(vibeModel(id) ?? fail(`no vibe called ${id}`), null);
       return snapshot();
@@ -2600,6 +2856,29 @@ function mockBridge(): Bridge {
       },
     ],
     testTone: async () => blip(69, 100),
+    librarySounds: async () => loadLibrary(),
+    // `library::save` / `library::delete`: factory and non-`u-` ids are refused, the sound is
+    // sanitized and replaces its id in place; deleting an unknown id changes nothing.
+    saveLibrarySound: async (sound) => {
+      const refusal = libraryIdError(sound.id);
+      if (refusal) fail(refusal);
+      const clean = sanitizedSound(sound);
+      const lib = loadLibrary();
+      const i = lib.findIndex((s) => s.id === clean.id);
+      if (i >= 0) lib[i] = clean;
+      else lib.push(clean);
+      storeLibrary(lib);
+      return clone(lib);
+    },
+    deleteLibrarySound: async (id) => {
+      const lib = loadLibrary().filter((s) => s.id !== id);
+      storeLibrary(lib);
+      return clone(lib);
+    },
+    // The mock has no synth engine: previews are silent and the scope is flat.
+    previewSound: async () => {},
+    previewNote: async () => {},
+    previewScope: async () => new Array(512).fill(0),
     onMidiStatus: () => () => {},
     scanPlugins: async () => installed.map((d) => ({ ...d })),
     setTrackPlugin: async (trackId, uid) => {

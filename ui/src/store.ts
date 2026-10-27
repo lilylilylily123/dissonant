@@ -44,6 +44,7 @@ import {
   ticksToBeats,
 } from "./types";
 import { applyUiScale } from "./uiScale";
+import { FACTORY_SOUNDS, type Sound } from "./sound";
 
 export interface Toast {
   text: string;
@@ -72,8 +73,8 @@ export interface DialogSpec {
 export type BottomPanel = "devices" | "mixer";
 /**
  * Which top-level screen is showing. It is not what the engine sequences: `PlayMode` is a
- * Rust enum with two variants, and SETUP, SONG and the guitar screen all play the song, so
- * `playModeOf` folds this down for the bridge.
+ * Rust enum with two variants, and SETUP, SONG, SOUND and the guitar screen all play the song,
+ * so `playModeOf` folds this down for the bridge.
  */
 export type Screen = ViewMode | "guitar";
 export type LiveKeyboard = "off" | "tier" | "chromatic";
@@ -189,10 +190,16 @@ interface State {
   commitGesture(): Promise<void>;
   /** Voice, tone and reverb from a named preset, as one undo step. */
   applySoundPreset(trackId: string, preset: SoundPreset): Promise<void>;
+  /** The global user sound library (loaded at init). */
+  library: Sound[];
+  loadLibrary(): Promise<void>;
+  /** Save to the global library; also refreshes the open project's embedded copy if it has one. */
+  saveLibrarySound(sound: Sound): Promise<void>;
+  deleteLibrarySound(id: string): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
-  /** Switch screens. PATTERN loops the selected pattern; SETUP, SONG and the guitar screen
-   *  all play the song. The only writer of `screen`. */
+  /** Switch screens. PATTERN loops the selected pattern; SETUP, SONG, SOUND and the guitar
+   *  screen all play the song. The only writer of `screen`. */
   setScreen(screen: Screen): void;
   /** Also selects that track's first pattern (or keeps the selected one if it's on that track), or none. */
   selectTrack(id: string): void;
@@ -402,6 +409,17 @@ let taps: number[] = [];
 let dialogResolve: ((value: string) => void) | null = null;
 let lastTitle = "";
 
+/**
+ * Every sound a track could pick, of one kind: factory, then the user library, then any sound
+ * embedded in the project that isn't in the library (opened from another machine).
+ */
+export function soundChoices(st: { library: Sound[]; snapshot: Snapshot | null }, kind: "synth" | "drum"): { factory: Sound[]; library: Sound[]; project: Sound[] } {
+  const of = (list: Sound[]) => list.filter((s) => s.patch.kind === kind);
+  const library = of(st.library);
+  const project = of(st.snapshot?.model.sounds ?? []).filter((s) => !library.some((l) => l.id === s.id));
+  return { factory: of(FACTORY_SOUNDS), library, project };
+}
+
 /** The engine's playback mode for a screen: only PATTERN loops a pattern. */
 export const playModeOf = (screen: Screen): PlayMode => (screen === "pattern" ? "pattern" : "song");
 
@@ -527,6 +545,7 @@ export const useStore = create<State>((set, get) => {
 
   return {
     snapshot: null,
+    library: [],
     selectedTrackId: null,
     selectedPatternId: null,
     chordOffsetTicks: 0,
@@ -653,6 +672,7 @@ export const useStore = create<State>((set, get) => {
       void get().refreshRecent();
       void get().refreshPlugins();
       void get().refreshInputDevices();
+      void get().loadLibrary();
       try {
         set({ vibes: await b.listVibes() });
       } catch {
@@ -687,6 +707,25 @@ export const useStore = create<State>((set, get) => {
       applySnapshot(await b.commitGesture());
     },
 
+    async loadLibrary() {
+      const b = await getBridge();
+      try {
+        set({ library: await b.librarySounds() });
+      } catch (e) {
+        console.warn("sound library unavailable", e);
+      }
+    },
+    async saveLibrarySound(sound) {
+      const b = await getBridge();
+      set({ library: await b.saveLibrarySound(sound) });
+      if (get().snapshot?.model.sounds?.some((s) => s.id === sound.id)) await get().dispatch({ type: "upsertSound", sound });
+    },
+    async deleteLibrarySound(id) {
+      const b = await getBridge();
+      // The project keeps its embedded copy, so songs using the sound still play.
+      set({ library: await b.deleteLibrarySound(id) });
+    },
+
     async applySoundPreset(trackId, preset) {
       // Three transient edits folded into one undo step by commitGesture, like a knob drag.
       const label = `sound: ${preset.name}`;
@@ -707,8 +746,8 @@ export const useStore = create<State>((set, get) => {
     },
 
     setScreen(screen) {
-      // SETUP, SONG and the guitar screen all play the song timeline; only PATTERN loops a
-      // pattern, so the engine's mode only has to follow that one step.
+      // SETUP, SONG, SOUND and the guitar screen all play the song timeline; only PATTERN loops
+      // a pattern, so the engine's mode only has to follow that one step.
       const before = playModeOf(get().screen);
       set({ screen });
       if (playModeOf(screen) !== before) void syncPlayback();

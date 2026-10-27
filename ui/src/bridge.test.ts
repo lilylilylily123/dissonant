@@ -12,6 +12,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
 import type { AudioClip, AudioSource, ChordEvent, Clip, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel } from "./types";
 import { defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, SOUND_PRESETS, soundPresetOf, TICKS_PER_BEAT } from "./types";
+import { DEFAULT_DRUM_PATCH, DEFAULT_SYNTH_PATCH, defaultKit, FACTORY_SOUNDS, type DrumPad, type Sound } from "./sound";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
 
@@ -772,6 +773,195 @@ describe("sound presets (store.applySoundPreset)", () => {
   });
 });
 
+// ─── sounds and drum kits ──────────────────────────────────────────────────────────────────
+
+const synthSound = (id: string, level = 0.5): Sound => ({
+  id,
+  name: id,
+  category: "lead",
+  patch: { kind: "synth", ...structuredClone(DEFAULT_SYNTH_PATCH), level },
+});
+const drumSound = (id: string, tune = 0): Sound => ({
+  id,
+  name: id,
+  category: "kick",
+  patch: { kind: "drum", ...structuredClone(DEFAULT_DRUM_PATCH), tune },
+});
+const pad = (pitch: number, sound: string, choke = 0): DrumPad => ({ pitch, sound, choke });
+const embedded = async () => ((await model()).sounds ?? []).map((s) => s.id);
+
+/** Mirrors the "sounds and drum kits" section of crates/dissonant-core/tests/document_behavior.rs. */
+describe("sounds (setTrackSound / setDrumPads / upsertSound)", () => {
+  it("setTrackSound embeds a user sound, replaces it by id, and a factory sound prunes it", async () => {
+    const { melody } = await ids();
+    await b.apply({ type: "setTrackSound", id: melody, sound: synthSound("u-a") });
+    expect((await model()).tracks[0].voice).toBe("u-a");
+    expect(await embedded()).toEqual(["u-a"]);
+    // Another user sound: the first, now unused, is pruned.
+    await b.apply({ type: "setTrackSound", id: melody, sound: synthSound("u-b") });
+    expect(await embedded()).toEqual(["u-b"]);
+    await b.apply({ type: "setTrackSound", id: melody, sound: synthSound("u-b", 0.25) });
+    expect((await model()).sounds![0].patch.level).toBe(0.25);
+    // Back to a factory sound: nothing is embedded and, like Rust's skip_serializing_if, the
+    // key is gone rather than an empty array.
+    await b.apply({ type: "setTrackSound", id: melody, sound: FACTORY_SOUNDS.find((s) => s.id === "saw")! });
+    const m = await model();
+    expect(m.tracks[0].voice).toBe("saw");
+    expect("sounds" in m).toBe(false);
+  });
+
+  it("refuses the wrong kind of sound and an unknown track", async () => {
+    const { melody, drums } = await ids();
+    await rejectsAndKeepsModel({ type: "setTrackSound", id: drums, sound: synthSound("u-a") }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setTrackSound", id: melody, sound: drumSound("u-boom") }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setTrackSound", id: FAKE_ID, sound: synthSound("u-a") }, "no such track");
+  });
+
+  it("sanitizes what it embeds like Sound::sanitized, filling missing fields like serde", async () => {
+    const { melody, drums } = await ids();
+    const wild = synthSound("u-wild", 9);
+    wild.name = "  ";
+    if (wild.patch.kind === "synth") {
+      wild.patch.osc[1].unison = 99;
+      wild.patch.osc[0].octave = -7;
+      wild.patch.filter.cutoff = 5;
+      delete (wild.patch as Partial<typeof wild.patch>).delay;
+    }
+    await b.apply({ type: "setTrackSound", id: melody, sound: wild });
+    const s = (await model()).sounds![0];
+    expect(s.name).toBe("untitled");
+    if (s.patch.kind !== "synth") throw new Error("expected a synth");
+    expect([s.patch.level, s.patch.osc[1].unison, s.patch.osc[0].octave, s.patch.filter.cutoff]).toEqual([1, 8, -3, 20]);
+    expect(s.patch.delay).toEqual(DEFAULT_SYNTH_PATCH.delay);
+
+    const boom = drumSound("u-boom", 99);
+    if (boom.patch.kind === "drum") boom.patch.noise.bursts = 0;
+    await b.apply({ type: "setDrumPads", id: drums, pads: [pad(36, "u-boom")], sounds: [boom] });
+    const d = (await model()).sounds!.find((x) => x.id === "u-boom")!;
+    if (d.patch.kind !== "drum") throw new Error("expected a drum");
+    expect([d.patch.tune, d.patch.noise.bursts]).toEqual([24, 1]);
+
+    await b.apply({ type: "upsertSound", sound: synthSound("u-wild", -1) });
+    expect((await model()).sounds![0].patch.level).toBe(0);
+
+    // A fraction in an integer field would not even decode in Rust.
+    const half = synthSound("u-half");
+    if (half.patch.kind === "synth") half.patch.osc[0].unison = 1.5;
+    await rejectsAndKeepsModel({ type: "setTrackSound", id: melody, sound: half }, "invalid value");
+  });
+
+  it("setDrumPads refuses a bad kit and changes nothing", async () => {
+    const { melody, drums } = await ids();
+    await b.apply({ type: "setTrackSound", id: melody, sound: synthSound("u-test") });
+    const seventeen = Array.from({ length: 17 }, (_, i) => pad(30 + i, "kick"));
+    const kit = (pads: DrumPad[], sounds: Sound[] = []): Command => ({ type: "setDrumPads", id: drums, pads, sounds });
+    await rejectsAndKeepsModel(kit([]), "invalid value");
+    await rejectsAndKeepsModel(kit(seventeen), "invalid value");
+    await rejectsAndKeepsModel(kit([pad(36, "kick"), pad(36, "snare")]), "invalid value");
+    await rejectsAndKeepsModel(kit([pad(128, "kick")]), "invalid value");
+    await rejectsAndKeepsModel(kit([pad(36, "u-test")], [synthSound("u-test")]), "invalid value");
+    await rejectsAndKeepsModel(kit([pad(36, "saw")]), "no such sound");
+    await rejectsAndKeepsModel(kit([pad(36, "u-test")]), "no such sound");
+    // The carried sound is embedded on the way, but the refusal throws the whole edit away.
+    await rejectsAndKeepsModel(kit([pad(36, "u-boom"), pad(38, "u-missing")], [drumSound("u-boom")]), "no such sound");
+    await rejectsAndKeepsModel({ type: "setDrumPads", id: melody, pads: defaultKit(), sounds: [] }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setDrumPads", id: FAKE_ID, pads: defaultKit(), sounds: [] }, "no such track");
+    expect((await model()).tracks[1].drumPads).toEqual(defaultKit());
+    expect(await embedded()).toEqual(["u-test"]);
+    // Sixteen is the limit, not one past it.
+    await b.apply(kit(seventeen.slice(0, 16)));
+    expect((await model()).tracks[1].drumPads).toHaveLength(16);
+  });
+
+  it("setDrumPads embeds only the user sounds its pads use; deleting a track prunes its sounds", async () => {
+    const { melody, drums } = await ids();
+    await b.apply({ type: "setTrackSound", id: melody, sound: synthSound("u-test") });
+    const pads = [pad(36, "u-boom"), pad(42, "hat", 1), pad(46, "open-hat", 1)];
+    const hat = FACTORY_SOUNDS.find((s) => s.id === "hat")!;
+    await b.apply({ type: "setDrumPads", id: drums, pads, sounds: [drumSound("u-boom"), drumSound("u-unused"), hat] });
+    expect((await model()).tracks[1].drumPads).toEqual(pads);
+    expect(await embedded()).toEqual(["u-test", "u-boom"]);
+
+    await b.apply({ type: "deleteTrack", id: drums });
+    expect(await embedded()).toEqual(["u-test"]);
+    await b.undo();
+    await b.apply({ type: "deleteTrack", id: melody });
+    expect(await embedded()).toEqual(["u-boom"]);
+    await b.undo();
+    // A sound another track still plays survives.
+    const added = (await b.apply({ type: "addTrack", isDrum: false })).model.tracks[2].id;
+    await b.apply({ type: "setTrackVoice", id: added, voice: "u-test" });
+    await b.apply({ type: "deleteTrack", id: melody });
+    expect(await embedded()).toEqual(["u-test", "u-boom"]);
+  });
+
+  it("upsertSound only replaces a copy the project embeds", async () => {
+    const { melody } = await ids();
+    await b.apply({ type: "setTrackSound", id: melody, sound: synthSound("u-test") });
+    await rejectsAndKeepsModel({ type: "upsertSound", sound: synthSound("u-nope") }, "no such sound");
+    await rejectsAndKeepsModel({ type: "upsertSound", sound: FACTORY_SOUNDS.find((s) => s.id === "saw")! }, "no such sound");
+    await rejectsAndKeepsModel({ type: "upsertSound", sound: drumSound("u-test") }, "invalid value");
+    await b.apply({ type: "upsertSound", sound: synthSound("u-test", 0.75) });
+    expect((await model()).sounds!.map((s) => [s.id, s.patch.level])).toEqual([["u-test", 0.75]]);
+  });
+
+  it("deleteTrack checks the id before the last-track rule, like Rust", async () => {
+    const { melody } = await ids();
+    await b.apply({ type: "deleteTrack", id: melody });
+    await rejectsAndKeepsModel({ type: "deleteTrack", id: FAKE_ID }, "no such track");
+  });
+});
+
+/** Mirrors `library::tests` in src-tauri/src/library.rs. */
+describe("sound library (sound-library.json)", () => {
+  const LIBRARY_KEY = "dissonant.mock.soundLibrary";
+  const libIds = (lib: Sound[]) => lib.map((s) => s.id);
+
+  it("starts empty, inserts, replaces in place, deletes, and persists", async () => {
+    expect(await b.librarySounds()).toEqual([]);
+    await b.saveLibrarySound(synthSound("u-a", 0.1));
+    await b.saveLibrarySound(drumSound("u-b"));
+    const lib = await b.saveLibrarySound(synthSound("u-a", 0.9));
+    expect(libIds(lib)).toEqual(["u-a", "u-b"]);
+    expect(lib[0].patch.level).toBe(0.9);
+    // What came back is a copy, and it is what a fresh session reads.
+    lib.pop();
+    const next = await freshBridge();
+    expect(libIds(await next.librarySounds())).toEqual(["u-a", "u-b"]);
+    expect(libIds(await next.deleteLibrarySound("u-a"))).toEqual(["u-b"]);
+    expect(libIds(await next.deleteLibrarySound("u-nope"))).toEqual(["u-b"]);
+    expect(await next.deleteLibrarySound("u-b")).toEqual([]);
+    expect(await b.librarySounds()).toEqual([]);
+  });
+
+  it("refuses factory and unprefixed ids with library.rs's messages", async () => {
+    await expect(b.saveLibrarySound(synthSound("saw"))).rejects.toBe('"saw" is a factory sound; save a copy under a new id');
+    await expect(b.saveLibrarySound(drumSound("kick"))).rejects.toBe('"kick" is a factory sound; save a copy under a new id');
+    await expect(b.saveLibrarySound(synthSound("my-sound"))).rejects.toBe('a library sound id must start with "u-" (got "my-sound")');
+    expect(await b.librarySounds()).toEqual([]);
+  });
+
+  it("sanitizes what it saves", async () => {
+    const loud = synthSound("u-loud", 7);
+    loud.name = "";
+    const [s] = await b.saveLibrarySound(loud);
+    expect([s.name, s.patch.level]).toEqual(["untitled", 1]);
+  });
+
+  it("reads unreadable storage as an empty library and drops bad entries", async () => {
+    localStorage.setItem(LIBRARY_KEY, "{ not json");
+    expect(await b.librarySounds()).toEqual([]);
+    localStorage.setItem(LIBRARY_KEY, JSON.stringify({ not: "an array" }));
+    expect(await b.librarySounds()).toEqual([]);
+    localStorage.setItem(LIBRARY_KEY, JSON.stringify([synthSound("u-good"), { id: "u-broken" }, synthSound("saw"), synthSound("u-good", 0.9)]));
+    const lib = await b.librarySounds();
+    expect(libIds(lib)).toEqual(["u-good"]);
+    expect(lib[0].patch.level).toBe(0.5);
+    // The next save starts from what could be read.
+    expect(libIds(await b.saveLibrarySound(synthSound("u-new")))).toEqual(["u-good", "u-new"]);
+  });
+});
+
 // ─── vibes ─────────────────────────────────────────────────────────────────────────────────
 
 describe("vibes (ProjectModel::from_vibe)", () => {
@@ -789,17 +979,19 @@ describe("vibes (ProjectModel::from_vibe)", () => {
       expect(m.clips.map((c) => [c.patternId, c.startTick, c.lengthTicks])).toEqual(m.patterns.map((p) => [p.id, 0, m.songLengthTicks]));
       // The progression is tiled across the whole song; the first 16 beats name one pass.
       expect(m.chords.at(-1)!.startTick + m.chords.at(-1)!.lengthTicks).toBe(m.songLengthTicks);
-      const count = (track: number, pitch?: number) => m.patterns[track].notes.filter((n) => pitch === undefined || n.pitch === pitch).length;
+      const pitchSum = m.patterns.flatMap((p) => p.notes).reduce((sum, n) => sum + n.pitch, 0);
       described.push(
-        `${info.id}|${info.tempo}|${m.swing}|${m.tracks.map((t) => t.name).join(",")}|${m.chords.filter((c) => c.startTick < 16 * TICKS_PER_BEAT).map((c) => c.name).join(" ")}|${m.tracks[0].voice}|kick ${count(2, 36)}|bass ${count(1)}|${count(2)}`,
+        `${info.id}|${info.tempo}|${m.swing}|${m.tracks.map((t) => t.name).join(",")}|${m.chords.filter((c) => c.startTick < 16 * TICKS_PER_BEAT).map((c) => c.name).join(" ")}|${m.tracks[0].voice}|${m.patterns.map((p) => p.notes.length).join(",")}|${pitchSum}`,
       );
     }
     expect(described).toEqual([
-      "lofi|80|60|keys,bass,drums|Gm C F Dm|triangle|kick 12|bass 12|52",
-      "postpunk|148|50|lead,bass,drums|Em C G D|square|kick 12|bass 32|52",
-      "ambient|70|50|pad,bass,drums|D G|pad|kick 4|bass 4|8",
-      "songwriter|96|50|melody,bass,drums|G D Em C|pluck|kick 8|bass 8|48",
-      "club|124|50|lead,bass,drums|Am G F G|square|kick 16|bass 16|40",
+      "jungle|172|50|bells,reese,pad,amen|Fm C# A#m Cm|fm-bell|0,12,12,67|4194",
+      "dubstep|140|50|lead,wobble,pad,drums|Dm A# C Am|screamer-lead|0,24,12,62|4195",
+      "blownout|138|54|voice,bass,stabs,machine|Em F#dim Em D|robot|0,24,36,90|7149",
+      "rage|160|50|synth,808,chords,drums|C#m A B A|rage-lead|0,16,12,72|4273",
+      "jersey|140|50|melody,sub,keys,drums|Am F C G|bright-pluck|0,20,36,81|6657",
+      "hyperpop|160|50|lead,808,synths,drums|A B C#m E|chip-lead|0,16,60,108|9080",
+      "pluggnb|150|50|flute,808,keys,drums|F# Fm A#m G#|whistle-lead|0,8,24,59|4319",
     ]);
   });
 

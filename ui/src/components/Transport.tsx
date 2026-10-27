@@ -63,6 +63,7 @@ export function Transport() {
           <div className={s.screen === "pattern" ? "on" : ""} onClick={() => s.setScreen("pattern")} title="pattern: the piano roll (Tab cycles)">pat</div>
           <div className={s.screen === "song" ? "on" : ""} onClick={() => s.setScreen("song")} title="song: the arrangement (Tab cycles)">song</div>
           <div className={s.screen === "guitar" ? "on" : ""} onClick={() => s.setScreen("guitar")} title="guitar: the rig, takes and tab">gtr</div>
+          <div className={s.screen === "sound" ? "on" : ""} onClick={() => s.setScreen("sound")} title="sound: design synth and drum sounds, saved for every project">sound</div>
         </div>
       </div>
       <div className="tdiv" />
