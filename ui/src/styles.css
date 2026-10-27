@@ -664,9 +664,7 @@ select {
   flex-direction: column;
   overflow: hidden;
 }
-.side.browser {
-  width: 248px;
-}
+/* Panel widths are dragged, so they come from `panels.ts` as an inline width, not from here. */
 /* The inspector stacks more sections than fit on a short window (transform, harmony, starters),
    so it scrolls. `.side` clips on both axes; only the vertical clip is lifted, because a
    horizontal scrollbar here would just mean a control is mis-sized. */

@@ -338,7 +338,7 @@ export function TrackTree() {
 
   return (
     <>
-      <aside className="side browser tt" style={{ width: treeW }}>
+      <aside className="side tt" style={{ width: treeW }}>
       <div className="tabs">
         <div className="on">tracks</div>
       </div>
