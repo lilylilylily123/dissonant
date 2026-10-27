@@ -64,4 +64,19 @@ describe("panel sizes", () => {
     const reloaded = await import("./panels");
     expect(reloaded.panelSize("tree")).toBe(reloaded.panelDefault("tree"));
   });
+
+  it("keeps the same room to shrink at a bigger ui scale", async () => {
+    // The scale is a page zoom: CSS pixels get bigger, so a CSS-px floor would shrink the
+    // user's room. 150 screen px must stay 150 screen px — 100 CSS px at 150%.
+    vi.resetModules();
+    vi.doMock("./uiScale", () => ({ pageZoom: () => 1.5, onZoomChange: () => () => {} }));
+    const zoomed = await import("./panels");
+    zoomed.setPanelSize("tree", 40);
+    expect(zoomed.panelSize("tree")).toBe(100);
+    // And the room kept for the other panes is a screen amount too: 360 / 1.5 = 240.
+    win.innerWidth = 500;
+    zoomed.setPanelSize("tree", 400);
+    expect(zoomed.panelSize("tree")).toBe(260);
+    vi.doUnmock("./uiScale");
+  });
 });

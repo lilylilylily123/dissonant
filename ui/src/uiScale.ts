@@ -35,6 +35,21 @@ export function applyUiScale(next: number): Promise<void> {
   return applying;
 }
 
+/**
+ * The zoom the page is at (1 = 100%), i.e. device pixels per CSS pixel from the UI scale alone
+ * (`devicePixelRatio` also carries the screen's own ratio, which nothing here should care
+ * about). Sizes meant to be a fixed amount of *screen* divide by it.
+ */
+export function pageZoom(): number {
+  return scale ?? 1;
+}
+
+/** Run `cb` whenever the UI scale changes. Returns the unsubscribe. */
+export function onZoomChange(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => void listeners.delete(cb);
+}
+
 async function setScale(next: number) {
   if (!UI_SCALE_NATIVE || next === scale) return;
   const { getCurrentWebview } = await import("@tauri-apps/api/webview");
