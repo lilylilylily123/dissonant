@@ -9,6 +9,8 @@ import { hz, Knob, lin, log, panText, pct } from "./Knob";
 import { InstrumentPicker, PluginParams } from "./PluginBrowser";
 import { barLabel } from "./Editor";
 import { SoundPicker } from "./SoundPicker";
+import { Splitter } from "./Splitter";
+import { usePanelSize } from "../panels";
 
 const VOL = lin(0, 1.5);
 const PAN = lin(-1, 1);
@@ -40,6 +42,7 @@ export function Inspector() {
   const trackIdx = useStore(selectedTrackIndex);
   const bticks = useStore(barTicks);
   const narrow = useMediaQuery(NARROW);
+  const insW = usePanelSize("inspector");
   const [pref, setPref] = useState<boolean | null>(readCollapsed);
   const [draft, setDraft] = useState("");
   const [renamingPattern, setRenamingPattern] = useState(false);
@@ -67,14 +70,17 @@ export function Inspector() {
   }
   if (!pattern || !track) {
     return (
-      <aside className="side inspector">
-        <InspectorHead onCollapse={() => setCollapsed(true)} />
-        <div className="section">
-          <span className="mono" style={{ fontSize: 9.5, color: "var(--text-4)", lineHeight: 1.45 }}>
-            pick a pattern in the tree, or make one with the + on its track.
-          </span>
-        </div>
-      </aside>
+      <>
+        <Splitter panel="inspector" grows="before" label="the inspector" />
+        <aside className="side inspector" style={{ width: insW }}>
+          <InspectorHead onCollapse={() => setCollapsed(true)} />
+          <div className="section">
+            <span className="mono" style={{ fontSize: 9.5, color: "var(--text-4)", lineHeight: 1.45 }}>
+              pick a pattern in the tree, or make one with the + on its track.
+            </span>
+          </div>
+        </aside>
+      </>
     );
   }
   const color = trackColor(track, trackIdx);
@@ -104,8 +110,10 @@ export function Inspector() {
   const trackPatternIds = new Set(model.patterns.filter((p) => p.trackId === track.id).map((p) => p.id));
 
   return (
-    <aside className="side inspector">
-      <InspectorHead onCollapse={() => setCollapsed(true)} />
+    <>
+      <Splitter panel="inspector" grows="before" label="the inspector" />
+      <aside className="side inspector" style={{ width: insW }}>
+        <InspectorHead onCollapse={() => setCollapsed(true)} />
       <div className="scrollbody">
         {/* PATTERN */}
         <div className="section">
@@ -365,7 +373,8 @@ export function Inspector() {
           </div>
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
 

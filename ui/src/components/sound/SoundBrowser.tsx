@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import { soundChoices, useStore } from "../../store";
+import { usePanelSize } from "../../panels";
+import { Splitter } from "../Splitter";
 import type { Sound } from "../../sound";
 
 export type SoundSource = "factory" | "library" | "project";
@@ -35,6 +37,7 @@ export function SoundBrowser({
   onNew: () => void;
 }) {
   const library = useStore((s) => s.library);
+  const browserW = usePanelSize("soundBrowser");
   const snapshot = useStore((s) => s.snapshot);
   const [query, setQuery] = useState("");
   const [folded, setFolded] = useState<Record<string, boolean>>({});
@@ -49,7 +52,8 @@ export function SoundBrowser({
   ];
 
   return (
-    <aside className="sp-browser">
+    <>
+      <aside className="sp-browser" style={{ width: browserW }}>
       <div className="sp-bhead">
         <div className="seg sm" role="radiogroup" aria-label="sound kind">
           <div className={kind === "synth" ? "on" : ""} role="radio" aria-checked={kind === "synth"} onClick={() => setKind("synth")} title="melodic sounds for synth tracks">
@@ -104,6 +108,8 @@ export function SoundBrowser({
           );
         })}
       </div>
-    </aside>
+      </aside>
+      <Splitter panel="soundBrowser" label="the sound list" />
+    </>
   );
 }

@@ -6,6 +6,8 @@ import type { SongPattern, Track } from "../types";
 import { keys } from "../platform";
 import { addedId, dropGap, loadCollapsed, patternKey, reorderMoves, saveCollapsed, stepRow, trackKey, treeRows } from "../trackTree";
 import type { TreeRow } from "../trackTree";
+import { usePanelSize } from "../panels";
+import { Splitter } from "./Splitter";
 
 /** Pixels the pointer must travel before a press on a row becomes a drag. */
 const DRAG_THRESHOLD = 4;
@@ -32,6 +34,7 @@ interface Press {
  */
 export function TrackTree() {
   const model = useStore((s) => s.snapshot!.model);
+  const treeW = usePanelSize("tree");
   const screen = useStore((s) => s.screen);
   const selectedTrackId = useStore((s) => s.selectedTrackId);
   const pattern = useStore(selectedPattern);
@@ -334,7 +337,8 @@ export function TrackTree() {
   const dropGapShown = trackDrag && reorderMoves(trackFrom, trackDrag.gap).count > 0 ? trackDrag.gap : -1;
 
   return (
-    <aside className="side browser tt">
+    <>
+      <aside className="side browser tt" style={{ width: treeW }}>
       <div className="tabs">
         <div className="on">tracks</div>
       </div>
@@ -520,6 +524,8 @@ export function TrackTree() {
           <span className="tt-dl-sub">{hasDropTarget ? `${+(dragged.lengthTicks / barTick).toFixed(2)}b · drop on the song` : "switch to SONG to place it"} · esc cancels</span>
         </div>
       )}
-    </aside>
+      </aside>
+      <Splitter panel="tree" label="the track list" />
+    </>
   );
 }

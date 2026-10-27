@@ -3,6 +3,8 @@ import { AmpRack } from "./AmpRack";
 import { WaveformLane } from "./WaveformLane";
 import { HMeter } from "./Meter";
 import { selectedAudioTrack, useStore } from "../store";
+import { usePanelSize } from "../panels";
+import { Splitter } from "./Splitter";
 import { ticksToBeats } from "../types";
 
 /** `m:ss` for a clip length. */
@@ -20,6 +22,7 @@ function clock(seconds: number): string {
 export function GuitarTab() {
   const model = useStore((s) => s.snapshot!.model);
 
+  const sideW = usePanelSize("guitar");
   const selectTrack = useStore((s) => s.selectTrack);
   const addAudioTrack = useStore((s) => s.addAudioTrack);
   const audio = useStore((s) => s.audio);
@@ -56,7 +59,7 @@ export function GuitarTab() {
 
   return (
     <>
-      <div className="side guitar">
+      <div className="side guitar" style={{ width: sideW }}>
         <div className="section">
           <div className="shead">
             <span>audio tracks</span>
@@ -229,6 +232,7 @@ export function GuitarTab() {
           )}
         </div>
       </div>
+      <Splitter panel="guitar" label="the audio track list" />
 
       <div className="editor">
         <div className="toolbar">

@@ -9,8 +9,9 @@ import { SECTION_COLORS, SectionEditor } from "./SectionEditor";
 import { TempoLane } from "./TempoLane";
 import { keys } from "../platform";
 import { clipsInBox, dropBar, groupMoveDelta, moveClips, toggleId, trimClip } from "../clipEditing";
+import { usePanelSize } from "../panels";
+import { Splitter } from "./Splitter";
 
-const HEAD_W = 220;
 /** Lane height; the marquee maps y to a lane with it, so rows take it inline rather than from CSS. */
 const ROW_H = 56;
 const CLIP_H = ROW_H - 5;
@@ -50,6 +51,9 @@ function isTyping(target: EventTarget | null): boolean {
  */
 export function Arrangement() {
   const model = useStore((s) => s.snapshot!.model);
+  // The track column is draggable, and the rows, ruler, chord bar and tempo lane all measure
+  // against it, so it is one value rather than a constant.
+  const HEAD_W = usePanelSize("songHead");
   const playhead = useStore((s) => s.playhead);
   const pxPerBar = useStore((s) => s.arrZoom);
   const setArrZoom = useStore((s) => s.setArrZoom);
@@ -342,7 +346,10 @@ export function Arrangement() {
   const playX = HEAD_W + playhead * pxPerTick;
 
   return (
-    <div className="arr song">
+    <div className="arr song" style={{ "--head-w": `${HEAD_W}px` } as React.CSSProperties}>
+      <div className="headseam" style={{ left: HEAD_W }}>
+        <Splitter panel="songHead" label="the track column" />
+      </div>
       <div className="scroller" ref={scrollerRef} onScroll={() => menu && setMenu(null)}>
         <div className="ruler" style={{ width: rowW }}>
           <div className="corner">
@@ -445,6 +452,7 @@ export function Arrangement() {
                 color={color}
                 selected={track.id === selectedTrackId}
                 peak={trackPeaks[ti] ?? 0}
+                headW={HEAD_W}
                 timelineW={timelineW}
                 endX={endX}
                 pxPerBar={pxPerBar}
@@ -631,6 +639,7 @@ function TrackRow({
   color,
   selected,
   peak,
+  headW,
   timelineW,
   endX,
   pxPerBar,
@@ -643,6 +652,7 @@ function TrackRow({
   color: string;
   selected: boolean;
   peak: number;
+  headW: number;
   timelineW: number;
   endX: number;
   pxPerBar: number;
@@ -669,7 +679,7 @@ function TrackRow({
   };
 
   return (
-    <div className={`trow${selected ? " on" : ""}`} style={{ width: HEAD_W + timelineW + 12, height: ROW_H }}>
+    <div className={`trow${selected ? " on" : ""}`} style={{ width: headW + timelineW + 12, height: ROW_H }}>
       <div className={`thead${selected ? " on" : ""}`} style={{ height: ROW_H }} onClick={() => selectTrack(track.id)}>
         <div className="strip" style={{ background: color }} />
         <div className="body">

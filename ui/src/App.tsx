@@ -46,6 +46,10 @@ export default function App() {
       if (e.altKey) return;
       const s = useStore.getState();
       const mod = e.metaKey || e.ctrlKey;
+      // ⌘A outside a text field means "select every note/clip", never "select the whole
+      // window's text". The roll and the arrangement have already handled it by the time this
+      // bubbles up; all that is left is to stop the webview's own select-all.
+      if (mod && e.key.toLowerCase() === "a") e.preventDefault();
       if (s.dialog) return; // the dialog owns the keyboard
       if (mod && e.key === ",") {
         e.preventDefault();

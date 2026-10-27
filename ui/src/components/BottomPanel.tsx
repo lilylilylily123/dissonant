@@ -3,6 +3,8 @@ import { dbText, selectedPattern, selectedTrack, selectedTrackIndex, useStore } 
 import { kitSounds, movePad, padName, pitchProblem, removePad, replacePad } from "../drumKit";
 import { lookupSound, MAX_DRUM_PADS, type DrumPad, type Sound } from "../sound";
 import { midiName } from "../theory";
+import { usePanelSize } from "../panels";
+import { Splitter } from "./Splitter";
 import {
   insertChain,
   MAX_INSERTS,
@@ -30,6 +32,7 @@ const EQ = lin(0, 2);
 export function BottomPanel() {
   const panel = useStore((s) => s.bottomPanel);
   const setBottomPanel = useStore((s) => s.setBottomPanel);
+  const bottomH = usePanelSize("bottom");
   const track = useStore(selectedTrack);
   const index = useStore(selectedTrackIndex);
   const pattern = useStore(selectedPattern);
@@ -38,7 +41,9 @@ export function BottomPanel() {
   const soundName = useSoundName(track?.voice ?? "");
 
   return (
-    <div className="bottom">
+    <>
+      <Splitter panel="bottom" axis="y" grows="before" label="the devices panel" />
+      <div className="bottom" style={{ height: bottomH }}>
       <div className="ptabs">
         <div className={`ptab${panel === "devices" ? " on" : ""}`} onClick={() => setBottomPanel("devices")}>devices</div>
         <div className={`ptab${panel === "mixer" ? " on" : ""}`} onClick={() => setBottomPanel("mixer")}>mixer</div>
@@ -55,8 +60,9 @@ export function BottomPanel() {
           </>
         )}
       </div>
-      {panel === "devices" ? <Devices /> : <Mixer />}
-    </div>
+        {panel === "devices" ? <Devices /> : <Mixer />}
+      </div>
+    </>
   );
 }
 

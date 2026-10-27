@@ -60,8 +60,24 @@
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
 }
 
-* {
+/* This is an app, not a document: dragging over the UI must not paint half of it blue, and
+   ⌘A must not select every label. `user-select` alone is ignored by the WKWebView this ships
+   in (macOS) — only the prefixed property is honoured there — so both are set, on everything
+   rather than on the root alone: a stray `user-select` further down the tree would otherwise
+   hand selection back to a whole subtree. Text the user can really take away (the fields they
+   type in) opts back in below. */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
 }
 html,
 body,
@@ -73,8 +89,59 @@ body,
   font-family: var(--font-ui);
   font-size: 11px;
   -webkit-font-smoothing: antialiased;
-  user-select: none;
   overflow: hidden;
+}
+
+/* The draggable seam between two panes. Invisible until it is wanted: a hairline on hover, the
+   accent while it is held. `.splitting` on the body keeps the resize cursor through the drag
+   even as the pointer crosses panels that want their own. */
+.splitter {
+  flex: none;
+  position: relative;
+  z-index: 3;
+  background: transparent;
+  transition: background 90ms ease;
+}
+.splitter.x {
+  width: 5px;
+  margin: 0 -2px;
+  cursor: col-resize;
+}
+.splitter.y {
+  height: 5px;
+  margin: -2px 0;
+  cursor: row-resize;
+}
+/* The song's track column is not a flex sibling (the rows scroll past it), so its seam is
+   pinned over the arrangement at the column's edge instead. */
+.headseam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  margin-left: -2px;
+  z-index: 6;
+}
+.headseam .splitter.x {
+  height: 100%;
+  margin: 0;
+}
+.splitter:hover,
+.splitter:focus-visible {
+  background: var(--line-strong);
+  outline: none;
+}
+.splitter:active,
+body.splitting .splitter:focus {
+  background: var(--accent);
+}
+body.splitting,
+body.splitting * {
+  cursor: col-resize !important;
+}
+body.splitting.row,
+body.splitting.row * {
+  cursor: row-resize !important;
 }
 ::-webkit-scrollbar {
   width: 10px;
@@ -968,7 +1035,7 @@ select {
   z-index: 3;
 }
 .arr .corner {
-  width: 220px;
+  width: var(--head-w, 220px);
   flex: none;
   border-right: 1px solid var(--line-1);
   padding: 5px 8px;
@@ -1024,7 +1091,7 @@ select {
   height: 50px;
 }
 .thead {
-  width: 220px;
+  width: var(--head-w, 220px);
   flex: none;
   height: 50px;
   display: flex;
@@ -1172,7 +1239,7 @@ select {
   height: 40px;
 }
 .addrow > div:first-child {
-  width: 220px;
+  width: var(--head-w, 220px);
   flex: none;
   border-right: 1px solid var(--line-1);
   background: var(--bg-1);
@@ -1198,8 +1265,8 @@ select {
 
 /* Bottom panel */
 .bottom {
-  /* Leaves the arrangement room on a short page (a small window or a large ui scale). */
-  height: min(300px, 48vh);
+  /* Height is the dragged panel size (see `panels.ts`), which already leaves the arrangement
+     room on a short page. */
   flex: none;
   background: var(--bg-lane);
   border-top: 2px solid var(--line-1);
@@ -3067,7 +3134,7 @@ select {
 /* Help under the lanes, pinned to the timeline's left edge. */
 .arr.song .songhint {
   position: sticky;
-  left: 220px;
+  left: var(--head-w, 220px);
   display: flex;
   align-items: center;
   padding-left: 12px;
