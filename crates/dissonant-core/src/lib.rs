@@ -12,8 +12,10 @@ pub mod arrangement;
 pub mod automation;
 pub mod chord_track;
 pub mod document;
+pub mod effects;
 pub mod midi_file;
 pub mod model;
+pub mod ripple;
 pub mod sequence;
 pub mod sound;
 pub mod tempo;
@@ -27,6 +29,7 @@ pub use automation::{
 };
 pub use chord_track::ChordTrack;
 pub use document::{Command, Document, EditError, InsertTarget, TrackParam};
+pub use effects::{NativeKind, NativeParam, ParamMap, NATIVE_PREFIX};
 pub use midi_file::{ImportedMidi, ImportedTrack, MidiError, MidiScope};
 pub use model::{
     tidy_chords, tile_chords, AmpHead, AmpModel, AmpRig, AudioClip, AudioSource, CabModel, Cabinet,

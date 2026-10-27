@@ -12,6 +12,7 @@
 //! patterns that hold every track's notes and their own chords; [`ProjectModel::migrated_v10`]
 //! splits each into one pattern per track and lifts its chords onto the song.
 
+use crate::effects::{NativeKind, ParamMap};
 use crate::ticks::{beats_to_ticks, TICKS_PER_BEAT};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
@@ -334,13 +335,14 @@ pub const MAX_INSERTS: usize = 8;
 /// One effect slot in a chain, on a track or on the master.
 ///
 /// `uid` is opaque to core, exactly like [`TrackPlugin::uid`]: minted and resolved by the
-/// plugin layer. `id` is this slot's identity — it survives reordering, and the plugin layer
-/// keys the hosted instance by it.
+/// plugin layer — except for the `native:` corner of it, which names one of the stock effects
+/// in [`crate::effects`]. `id` is this slot's identity — it survives reordering, and the plugin
+/// layer keys the hosted instance by it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Insert {
     pub id: Uuid,
-    /// The plugin layer's identifier for one plugin inside one bundle.
+    /// The plugin layer's identifier for one plugin inside one bundle, or `native:<slug>`.
     pub uid: String,
     /// Cached display name, so a project opened where the plugin is gone still says which one.
     pub name: String,
@@ -348,9 +350,17 @@ pub struct Insert {
     #[serde(default = "yes")]
     pub enabled: bool,
     /// Base64 of the plugin's own opaque state blob. `None` means "whatever the plugin loads
-    /// with".
+    /// with". A native effect has no blob of its own; its knobs are in `params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// A native effect's knobs, by [`crate::effects::NativeParam::id`]. Absent ids are at
+    /// their defaults, so a freshly added effect stores nothing at all and a file only carries
+    /// what someone actually moved.
+    ///
+    /// `default` rather than a schema bump: every older file is a chain of plugin slots, which
+    /// is exactly an empty map, so there is nothing to migrate and nothing new to refuse.
+    #[serde(default, skip_serializing_if = "ParamMap::is_empty")]
+    pub params: ParamMap,
 }
 
 impl Insert {
@@ -362,12 +372,19 @@ impl Insert {
             name: name.into(),
             enabled: true,
             state: None,
+            params: ParamMap::new(),
         }
+    }
+
+    /// Which stock effect this is, or `None` when the slot names a plugin.
+    pub fn native_kind(&self) -> Option<NativeKind> {
+        NativeKind::from_uid(&self.uid)
     }
 }
 
-/// Drop slots that name nothing, keep one slot per id, and cap the chain. Reachable by hand-
-/// editing a file, so it is resolved once on load instead of guarded at every read.
+/// Drop slots that name nothing, keep one slot per id, cap the chain, and hold every native
+/// effect's knobs inside their ranges. Reachable by hand-editing a file, so it is resolved once
+/// on load instead of guarded at every read.
 fn sanitize_inserts(inserts: &mut Vec<Insert>) {
     let mut seen: Vec<Uuid> = Vec::with_capacity(inserts.len());
     inserts.retain(|i| {
@@ -378,6 +395,13 @@ fn sanitize_inserts(inserts: &mut Vec<Insert>) {
         true
     });
     inserts.truncate(MAX_INSERTS);
+    for insert in inserts.iter_mut() {
+        match insert.native_kind() {
+            Some(kind) => crate::effects::sanitize_params(kind, &mut insert.params),
+            // A plugin has no parameters of ours; a map on one is a file someone edited.
+            None => insert.params.clear(),
+        }
+    }
 }
 
 /// One instrument track: name, voice, mute/solo and its own bus settings. Notes live in
@@ -1448,6 +1472,10 @@ impl Clip {
 
 /// A named marker on the song (intro, verse, drop…). With a `key`, the section modulates:
 /// patterns placed inside it are tiered against that key instead of the project key.
+///
+/// A section has an extent, not just a position: see [`ProjectModel::section_span`]. Without
+/// one it would only ever be a label hung in front of music it does not own, and moving or
+/// copying "the chorus" could not move the chorus.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Section {
@@ -1456,6 +1484,16 @@ pub struct Section {
     pub name: String,
     #[serde(default)]
     pub start_tick: i64,
+    /// How far the section reaches, or 0 for "up to the next section, then the song's end" —
+    /// the implicit extent every section had before this field existed, and still the one a
+    /// marker dropped on the ruler gets.
+    ///
+    /// `#[serde(default)]` plus skipping the implicit 0 rather than a schema bump: an older
+    /// file has no explicit extent, which is exactly what 0 means, and a project whose
+    /// sections all run to the next marker serializes byte-identically to what schema 10
+    /// already wrote. Those are the two things a schema version exists to signal.
+    #[serde(default, skip_serializing_if = "is_implicit_extent")]
+    pub length_ticks: i64,
     #[serde(default)]
     pub key: Option<KeyState>,
     #[serde(default)]
@@ -1466,11 +1504,13 @@ pub struct Section {
 }
 
 impl Section {
+    /// A marker with the implicit extent: it runs to the next section, then to the song's end.
     pub fn new(name: impl Into<String>, start_tick: i64) -> Self {
         Section {
             id: Uuid::new_v4(),
             name: name.into(),
             start_tick,
+            length_ticks: 0,
             key: None,
             color: None,
             legacy_start_beat: None,
@@ -1481,6 +1521,11 @@ impl Section {
     fn migrated(&mut self) {
         migrate_tick(&mut self.start_tick, &mut self.legacy_start_beat);
     }
+}
+
+/// Serde: an implicit extent is the absence of one, so it is not written.
+fn is_implicit_extent(length_ticks: &i64) -> bool {
+    *length_ticks <= 0
 }
 
 /// Beats per bar and the beat unit. Only the numerator changes grids and bar math; the
@@ -1842,11 +1887,37 @@ impl ProjectModel {
         self.loop_region = self.loop_region.and_then(|(s, e)| clamp_loop(s, e, end));
     }
 
-    /// The section containing `tick` (the last one starting at or before it).
+    /// Where a section stops, or `None` when nothing bounds it: with no explicit extent and no
+    /// later marker, the last section names the music to the end of time, which is what every
+    /// section did before extents existed.
+    fn section_end(&self, section: &Section) -> Option<i64> {
+        if section.length_ticks > 0 {
+            return Some(section.start_tick + section.length_ticks);
+        }
+        self.sections
+            .iter()
+            .map(|s| s.start_tick)
+            .filter(|&t| t > section.start_tick)
+            .min()
+    }
+
+    /// A section's extent in song ticks, `[start, end)`: its own `length_ticks`, else the
+    /// stretch up to the next marker, else the rest of the song. This is the music the section
+    /// owns — what the arrangement draws as its band, and what moving or copying it moves.
+    pub fn section_span(&self, section: &Section) -> (i64, i64) {
+        (
+            section.start_tick,
+            self.section_end(section)
+                .unwrap_or(self.song_length_ticks)
+                .max(section.start_tick),
+        )
+    }
+
+    /// The section whose extent contains `tick` (the last one, where two overlap).
     pub fn section_at(&self, tick: i64) -> Option<&Section> {
         self.sections
             .iter()
-            .filter(|s| s.start_tick <= tick)
+            .filter(|s| s.start_tick <= tick && self.section_end(s).is_none_or(|e| tick < e))
             .max_by_key(|s| s.start_tick)
     }
 
@@ -2003,6 +2074,10 @@ impl ProjectModel {
             .filter_map(AudioClip::sanitized)
             .collect();
         self.audio_clips.sort_by_key(|c| c.start_tick);
+        // A negative extent is nonsense; 0 is the implicit one, so that is where it lands.
+        for s in &mut self.sections {
+            s.length_ticks = s.length_ticks.max(0);
+        }
         self.sections.sort_by_key(|s| s.start_tick);
         self
     }

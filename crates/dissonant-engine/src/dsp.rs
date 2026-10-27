@@ -1277,9 +1277,10 @@ pub struct Compressor {
     threshold_db: f32,
     ratio: f32,
     makeup: f32,
+    knee_db: f32,
 }
 
-/// Width of the soft knee, in dB either side of the threshold.
+/// Width of the soft knee, in dB either side of the threshold, unless a caller sets its own.
 const KNEE_DB: f32 = 6.0;
 
 impl Compressor {
@@ -1289,6 +1290,7 @@ impl Compressor {
             threshold_db: -20.0,
             ratio: 4.0,
             makeup: 1.0,
+            knee_db: KNEE_DB,
         }
     }
 
@@ -1298,27 +1300,142 @@ impl Compressor {
         self.makeup = db_to_linear(makeup_db);
     }
 
+    /// Attack and release of the level detector. The rig leaves these at the constructor's
+    /// 5 / 120 ms; a compressor with its own knobs sets them.
+    pub fn set_times(&mut self, sample_rate: f32, attack_ms: f32, release_ms: f32) {
+        self.env.set(sample_rate, attack_ms, release_ms);
+    }
+
+    /// How wide the bend around the threshold is, in dB either side of it. Zero is a hard
+    /// corner, which is what a drum bus often wants and a vocal never does.
+    pub fn set_knee(&mut self, knee_db: f32) {
+        self.knee_db = knee_db.max(0.0);
+    }
+
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
+        x * self.gain_for(x) * self.makeup
+    }
+
+    /// The gain reduction one sample calls for, before makeup. Split out so a stereo-linked
+    /// compressor can detect on one signal and apply the result to both sides.
+    #[inline]
+    pub fn gain_for(&mut self, x: f32) -> f32 {
         let level = self.env.process(x);
         // 1e-7 is about -140 dBFS: below it the gain computer is in the noise anyway, and
         // log10(0) would be -inf.
         let level_db = 20.0 * level.max(1e-7).log10();
         let over = level_db - self.threshold_db;
-        let reduction_db = if over <= -KNEE_DB {
+        let knee = self.knee_db;
+        let reduction_db = if over <= -knee {
             0.0
-        } else if over >= KNEE_DB {
+        } else if over >= knee {
             over * (1.0 - 1.0 / self.ratio)
         } else {
             // Quadratic knee: the slope eases in across the knee instead of cornering.
-            let t = (over + KNEE_DB) / (2.0 * KNEE_DB);
-            (1.0 - 1.0 / self.ratio) * KNEE_DB * t * t
+            let t = (over + knee) / (2.0 * knee);
+            (1.0 - 1.0 / self.ratio) * knee * t * t
         };
-        x * db_to_linear(-reduction_db) * self.makeup
+        db_to_linear(-reduction_db)
+    }
+
+    /// The makeup gain in use, so a stereo pair can apply it once alongside `gain_for`.
+    #[inline]
+    pub fn makeup(&self) -> f32 {
+        self.makeup
     }
 
     pub fn reset(&mut self) {
         self.env.reset();
+    }
+}
+
+// ─── Limiter ─────────────────────────────────────────────────────────────────────────────────
+
+/// Lookahead, in seconds: long enough that the gain ramp has settled by the time the peak it was
+/// computed from reaches the output, short enough to stay inaudible against the rest of the chain.
+pub const LOOKAHEAD_S: f32 = 0.0015;
+
+/// Nominal release of the gain stage. Program dependence comes from the two-stage detector, not
+/// from this number.
+pub const LIMITER_RELEASE_MS: f32 = 60.0;
+
+/// One-pole coefficient for a time constant of `samples`.
+#[inline]
+fn pole(samples: f32) -> f32 {
+    (-1.0 / samples.max(1.0)).exp()
+}
+
+/// Lookahead peak limiter, stereo-linked.
+///
+/// The gain requirement is computed from the signal as it arrives and applied to the same signal
+/// a lookahead later, so the ramp is already down when the peak gets there: no clipping, and no
+/// step in the gain to click. The ceiling is then guaranteed outright by taking the smoothed gain
+/// against what the outgoing sample actually needs — the smoother converges to within a fraction
+/// of a dB over the lookahead, so that floor binds by a hair on an attack and never otherwise.
+#[derive(Debug, Clone)]
+pub struct Limiter {
+    left: DelayLine,
+    right: DelayLine,
+    /// Lookahead in samples, as a delay read distance.
+    delay: f32,
+    /// Instant-attack gain requirement, released toward unity.
+    hold: f32,
+    /// `hold` smoothed over the lookahead; what actually multiplies the signal.
+    gain: f32,
+    release_coef: f32,
+    smooth_coef: f32,
+    sample_rate: f32,
+}
+
+impl Limiter {
+    pub fn new(sample_rate: f32) -> Self {
+        let delay = (LOOKAHEAD_S * sample_rate).round().max(1.0);
+        Limiter {
+            left: DelayLine::new(delay as usize + 4),
+            right: DelayLine::new(delay as usize + 4),
+            delay,
+            hold: 1.0,
+            gain: 1.0,
+            // A fifth of the lookahead leaves the ramp within ~0.7% of its target by the time
+            // the peak lands, which is the error the output-side floor then absorbs.
+            smooth_coef: pole(delay / 5.0),
+            release_coef: pole(LIMITER_RELEASE_MS * 0.001 * sample_rate),
+            sample_rate,
+        }
+    }
+
+    /// Samples between a sample going in and coming out: the lookahead, exactly.
+    pub fn latency(&self) -> usize {
+        self.delay as usize
+    }
+
+    /// How fast the gain creeps back to unity. The master bus leaves this at
+    /// [`LIMITER_RELEASE_MS`]; the insert effect puts it on a knob.
+    pub fn set_release_ms(&mut self, ms: f32) {
+        self.release_coef = pole(ms.max(1.0) * 0.001 * self.sample_rate);
+    }
+
+    #[inline]
+    pub fn process(&mut self, a: f32, b: f32, ceiling: f32) -> (f32, f32) {
+        let peak = a.abs().max(b.abs());
+        let req = if peak > ceiling { ceiling / peak } else { 1.0 };
+        // Smooth-decoupled detector in the gain domain: the first stage drops to the requirement
+        // at once and creeps back toward unity with the release time, so a run of transients
+        // releases as one gesture instead of once per hit.
+        self.hold = req.min(self.release_coef * self.hold + (1.0 - self.release_coef) * req);
+        self.gain = self.smooth_coef * self.gain + (1.0 - self.smooth_coef) * self.hold;
+
+        let (da, db) = (self.left.read(self.delay), self.right.read(self.delay));
+        self.left.write(a);
+        self.right.write(b);
+        let out_peak = da.abs().max(db.abs());
+        let g = if out_peak * self.gain > ceiling {
+            ceiling / out_peak
+        } else {
+            self.gain
+        };
+        (da * g, db * g)
     }
 }
 

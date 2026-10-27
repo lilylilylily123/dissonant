@@ -45,12 +45,16 @@ fn fixture() -> ProjectModel {
     m.audio_clips = vec![AudioClip::new(gid, source.id, 0, 2.0)];
     m.audio_sources = vec![source];
     // Effect chains on a track and on the master, so the insert commands have something to
-    // bite on. Two on the track: one insert cannot be reordered.
+    // bite on. Two on the track: one insert cannot be reordered. The master's second slot is
+    // a native effect, which is the only kind `SetInsertParam` applies to.
     m.tracks[0].inserts = vec![
         Insert::new(DELAY_UID, "Valhalla Delay"),
         Insert::new(EQ_UID, "Pro-Q"),
     ];
-    m.master_inserts = vec![Insert::new(EQ_UID, "Pro-Q")];
+    m.master_inserts = vec![
+        Insert::new(EQ_UID, "Pro-Q"),
+        Insert::new(NativeKind::Compressor.uid(), "compressor"),
+    ];
     m.clips = vec![clip_at(p0, 0, 16 * BEAT), clip_at(p1, 16 * BEAT, 8 * BEAT)];
     // The melody plays an embedded user sound, so the sound commands have something to bite on.
     m.sounds = vec![user_sound(0.3)];
@@ -181,6 +185,10 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::MoveInsert { .. } => "MoveInsert",
         Command::SetInsertEnabled { .. } => "SetInsertEnabled",
         Command::SetInsertState { .. } => "SetInsertState",
+        Command::SetInsertParam { .. } => "SetInsertParam",
+        Command::InsertTime { .. } => "InsertTime",
+        Command::DeleteTime { .. } => "DeleteTime",
+        Command::DuplicateRange { .. } => "DuplicateRange",
     }
 }
 
@@ -414,6 +422,25 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
             target: master,
             insert_id: m.master_inserts[0].id,
             state: "cHJvcQ==".into(),
+        },
+        Command::SetInsertParam {
+            target: master,
+            insert_id: m.master_inserts[1].id,
+            param_id: 201,
+            value: 8.0,
+        },
+        Command::InsertTime {
+            at: 4 * BEAT,
+            ticks: 8 * BEAT,
+        },
+        Command::DeleteTime {
+            at: 4 * BEAT,
+            ticks: 8 * BEAT,
+        },
+        Command::DuplicateRange {
+            from: 0,
+            to: 16 * BEAT,
+            at: 16 * BEAT,
         },
     ]
 }
@@ -3048,7 +3075,10 @@ fn the_master_has_its_own_chain_independent_of_every_track() {
         false,
     )
     .unwrap();
-    assert_eq!(chain(d.model(), InsertTarget::Master), ["glue", "Pro-Q"]);
+    assert_eq!(
+        chain(d.model(), InsertTarget::Master),
+        ["glue", "Pro-Q", "compressor"]
+    );
     assert_eq!(
         chain(d.model(), InsertTarget::Track(t0)),
         before,
@@ -3066,7 +3096,10 @@ fn the_master_has_its_own_chain_independent_of_every_track() {
         false,
     )
     .unwrap();
-    assert_eq!(chain(d.model(), InsertTarget::Master), ["glue*", "Pro-Q"]);
+    assert_eq!(
+        chain(d.model(), InsertTarget::Master),
+        ["glue*", "Pro-Q", "compressor"]
+    );
 }
 
 #[test]
@@ -3705,4 +3738,438 @@ fn song_mode_flattens_lanes_as_they_are_and_pattern_mode_windows_them() {
         Sequence::from_pattern(d.model(), &pid, 12 * BEAT).unwrap(),
         windowed
     );
+}
+
+// ---------------------------------------------------------------- 10. ripple edits
+
+/// 4/4, so one bar is four beats.
+const BAR: i64 = 4 * BEAT;
+
+/// The fixture with one of everything a ripple has to carry past bar 17: a clip that starts on
+/// the cut and one that straddles it, three markers (two running to the next one, one with its
+/// own extent), a tempo change, a volume lane and a loop brace.
+fn rippled() -> Document {
+    let mut m = fixture();
+    let (t0, _, p0, p1) = ids(&m);
+    m.clips.push(clip_at(p0, 16 * BAR, 4 * BAR));
+    m.clips.push(clip_at(p1, 15 * BAR, 7 * BAR));
+    m.clips.sort_by_key(|c| c.start_tick);
+    m.sections = vec![
+        Section::new("intro", 0),
+        Section::new("chorus", 16 * BAR),
+        Section {
+            length_ticks: 4 * BAR,
+            ..Section::new("outro", 24 * BAR)
+        },
+    ];
+    m.tempo_points = vec![TempoPoint::new(16 * BAR, 140.0, false)];
+    let mut lane = AutomationLane::new(AutoTarget::Track(t0, TrackParam::Volume));
+    lane.points = vec![
+        Breakpoint::new(8 * BAR, 0.5, Curve::Step),
+        Breakpoint::new(20 * BAR, 0.25, Curve::Ramp),
+    ];
+    m.automation = vec![lane];
+    m.loop_region = Some((16 * BAR, 20 * BAR));
+    Document::new(m)
+}
+
+/// Everything on the timeline inside `[from, to)` as plain values measured from `from`, so two
+/// stretches of a song can be compared without caring which ids they wear.
+#[derive(Debug, PartialEq)]
+struct Window {
+    /// (pattern, start, length, offset)
+    clips: Vec<(Uuid, i64, i64, i64)>,
+    /// (name, start, extent)
+    sections: Vec<(String, i64, i64)>,
+    tempo: Vec<(i64, f64, bool)>,
+    chords: Vec<(i64, i64, Vec<i32>)>,
+    automation: Vec<(i64, f64)>,
+}
+
+fn window(m: &ProjectModel, from: i64, to: i64) -> Window {
+    let inside = |tick: i64| tick >= from && tick < to;
+    Window {
+        clips: m
+            .clips
+            .iter()
+            .filter(|c| inside(c.start_tick))
+            .map(|c| {
+                (
+                    c.pattern_id,
+                    c.start_tick - from,
+                    c.length_ticks,
+                    c.offset_ticks,
+                )
+            })
+            .collect(),
+        sections: m
+            .sections
+            .iter()
+            .filter(|s| inside(s.start_tick))
+            .map(|s| (s.name.clone(), s.start_tick - from, s.length_ticks))
+            .collect(),
+        tempo: m
+            .tempo_points
+            .iter()
+            .filter(|p| inside(p.tick))
+            .map(|p| (p.tick - from, p.bpm, p.ramp))
+            .collect(),
+        chords: m
+            .chords
+            .chords()
+            .iter()
+            .filter(|c| inside(c.start_tick))
+            .map(|c| (c.start_tick - from, c.length_ticks, c.pitch_classes.clone()))
+            .collect(),
+        automation: m
+            .automation
+            .iter()
+            .flat_map(|l| {
+                l.points
+                    .iter()
+                    .filter(|p| inside(p.tick))
+                    .map(|p| (p.tick - from, p.value))
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn inserting_time_moves_everything_after_it_by_exactly_that_much() {
+    let mut d = rippled();
+    let before = d.model().clone();
+    let (at, ticks) = (16 * BAR, 4 * BAR);
+    let on_cut = before
+        .clips
+        .iter()
+        .find(|c| c.start_tick == at)
+        .unwrap()
+        .clone();
+    let across = before
+        .clips
+        .iter()
+        .find(|c| c.start_tick == 15 * BAR)
+        .unwrap()
+        .clone();
+    let notes_before: Vec<i64> = Sequence::from_song(&before).tracks[0]
+        .notes
+        .iter()
+        .map(|n| n.start_tick)
+        .collect();
+
+    d.apply(Command::InsertTime { at, ticks }, false).unwrap();
+    let m = d.model();
+
+    // A clip starting on the cut moves whole; one the cut falls inside is split, and the tail
+    // picks the pattern up exactly where the head left it.
+    assert_eq!(m.clip(&on_cut.id).unwrap().start_tick, at + ticks);
+    let head = m.clip(&across.id).unwrap();
+    assert_eq!((head.start_tick, head.length_ticks), (15 * BAR, BAR));
+    let tail = m
+        .clips
+        .iter()
+        .find(|c| c.pattern_id == across.pattern_id && c.id != across.id && c.start_tick == at + ticks)
+        .expect("the part past the cut lives on as its own clip");
+    assert_eq!(
+        (tail.start_tick, tail.length_ticks, tail.offset_ticks),
+        (at + ticks, 6 * BAR, BAR)
+    );
+
+    assert_eq!(
+        m.sections
+            .iter()
+            .map(|s| (s.name.as_str(), s.start_tick, s.length_ticks))
+            .collect::<Vec<_>>(),
+        vec![
+            ("intro", 0, 0),
+            ("chorus", 20 * BAR, 0),
+            ("outro", 28 * BAR, 4 * BAR)
+        ]
+    );
+    assert_eq!(m.tempo_points[0].tick, 20 * BAR);
+    assert_eq!(
+        m.automation[0]
+            .points
+            .iter()
+            .map(|p| p.tick)
+            .collect::<Vec<_>>(),
+        vec![8 * BAR, 24 * BAR]
+    );
+    assert_eq!(m.loop_region, Some((20 * BAR, 24 * BAR)));
+    assert_eq!(m.song_length_ticks, before.song_length_ticks + ticks);
+    // The clips and markers are asserted above one by one: a clip the cut split now starts
+    // inside this window and did not before, which is the point of the split.
+    assert_eq!(
+        window(m, 20 * BAR, m.song_length_ticks).chords,
+        window(&before, at, before.song_length_ticks).chords,
+        "the progression past the cut is the same progression, four bars later"
+    );
+
+    // What is played moves with it: the bounce and the transport read this one sequence.
+    let notes_after: Vec<i64> = Sequence::from_song(m).tracks[0]
+        .notes
+        .iter()
+        .map(|n| n.start_tick)
+        .collect();
+    assert_eq!(
+        notes_after,
+        notes_before
+            .iter()
+            .map(|&t| if t >= at { t + ticks } else { t })
+            .collect::<Vec<_>>()
+    );
+
+    // One gesture, one undo step.
+    assert!(d.undo());
+    assert_eq!(d.model(), &before);
+    assert!(!d.can_undo());
+}
+
+#[test]
+fn time_opened_inside_a_section_makes_the_section_longer() {
+    let mut d = rippled();
+    d.apply(
+        Command::InsertTime {
+            at: 26 * BAR,
+            ticks: 2 * BAR,
+        },
+        false,
+    )
+    .unwrap();
+    let outro = d.model().sections.last().unwrap();
+    assert_eq!(
+        (outro.start_tick, outro.length_ticks),
+        (24 * BAR, 6 * BAR),
+        "bars added inside the outro are more outro, not a split marker"
+    );
+}
+
+#[test]
+fn deleting_time_closes_the_gap_and_splits_what_straddles_the_cut() {
+    let mut d = rippled();
+    let before = d.model().clone();
+    let (at, ticks) = (16 * BAR, 4 * BAR);
+    let inside = before.clips.iter().find(|c| c.start_tick == at).unwrap().id;
+    let across = before
+        .clips
+        .iter()
+        .find(|c| c.start_tick == 15 * BAR)
+        .unwrap()
+        .clone();
+
+    d.apply(Command::DeleteTime { at, ticks }, false).unwrap();
+    let m = d.model();
+
+    assert!(
+        m.clip(&inside).is_none(),
+        "a clip wholly inside the cut goes with the time it lived in"
+    );
+    let head = m.clip(&across.id).unwrap();
+    assert_eq!((head.start_tick, head.length_ticks), (15 * BAR, BAR));
+    let tail = m
+        .clips
+        .iter()
+        .find(|c| c.pattern_id == across.pattern_id && c.id != across.id && c.start_tick == at)
+        .expect("what was past the cut closes up against what was before it");
+    assert_eq!(
+        (tail.start_tick, tail.length_ticks, tail.offset_ticks),
+        (at, 2 * BAR, 5 * BAR)
+    );
+
+    assert!(
+        m.tempo_points.is_empty(),
+        "a tempo change inside the cut goes with it"
+    );
+    assert_eq!(
+        m.sections
+            .iter()
+            .map(|s| (s.name.as_str(), s.start_tick, s.length_ticks))
+            .collect::<Vec<_>>(),
+        vec![("intro", 0, 0), ("chorus", at, 0), ("outro", 20 * BAR, 4 * BAR)]
+    );
+    assert_eq!(
+        m.automation[0]
+            .points
+            .iter()
+            .map(|p| p.tick)
+            .collect::<Vec<_>>(),
+        vec![8 * BAR, at]
+    );
+    assert_eq!(
+        m.loop_region, None,
+        "a brace with nothing left inside it is no brace"
+    );
+    assert_eq!(m.song_length_ticks, before.song_length_ticks - ticks);
+    assert_eq!(
+        window(m, at, m.song_length_ticks).chords,
+        window(&before, at + ticks, before.song_length_ticks).chords,
+        "the progression past the cut is the same progression, four bars earlier"
+    );
+
+    assert!(d.undo());
+    assert_eq!(d.model(), &before);
+}
+
+#[test]
+fn a_section_whose_whole_extent_is_cut_goes_with_its_music() {
+    let mut m = fixture();
+    m.sections = vec![
+        Section::new("verse", 0),
+        Section {
+            length_ticks: 2 * BAR,
+            ..Section::new("break", 8 * BAR)
+        },
+        Section::new("chorus", 12 * BAR),
+    ];
+    let mut d = Document::new(m);
+    d.apply(
+        Command::DeleteTime {
+            at: 8 * BAR,
+            ticks: 4 * BAR,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        d.model()
+            .sections
+            .iter()
+            .map(|s| (s.name.as_str(), s.start_tick))
+            .collect::<Vec<_>>(),
+        vec![("verse", 0), ("chorus", 8 * BAR)]
+    );
+}
+
+#[test]
+fn a_lane_whose_every_point_is_cut_away_stops_overriding_its_control() {
+    let mut d = rippled();
+    d.apply(
+        Command::DeleteTime {
+            at: 4 * BAR,
+            ticks: 20 * BAR,
+        },
+        false,
+    )
+    .unwrap();
+    assert!(
+        d.model().automation.is_empty(),
+        "a lane with no points left is no lane"
+    );
+}
+
+#[test]
+fn duplicating_a_range_reproduces_it_whole_at_the_target() {
+    let mut m = fixture();
+    let (t0, _, p0, p1) = ids(&m);
+    m.clips = vec![clip_at(p0, 0, 8 * BAR), clip_at(p1, 8 * BAR, 8 * BAR)];
+    m.sections = vec![Section::new("verse", 0), Section::new("after", 16 * BAR)];
+    m.tempo_points = vec![TempoPoint::new(4 * BAR, 100.0, true)];
+    let mut lane = AutomationLane::new(AutoTarget::Track(t0, TrackParam::Volume));
+    lane.points = vec![Breakpoint::new(2 * BAR, 0.4, Curve::Ramp)];
+    m.automation = vec![lane];
+    let mut d = Document::new(m);
+    let before = d.model().clone();
+
+    d.apply(
+        Command::DuplicateRange {
+            from: 0,
+            to: 16 * BAR,
+            at: 16 * BAR,
+        },
+        false,
+    )
+    .unwrap();
+    let m = d.model();
+
+    assert_eq!(m.song_length_ticks, before.song_length_ticks + 16 * BAR);
+    assert_eq!(
+        window(m, 0, 16 * BAR),
+        window(&before, 0, 16 * BAR),
+        "the source bars are left alone"
+    );
+    assert_eq!(
+        window(m, 16 * BAR, 32 * BAR),
+        window(&before, 0, 16 * BAR),
+        "bars 1-16 again at bar 17, marker and all"
+    );
+    assert_eq!(
+        window(m, 32 * BAR, m.song_length_ticks),
+        window(&before, 16 * BAR, before.song_length_ticks),
+        "what followed was pushed along, not written over"
+    );
+    // Copies are copies: the originals keep their ids and nothing is counted twice.
+    assert_eq!(m.clips.len(), before.clips.len() * 2);
+    assert_eq!(
+        m.clips.iter().filter(|c| c.id == before.clips[0].id).count(),
+        1
+    );
+
+    assert!(d.undo());
+    assert_eq!(d.model(), &before);
+    assert!(!d.can_undo(), "one gesture, one undo step");
+}
+
+#[test]
+fn a_take_split_by_a_ripple_keeps_the_seconds_it_played() {
+    // At 120 bpm a beat is half a second, so the fixture's two-second take is four beats long.
+    let mut d = doc();
+    let source = d.model().audio_clips[0].source_id;
+    d.apply(
+        Command::InsertTime {
+            at: 2 * BEAT,
+            ticks: 4 * BEAT,
+        },
+        false,
+    )
+    .unwrap();
+    let takes = &d.model().audio_clips;
+    assert_eq!(takes.len(), 2, "the take is split, not stretched");
+    assert_eq!(
+        (
+            takes[0].start_tick,
+            takes[0].offset_seconds,
+            takes[0].length_seconds
+        ),
+        (0, 0.0, 1.0)
+    );
+    assert_eq!(
+        (
+            takes[1].start_tick,
+            takes[1].offset_seconds,
+            takes[1].length_seconds
+        ),
+        (6 * BEAT, 1.0, 1.0),
+        "the second half plays on from exactly where the first stopped"
+    );
+    assert!(takes.iter().all(|c| c.source_id == source));
+    assert_ne!(takes[0].id, takes[1].id);
+}
+
+#[test]
+fn a_ripple_refuses_nonsense_and_leaves_the_song_alone() {
+    for command in [
+        Command::InsertTime { at: -1, ticks: BAR },
+        Command::InsertTime { at: 0, ticks: 0 },
+        Command::DeleteTime { at: 0, ticks: -1 },
+        Command::DuplicateRange {
+            from: 4 * BAR,
+            to: 4 * BAR,
+            at: 0,
+        },
+        Command::DuplicateRange {
+            from: -1,
+            to: BAR,
+            at: 0,
+        },
+    ] {
+        let mut d = rippled();
+        let before = d.model().clone();
+        assert_eq!(
+            d.apply(command.clone(), false),
+            Err(EditError::InvalidValue),
+            "{command:?} should be refused"
+        );
+        assert_eq!(d.model(), &before);
+        assert!(!d.can_undo());
+    }
 }

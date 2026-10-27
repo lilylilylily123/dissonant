@@ -76,6 +76,10 @@ impl AudioPool {
 pub struct BlockContext<'a> {
     /// Transport time in seconds at frame 0 of this sub-block.
     pub time_seconds: f64,
+    /// How long one beat lasts at the song's tempo where the playhead is, so a tempo-synced
+    /// insert is in time with the song rather than with a number someone typed. Read per
+    /// sub-block: a tempo ramp moves it.
+    pub beat_seconds: f32,
     /// False while stopped or counting in: clips stay silent, but monitoring keeps working —
     /// which is how you practise before hitting record.
     pub playing: bool,

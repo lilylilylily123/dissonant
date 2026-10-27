@@ -4023,13 +4023,23 @@ button.linkish {
 }
 .st-seclist .sr {
   display: grid;
-  grid-template-columns: 8px 1fr auto auto auto;
+  grid-template-columns: 8px 1fr auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 4px 6px;
   border-radius: 2px;
   font-size: 10.5px;
   cursor: pointer;
+}
+/* The move and duplicate buttons: they only matter on the row under the pointer. */
+.st-seclist .acts {
+  display: flex;
+  gap: 1px;
+  opacity: 0.35;
+}
+.st-seclist .sr:hover .acts,
+.st-seclist .sr.sel .acts {
+  opacity: 1;
 }
 .st-seclist .sr:hover {
   background: var(--bg-2);

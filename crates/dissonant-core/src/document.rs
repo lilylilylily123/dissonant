@@ -144,6 +144,16 @@ pub enum Command {
         insert_id: Uuid,
         state: String,
     },
+    /// One knob on a native effect. Sent `transient` while the knob is being dragged, so the
+    /// whole gesture coalesces into one undo step — the same bargain [`Command::SetInsertState`]
+    /// makes for a plugin, except that here the value is the document's own and there is no
+    /// opaque blob to read back.
+    SetInsertParam {
+        target: InsertTarget,
+        insert_id: Uuid,
+        param_id: u32,
+        value: f64,
+    },
     /// A new empty pattern on a track, named "<track name> <n>".
     AddPattern {
         track_id: Uuid,
@@ -296,6 +306,26 @@ pub enum Command {
     RemoveAudioClip {
         id: Uuid,
     },
+    /// Open `ticks` of empty time at song tick `at`: every clip, take, marker, tempo point,
+    /// chord and automation breakpoint from `at` on moves that much later, in one undo step,
+    /// and the song grows to match. See [`crate::ripple`] for what happens to a clip the cut
+    /// falls inside.
+    InsertTime {
+        at: i64,
+        ticks: i64,
+    },
+    /// Cut `[at, at + ticks)` out of the song and close the gap, in one undo step.
+    DeleteTime {
+        at: i64,
+        ticks: i64,
+    },
+    /// Copy everything in `[from, to)` to `at`, pushing what was there along: verse 1 into
+    /// verse 2 in one gesture.
+    DuplicateRange {
+        from: i64,
+        to: i64,
+        at: i64,
+    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -334,6 +364,10 @@ pub enum EditError {
     NoSuchInsert,
     #[error("an insert chain holds at most {MAX_INSERTS} effects")]
     TooManyInserts,
+    #[error("that effect has no parameters of its own")]
+    NotANativeEffect,
+    #[error("no such parameter")]
+    NoSuchParam,
 }
 
 /// One undo step: the model before the edit, and what the edit was ("move notes").
@@ -586,6 +620,7 @@ impl Command {
             SetInsertEnabled { on: true, .. } => "enable insert",
             SetInsertEnabled { .. } => "bypass insert",
             SetInsertState { .. } => "insert settings",
+            SetInsertParam { .. } => "insert settings",
             AddPattern { .. } => "add pattern",
             DuplicatePattern { .. } => "duplicate pattern",
             DeletePattern { .. } => "delete pattern",
@@ -621,6 +656,9 @@ impl Command {
             AddAudioTake { .. } => "add audio",
             UpdateAudioClip { .. } => "edit audio clip",
             RemoveAudioClip { .. } => "remove audio clip",
+            InsertTime { .. } => "insert time",
+            DeleteTime { .. } => "delete time",
+            DuplicateRange { .. } => "duplicate range",
         }
         .to_string()
     }
@@ -934,6 +972,20 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             }
             insert_mut(m, target, insert_id)?.state = Some(state);
         }
+        SetInsertParam {
+            target,
+            insert_id,
+            param_id,
+            value,
+        } => {
+            let insert = insert_mut(m, target, insert_id)?;
+            let kind = insert.native_kind().ok_or(EditError::NotANativeEffect)?;
+            let param = kind.param(param_id).ok_or(EditError::NoSuchParam)?;
+            if !value.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            insert.params.insert(param_id, param.clamp(value));
+        }
         AddPattern { track_id } => {
             let track = m.track(&track_id).ok_or(EditError::NoSuchTrack)?;
             let pattern = SongPattern::new(track_id, next_pattern_name(m, track));
@@ -1054,7 +1106,8 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             m.sections.sort_by_key(|s| s.start_tick);
         }
         UpdateSection { section } => {
-            if section.start_tick < 0 || section.name.trim().is_empty() {
+            // A negative extent is nonsense; 0 is the implicit one (to the next marker).
+            if section.start_tick < 0 || section.length_ticks < 0 || section.name.trim().is_empty() {
                 return Err(EditError::InvalidValue);
             }
             let slot = m
@@ -1319,6 +1372,24 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             if m.audio_clips.len() == before {
                 return Err(EditError::NoSuchAudioClip);
             }
+        }
+        InsertTime { at, ticks } => {
+            if at < 0 || ticks <= 0 {
+                return Err(EditError::InvalidValue);
+            }
+            crate::ripple::insert_time(m, at, ticks);
+        }
+        DeleteTime { at, ticks } => {
+            if at < 0 || ticks <= 0 {
+                return Err(EditError::InvalidValue);
+            }
+            crate::ripple::delete_time(m, at, ticks);
+        }
+        DuplicateRange { from, to, at } => {
+            if from < 0 || to <= from || at < 0 {
+                return Err(EditError::InvalidValue);
+            }
+            crate::ripple::duplicate_range(m, from, to, at);
         }
     }
     Ok(())

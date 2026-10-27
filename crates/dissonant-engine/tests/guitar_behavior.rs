@@ -518,6 +518,7 @@ fn the_clip_reader_is_sample_exact_at_every_block_size() {
             let (mut l, mut r) = (vec![0.0f32; frames], vec![0.0f32; frames]);
             let ctx = BlockContext {
                 time_seconds: done as f64 / SRD,
+                beat_seconds: 0.5,
                 playing: true,
                 pool: &pool,
                 clips: &clips,

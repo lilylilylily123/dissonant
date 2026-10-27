@@ -14,6 +14,7 @@ import {
   type Track,
   type TrackParam,
 } from "../types";
+import { NATIVE_EFFECTS, nativeEffect } from "../effects";
 import { eqDb, hz, Knob, lin, log, panText, pct } from "./Knob";
 import { InstrumentPicker, PluginParams } from "./PluginBrowser";
 import { VMeter } from "./Meter";
@@ -267,18 +268,25 @@ function InsertChain({ target, title }: { target: InsertTarget; title: string })
           </div>
         )}
 
-        {effects.length === 0 ? (
-          // Nothing to add and no way to guess why: say where effects come from.
-          <div className="help">
-            no effects installed —{" "}
-            <button className="quiet" onClick={() => openPluginBrowser(true)}>
-              find a free one
-            </button>
-          </div>
-        ) : chain.length >= MAX_INSERTS ? (
+        {chain.length >= MAX_INSERTS ? (
           <div className="help">this chain is full at {MAX_INSERTS} effects</div>
         ) : adding ? (
           <div className="chipsrow" style={{ display: "grid", gridTemplateColumns: "1fr" }}>
+            {/* The stock effects first and always: a machine with nothing installed can still
+                mix a song, and these are the ones that are certain to be there. */}
+            {NATIVE_EFFECTS.map((e) => (
+              <button
+                key={e.uid}
+                className="chip"
+                title={e.blurb}
+                onClick={() => {
+                  setAdding(false);
+                  void addInsert(target, e.uid);
+                }}
+              >
+                {e.name}
+              </button>
+            ))}
             {effects.map((p) => (
               <button
                 key={p.uid}
@@ -292,6 +300,9 @@ function InsertChain({ target, title }: { target: InsertTarget; title: string })
                 {p.name}
               </button>
             ))}
+            <button className="chip quiet" onClick={() => openPluginBrowser(true)}>
+              find a plugin…
+            </button>
             <button className="chip quiet" onClick={() => setAdding(false)}>
               cancel
             </button>
@@ -303,10 +314,16 @@ function InsertChain({ target, title }: { target: InsertTarget; title: string })
         )}
 
         {open &&
-          (plugins.some((p) => p.uid === open.uid) ? (
+          (nativeEffect(open.uid) || plugins.some((p) => p.uid === open.uid) ? (
             <div className="insertparams">
               <span className="flabel">{open.name}</span>
-              <PluginParams insertId={open.id} uid={open.uid} state={open.state ?? null} />
+              {/* A native effect has no opaque blob; what moves under its knobs is its own
+                  parameter map, which is exactly the "refetch when this changes" key. */}
+              <PluginParams
+                insertId={open.id}
+                uid={open.uid}
+                state={open.state ?? (open.params ? JSON.stringify(open.params) : null)}
+              />
             </div>
           ) : (
             <div className="help">{open.name} is not installed on this computer</div>

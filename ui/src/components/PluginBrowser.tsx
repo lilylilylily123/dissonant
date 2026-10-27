@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { selectedTrack, useStore } from "../store";
 import { hostPlatforms, VOICES, type CatalogAsset, type CatalogEntry, type InstallProgress, type ParamInfo, type Platform } from "../types";
+import { nativeEffect } from "../effects";
 import { hz, Knob, lin, log, pct } from "./Knob";
 
 /**
@@ -126,21 +127,25 @@ const INLINE_PARAM_LIMIT = 8;
 export type ParamTarget = { trackId: string; insertId?: undefined } | { insertId: string; trackId?: undefined };
 
 /**
- * The hosted plugin's own controls. Values come from the backend on every change of plugin or
- * saved state — including undo — so the knobs always show what the plugin actually holds.
- * Dragging writes straight through; releasing commits, which is what makes one undo step.
+ * The effect's own controls, hosted plugin or stock. Values come from the backend on every
+ * change of effect or saved state — including undo — so the knobs always show what is actually
+ * loaded. Dragging writes straight through; releasing commits, which is what makes one undo
+ * step.
  *
  * A plugin with more controls than fit here is summarised instead, with its own window one
- * click away; cramming a hundred knobs into a 300px column is not showing them.
+ * click away; cramming a hundred knobs into a 300px column is not showing them. A native
+ * effect is exempt: its parameter list was written for this column, grouped and ordered for it,
+ * and it has no window of its own to send anyone to.
  */
 export function PluginParams(target: ParamTarget & { uid: string; state: string | null }) {
   const { uid, state } = target;
+  const native = nativeEffect(uid) !== null;
   const pluginParams = useStore((s) => s.pluginParams);
   const setPluginParam = useStore((s) => s.setPluginParam);
   const insertParams = useStore((s) => s.insertParams);
   const setInsertParam = useStore((s) => s.setInsertParam);
   const openPluginWindow = useStore((s) => s.openPluginWindow);
-  const installed = useStore((s) => s.plugins.some((p) => p.uid === uid));
+  const installed = useStore((s) => native || s.plugins.some((p) => p.uid === uid));
   const [params, setParams] = useState<ParamInfo[]>([]);
   // The knob's commit callback carries no value, so the last dragged one is kept beside it.
   const dragged = useRef(new Map<number, number>());
@@ -180,7 +185,7 @@ export function PluginParams(target: ParamTarget & { uid: string; state: string 
   if (params.length === 0) {
     return <div className="help">this plugin publishes no controls of its own — it is played, not dialled.</div>;
   }
-  if (params.length > INLINE_PARAM_LIMIT) {
+  if (!native && params.length > INLINE_PARAM_LIMIT) {
     return (
       <div className="pluginparams">
         <div className="help">{params.length} controls — too many for this column</div>

@@ -34,6 +34,7 @@ import type {
   PlayMode,
   ProjectModel,
   RecoveryCandidate,
+  Section,
   Snapshot,
   Track,
   TrackPlugin,
@@ -61,10 +62,19 @@ import {
   MIC_MODELS,
   MIN_NOTE_TICKS,
   sameAutoTarget,
+  sectionSpan,
+  tempoMap,
   TICKS_PER_BEAT,
   uuid,
   withDefaults,
 } from "./types";
+import {
+  clampNativeParam,
+  nativeEffect,
+  nativeValue,
+  sanitizeNativeParams,
+} from "./effects";
+import { deletePieces, deletePoint, insertPieces, insertPoint, windowPiece, type Piece } from "./clipEditing";
 import { defaultKit, filledSound, isFactory, lookupSound, validKit, type Sound } from "./sound";
 import { chordAt, normalize, progression } from "./theory";
 import vibesJson from "../../crates/dissonant-core/assets/vibes.json";
@@ -504,6 +514,7 @@ const NO_SUCH_AUDIO_CLIP = "no such audio clip";
 const NO_SUCH_AUDIO_SOURCE = "no such audio source";
 const NOT_AN_AUDIO_TRACK = "not an audio track";
 const NO_SUCH_INSERT = "no such insert";
+const NOT_A_NATIVE_EFFECT = "that effect has no parameters of its own";
 const TOO_MANY_INSERTS = `an insert chain holds at most ${MAX_INSERTS} effects`;
 const PAST_SONG_END = "that is past the end of the song";
 const NO_SUCH_AUTOMATION_LANE = "no such automation lane";
@@ -551,7 +562,8 @@ function isBase64(s: string): boolean {
 }
 
 /** `model.rs::sanitize_inserts`: a slot that names nothing can never load, a duplicate id makes
- *  two slots indistinguishable, and a chain past the cap is more than the engine will run. */
+ *  two slots indistinguishable, a chain past the cap is more than the engine will run, and a
+ *  native effect's knobs are held inside their ranges (a plugin has none of ours at all). */
 function sanitizeInserts(chain: Insert[]): Insert[] {
   const seen = new Set<string>();
   return chain
@@ -561,7 +573,14 @@ function sanitizeInserts(chain: Insert[]): Insert[] {
       return true;
     })
     .slice(0, MAX_INSERTS)
-    .map((i) => ({ ...i, enabled: i.enabled ?? true }));
+    .map((i) => {
+      const effect = nativeEffect(i.uid);
+      const params = effect ? sanitizeNativeParams(effect, i.params) : undefined;
+      const out: Insert = { ...i, enabled: i.enabled ?? true };
+      if (params) out.params = params;
+      else delete out.params;
+      return out;
+    });
 }
 
 /** `TrackParam` ranges, from `apply_to`'s `SetTrackParam` arm. */
@@ -1242,6 +1261,7 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   // A brace left hanging past the end (hand-edited, or saved before the song was shortened)
   // would loop over silence.
   m.loopRegion = clampLoop(m.loopRegion, m.songLengthTicks);
+  foldImplicitExtent(m.sections ?? []);
   // Unreferenced sources stay: undoing the clip that used one must not force a re-decode.
   m.audioSources ??= [];
   const audioTrackIds = new Set(
@@ -1307,6 +1327,224 @@ function clampLoop(region: [number, number] | null | undefined, songEnd: number)
   const start = Math.min(Math.max(region[0], 0), songEnd);
   const end = Math.min(Math.max(region[1], 0), songEnd);
   return end > start ? [start, end] : null;
+}
+
+/**
+ * `Section::length_ticks` is skipped when it is the implicit extent, so an absent field and a
+ * zero mean the same thing — and a project whose sections all run to the next marker is
+ * byte-identical to one saved before extents existed. The mock's model *is* its file, so it
+ * drops the key the same way.
+ */
+function foldImplicitExtent(sections: Section[]): void {
+  for (const s of sections) if (!s.lengthTicks || s.lengthTicks < 0) delete s.lengthTicks;
+}
+
+/**
+ * Mirrors `tidy_chords`: drop the nonsense, fold each chord's pitch classes into 0–11 keeping
+ * their order (root first), sort by start, and cut each chord at the next one's start so none
+ * overlap.
+ */
+function tidyChords(chords: ChordEvent[]): ChordEvent[] {
+  return chords
+    .filter((ch) => allFinite(ch.startTick, ch.lengthTicks) && ch.lengthTicks > 0 && ch.startTick >= 0)
+    .map((ch) => ({ ...ch, pitchClasses: [...new Set(ch.pitchClasses.map(normalize))] }))
+    .sort((a, b) => a.startTick - b.startTick)
+    .map((ch, i, all) => (all[i + 1] ? { ...ch, lengthTicks: Math.min(ch.lengthTicks, all[i + 1].startTick - ch.startTick) } : ch))
+    .filter((ch) => ch.lengthTicks > 0);
+}
+
+// ─── Ripple edits ──────────────────────────────────────────────────────────────────────────
+// `crates/dissonant-core/src/ripple.rs`, rule for rule. The tick math itself is shared with
+// the song view through `clipEditing`, so the preview a menu shows and the edit the backend
+// makes cannot disagree.
+
+/** `ripple.rs::split_clip`: the first piece keeps the clip's identity, a second one picks the
+ *  pattern up exactly where the first left it. */
+function splitClip(clip: Clip, pieces: Piece[]): Clip[] {
+  return pieces.map((p, i) => ({
+    ...clip,
+    id: i === 0 ? clip.id : uuid(),
+    startTick: p.start,
+    lengthTicks: p.len,
+    offsetTicks: clip.offsetTicks + p.skip,
+  }));
+}
+
+/** `ripple.rs::split_chord`: both halves still spell the same notes. */
+function splitChord(chord: ChordEvent, pieces: Piece[]): ChordEvent[] {
+  return pieces.map((p, i) => ({ ...chord, id: i === 0 ? chord.id : uuid(), startTick: p.start, lengthTicks: p.len }));
+}
+
+/**
+ * `ripple.rs::split_audio`. Audio never warps: the split point goes through the tempo map (the
+ * one from before the edit) to find how many seconds of the file each piece holds. The leading
+ * fade stays on the first piece and the trailing one on the last.
+ */
+function splitAudio(secondsAt: (tick: number) => number, clip: AudioClip, pieces: Piece[], len: number): AudioClip[] {
+  const anchor = secondsAt(clip.startTick);
+  const into = (tick: number) => clamp(secondsAt(tick) - anchor, 0, clip.lengthSeconds);
+  const last = pieces.length - 1;
+  return pieces
+    .map((p, i) => {
+      const tail = p.skip + p.len >= len;
+      const from = into(clip.startTick + p.skip);
+      return {
+        ...clip,
+        id: i === 0 ? clip.id : uuid(),
+        startTick: p.start,
+        lengthSeconds: (tail ? clip.lengthSeconds : into(clip.startTick + p.skip + p.len)) - from,
+        offsetSeconds: clip.offsetSeconds + from,
+        fadeInSeconds: p.skip === 0 ? clip.fadeInSeconds : 0,
+        fadeOutSeconds: i === last && tail ? clip.fadeOutSeconds : 0,
+      };
+    })
+    .map(sanitizeAudioClip)
+    .filter((c): c is AudioClip => c !== null);
+}
+
+/**
+ * How long a take is in ticks — the only thing a timeline edit can reason about. The map is
+ * monotonic, so its inverse is a bisection; `tempoMap` only goes one way.
+ */
+function audioLenTicks(secondsAt: (tick: number) => number, clip: AudioClip): number {
+  const target = secondsAt(clip.startTick) + clip.lengthSeconds;
+  let lo = clip.startTick;
+  let hi = clip.startTick + TICKS_PER_BEAT;
+  while (secondsAt(hi) < target) hi *= 2;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (secondsAt(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return Math.max(0, Math.round(hi) - clip.startTick);
+}
+
+/** `ripple.rs::settle`: everything back in order, nothing reaching past the song's end. */
+function settle(m: ProjectModel): void {
+  m.clips = m.clips
+    .filter((c) => c.startTick < m.songLengthTicks)
+    .map((c) => (c.startTick + c.lengthTicks > m.songLengthTicks ? { ...c, lengthTicks: m.songLengthTicks - c.startTick } : c))
+    .sort((a, b) => a.startTick - b.startTick);
+  m.audioClips?.sort((a, b) => a.startTick - b.startTick);
+  m.sections.sort((a, b) => a.startTick - b.startTick);
+  foldImplicitExtent(m.sections);
+  m.tempoPoints?.sort((a, b) => a.tick - b.tick);
+  m.loopRegion = clampLoop(m.loopRegion, m.songLengthTicks);
+}
+
+/** `ripple.rs::insert_time`. */
+function insertTime(m: ProjectModel, at: number, ticks: number): void {
+  const { secondsAt } = tempoMap(m.tempo, m.tempoPoints);
+  m.clips = m.clips.flatMap((c) => splitClip(c, insertPieces(c.startTick, c.lengthTicks, at, ticks)));
+  m.audioClips = (m.audioClips ?? []).flatMap((c) => {
+    const len = audioLenTicks(secondsAt, c);
+    return splitAudio(secondsAt, c, insertPieces(c.startTick, len, at, ticks), len);
+  });
+  m.sections = m.sections.map((s) =>
+    // Time opened inside a section is more of that section: a marker names a stretch of music,
+    // not a piece of it.
+    (s.lengthTicks ?? 0) > 0 && s.startTick < at && at < s.startTick + (s.lengthTicks ?? 0)
+      ? { ...s, lengthTicks: (s.lengthTicks ?? 0) + ticks }
+      : { ...s, startTick: insertPoint(s.startTick, at, ticks) },
+  );
+  m.tempoPoints = (m.tempoPoints ?? []).map((p) => ({ ...p, tick: insertPoint(p.tick, at, ticks) }));
+  m.chords = tidyChords(m.chords.flatMap((ch) => splitChord(ch, insertPieces(ch.startTick, ch.lengthTicks, at, ticks))));
+  for (const lane of m.automation ?? []) {
+    lane.points = lane.points.map((p) => ({ ...p, tick: insertPoint(p.tick, at, ticks) }));
+    tidyLane(lane);
+  }
+  // Time opened inside the brace lengthens it; a brace ending where the time opens does not.
+  if (m.loopRegion) m.loopRegion = [insertPoint(m.loopRegion[0], at, ticks), m.loopRegion[1] > at ? m.loopRegion[1] + ticks : m.loopRegion[1]];
+  m.songLengthTicks = Math.max(m.songLengthTicks, at) + ticks;
+  settle(m);
+}
+
+/** `ripple.rs::delete_time`. */
+function deleteTime(m: ProjectModel, at: number, ticks: number): void {
+  const { secondsAt } = tempoMap(m.tempo, m.tempoPoints);
+  const cutEnd = at + ticks;
+  m.clips = m.clips.flatMap((c) => splitClip(c, deletePieces(c.startTick, c.lengthTicks, at, ticks)));
+  m.audioClips = (m.audioClips ?? []).flatMap((c) => {
+    const len = audioLenTicks(secondsAt, c);
+    return splitAudio(secondsAt, c, deletePieces(c.startTick, len, at, ticks), len);
+  });
+  const spans = m.sections.map((s) => sectionSpan(m, s));
+  m.sections = m.sections.flatMap((s, i) => {
+    const [s0, s1] = spans[i];
+    // A section whose whole extent was inside the cut goes with its music.
+    if (s0 >= at && s0 < cutEnd && s1 <= cutEnd) return [];
+    const startTick = deletePoint(s0, at, ticks);
+    const explicit = (s.lengthTicks ?? 0) > 0;
+    const lengthTicks = explicit ? Math.max(0, deletePoint(s1, at, ticks) - startTick) : 0;
+    // An explicit extent cut away to nothing is a section with no music left in it.
+    return explicit && lengthTicks === 0 ? [] : [{ ...s, startTick, lengthTicks }];
+  });
+  // A tempo change inside the cut goes with it: what was in force before it plays on.
+  m.tempoPoints = (m.tempoPoints ?? []).filter((p) => p.tick < at || p.tick >= cutEnd).map((p) => ({ ...p, tick: deletePoint(p.tick, at, ticks) }));
+  m.chords = tidyChords(m.chords.flatMap((ch) => splitChord(ch, deletePieces(ch.startTick, ch.lengthTicks, at, ticks))));
+  for (const lane of m.automation ?? []) {
+    lane.points = lane.points.filter((p) => p.tick < at || p.tick >= cutEnd).map((p) => ({ ...p, tick: deletePoint(p.tick, at, ticks) }));
+    tidyLane(lane);
+  }
+  // A lane with every point inside the cut has nothing left to say.
+  m.automation = (m.automation ?? []).filter((l) => l.points.length > 0);
+  if (m.loopRegion) m.loopRegion = [deletePoint(m.loopRegion[0], at, ticks), deletePoint(m.loopRegion[1], at, ticks)];
+  m.songLengthTicks = Math.max(barOf(m), m.songLengthTicks - Math.max(0, Math.min(m.songLengthTicks, cutEnd) - at));
+  settle(m);
+}
+
+/** `ripple.rs::duplicate_range`. */
+function duplicateRange(m: ProjectModel, from: number, to: number, at: number): void {
+  const span = to - from;
+  const { secondsAt } = tempoMap(m.tempo, m.tempoPoints);
+  // Taken before the time is opened, so duplicating a range onto its own start still
+  // reproduces what was there rather than what the insert just moved.
+  const clips = m.clips.map((c) => ({ ...c }));
+  const audio = (m.audioClips ?? []).map((c) => ({ ...c }));
+  const sections = m.sections.filter((s) => s.startTick >= from && s.startTick < to).map((s) => ({ s: { ...s }, span: sectionSpan(m, s) }));
+  const tempo = (m.tempoPoints ?? []).filter((p) => p.tick >= from && p.tick < to).map((p) => ({ ...p }));
+  const chords = m.chords.map((c) => ({ ...c }));
+  const lanes = (m.automation ?? []).map((l) => ({ target: l.target, points: l.points.filter((p) => p.tick >= from && p.tick < to).map((p) => ({ ...p })) }));
+
+  insertTime(m, at, span);
+
+  for (const c of clips) {
+    const p = windowPiece(c.startTick, c.lengthTicks, from, to, at);
+    if (p) m.clips.push({ ...c, id: uuid(), startTick: p.start, lengthTicks: p.len, offsetTicks: c.offsetTicks + p.skip });
+  }
+  for (const c of audio) {
+    const len = audioLenTicks(secondsAt, c);
+    const p = windowPiece(c.startTick, len, from, to, at);
+    // A copy is a second take of the same source, not the same clip twice.
+    if (p) m.audioClips = [...(m.audioClips ?? []), ...splitAudio(secondsAt, c, [p], len).map((copy) => ({ ...copy, id: uuid() }))];
+  }
+  for (const { s, span: was } of sections) {
+    m.sections.push({
+      ...s,
+      id: uuid(),
+      startTick: at + (was[0] - from),
+      // An explicit extent is cut at the range's end; an implicit one stays implicit, so the
+      // copy runs to whatever marker follows it, exactly as the original did.
+      lengthTicks: (s.lengthTicks ?? 0) > 0 ? Math.max(1, Math.min(was[1], to) - was[0]) : 0,
+    });
+  }
+  for (const p of tempo) {
+    const tick = at + (p.tick - from);
+    m.tempoPoints = [...(m.tempoPoints ?? []).filter((x) => x.tick !== tick), { ...p, id: uuid(), tick }];
+  }
+  const all = [...m.chords];
+  for (const c of chords) {
+    const p = windowPiece(c.startTick, c.lengthTicks, from, to, at);
+    if (p) all.push({ ...c, id: uuid(), startTick: p.start, lengthTicks: p.len });
+  }
+  m.chords = tidyChords(all);
+  for (const { target, points } of lanes) {
+    const lane = (m.automation ?? []).find((l) => sameAutoTarget(l.target, target));
+    if (!lane || points.length === 0) continue;
+    lane.points = [...lane.points, ...points.map((p) => ({ ...p, id: uuid(), tick: at + (p.tick - from) }))];
+    tidyLane(lane);
+  }
+  settle(m);
 }
 
 function clone<T>(x: T): T {
@@ -1479,6 +1717,18 @@ function reduce(m: ProjectModel, c: Command): void {
       insertMut(m, c.target, c.insertId).state = c.state;
       break;
     }
+    case "setInsertParam": {
+      const insert = insertMut(m, c.target, c.insertId);
+      const effect = nativeEffect(insert.uid) ?? fail(NOT_A_NATIVE_EFFECT);
+      const param =
+        effect.params.find((x) => x.id === c.paramId) ?? fail(NO_SUCH_PARAM);
+      if (!allFinite(c.value)) fail(INVALID_VALUE);
+      insert.params = {
+        ...insert.params,
+        [String(c.paramId)]: clampNativeParam(param, c.value),
+      };
+      break;
+    }
     case "addPattern":
       m.patterns.push(newPattern(c.trackId, nextPatternName(m, track(c.trackId))));
       break;
@@ -1511,14 +1761,7 @@ function reduce(m: ProjectModel, c: Command): void {
       break;
     case "setChords":
       // The project progression, in song ticks.
-      // Mirrors `tidy_chords`: pitch classes keep their order (root first), each chord is cut
-      // at the next one's start.
-      m.chords = c.chords
-        .filter((ch) => allFinite(ch.startTick, ch.lengthTicks) && ch.lengthTicks > 0 && ch.startTick >= 0)
-        .map((ch) => ({ ...ch, pitchClasses: [...new Set(ch.pitchClasses.map(normalize))] }))
-        .sort((a, b) => a.startTick - b.startTick)
-        .map((ch, i, all) => (all[i + 1] ? { ...ch, lengthTicks: Math.min(ch.lengthTicks, all[i + 1].startTick - ch.startTick) } : ch))
-        .filter((ch) => ch.lengthTicks > 0);
+      m.chords = tidyChords(c.chords);
       break;
     case "addClip": {
       const p = pattern(c.patternId);
@@ -1589,21 +1832,25 @@ function reduce(m: ProjectModel, c: Command): void {
         id: uuid(),
         name: c.name.trim() || `section ${m.sections.length + 1}`,
         startTick: Math.max(0, c.startTick),
+        // No extent: a marker dropped on the ruler runs to the next one.
         key: null,
         color: null,
       });
       m.sections.sort((a, b) => a.startTick - b.startTick);
       break;
     case "updateSection": {
+      // A negative extent is nonsense; 0 is the implicit one (to the next marker).
       if (
-        !allFinite(c.section.startTick) ||
+        !allFinite(c.section.startTick, c.section.lengthTicks ?? 0) ||
         c.section.startTick < 0 ||
+        (c.section.lengthTicks ?? 0) < 0 ||
         !c.section.name.trim()
       )
         fail(INVALID_VALUE);
       const i = m.sections.findIndex((x) => x.id === c.section.id);
       if (i < 0) fail(NO_SUCH_SECTION);
       m.sections[i] = { ...c.section };
+      foldImplicitExtent(m.sections);
       m.sections.sort((a, b) => a.startTick - b.startTick);
       break;
     }
@@ -1788,6 +2035,18 @@ function reduce(m: ProjectModel, c: Command): void {
       if (m.audioClips.length === before) fail(NO_SUCH_AUDIO_CLIP);
       break;
     }
+    case "insertTime":
+      if (!allFinite(c.at, c.ticks) || c.at < 0 || c.ticks <= 0) fail(INVALID_VALUE);
+      insertTime(m, c.at, c.ticks);
+      break;
+    case "deleteTime":
+      if (!allFinite(c.at, c.ticks) || c.at < 0 || c.ticks <= 0) fail(INVALID_VALUE);
+      deleteTime(m, c.at, c.ticks);
+      break;
+    case "duplicateRange":
+      if (!allFinite(c.from, c.to, c.at) || c.from < 0 || c.to <= c.from || c.at < 0) fail(INVALID_VALUE);
+      duplicateRange(m, c.from, c.to, c.at);
+      break;
   }
 }
 
@@ -2586,6 +2845,7 @@ function mockBridge(): Bridge {
       case "setInsertEnabled":
         return c.on ? "enable insert" : "bypass insert";
       case "setInsertState":
+      case "setInsertParam":
         return "insert settings";
       case "updateAutomationPoint":
         return "move automation point";
@@ -3203,7 +3463,9 @@ function mockBridge(): Bridge {
       // mistake, an unknown uid is a stale list.
       if (target !== "master" && !model.tracks.some((t) => t.id === target.track))
         fail(NO_SUCH_TRACK);
-      const d = installed.find((x) => x.uid === uid) ?? fail(NO_SUCH_PLUGIN);
+      // A stock effect names itself; only a plugin has to be found in the scan.
+      const native = nativeEffect(uid);
+      const d = native ?? installed.find((x) => x.uid === uid) ?? fail(NO_SUCH_PLUGIN);
       return applyCommand(
         { type: "addInsert", target, uid: d.uid, name: d.name, index },
         false,
@@ -3229,6 +3491,20 @@ function mockBridge(): Bridge {
         label,
       ),
     insertParams: async (insertId) => {
+      const found = findInsert(insertId);
+      const effect = found && nativeEffect(found.insert.uid);
+      if (found && effect) {
+        return effect.params.map((p) => ({
+          id: p.id,
+          name: p.name,
+          module: p.module,
+          min: p.min,
+          max: p.max,
+          default: p.default,
+          value: nativeValue(effect, found.insert.params, p.id),
+          isStepped: p.stepped,
+        }));
+      }
       const held = liveInsert(insertId);
       return held
         ? mockParamsFor(held.uid).map((p) => ({
@@ -3239,6 +3515,19 @@ function mockBridge(): Bridge {
     },
     setInsertParam: async (insertId, paramId, value, commit = false) => {
       const found = findInsert(insertId) ?? fail(NO_SUCH_INSERT);
+      const native = nativeEffect(found.insert.uid);
+      if (native) {
+        // A native effect's value is the document's own, so the drag reaches the engine and
+        // nothing else, and the release writes it straight in as one undo step.
+        native.params.find((x) => x.id === paramId) ?? fail(NO_SUCH_PARAM);
+        if (!allFinite(value)) fail(INVALID_VALUE);
+        if (!commit) return null;
+        return applyCommand(
+          { type: "setInsertParam", target: found.target, insertId, paramId, value },
+          false,
+          `${found.insert.name} settings`,
+        );
+      }
       const held = liveInsert(insertId) ?? fail(NO_SUCH_INSERT);
       const info =
         mockParamsFor(held.uid).find((p) => p.id === paramId) ??

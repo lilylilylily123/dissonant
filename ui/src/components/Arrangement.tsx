@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { barTicks, beatsPerBar, dbText, useStore } from "../store";
 import type { DrumPad } from "../sound";
-import { automationLane, automationValueAt, autoTargetRange, songLength, trackColor, trackKind, TICKS_PER_BEAT, type AutoTarget, type Clip, type NoteEvent, type Section, type SongPattern, type Track, type TrackParam } from "../types";
+import { automationLane, automationValueAt, autoTargetRange, sectionSpan, songLength, trackColor, trackKind, TICKS_PER_BEAT, type AutoTarget, type Clip, type NoteEvent, type Section, type SongPattern, type Track, type TrackParam } from "../types";
 import { noteName } from "../theory";
 import { VMeter } from "./Meter";
 import { ChordLane, GUTTER } from "./ChordLane";
@@ -394,6 +394,23 @@ export function Arrangement() {
     if (region) void s.setSongLoop(region);
   };
 
+  // ── Ripple: insert, delete and duplicate bars ──────────────────────────────────────────
+  // The ruler's right-click. Each of these is one command, so each is one undo step however
+  // many clips, markers, tempo points, chords and automation points it carries.
+  const [rulerMenu, setRulerMenu] = useState<{ tick: number; x: number; y: number } | null>(null);
+  /** The bars the menu's range actions work on: the loop brace, which is the song's own "this bit". */
+  const rippleRange = model.loopRegion ?? null;
+
+  const onRulerMenu = (e: React.MouseEvent) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    // The marker strip removes a section and the brace strip clears the loop; this is the
+    // bar ruler below them.
+    if (e.clientY - rect.top < MARKER_H + LOOP_H) return;
+    e.preventDefault();
+    const tick = Math.max(0, Math.floor((e.clientX - rect.left) / pxPerTick / barTick) * barTick);
+    setRulerMenu({ tick, x: e.clientX, y: e.clientY });
+  };
+
   // The song view's own editing keys. App binds none of these and the roll isn't mounted in
   // SONG, so a window listener is safe here; it still stands down for text fields, open dialogs
   // and the other screens.
@@ -510,6 +527,8 @@ export function Arrangement() {
   ];
   const audioClips = model.audioClips ?? [];
   const sectionsShown = model.sections.map((x) => (sectionPreview && x.id === sectionPreview.id ? sectionPreview : x));
+  // A marker drag previews where it would land, so the bands are measured against that list.
+  const sectionModel = { ...model, sections: sectionsShown };
 
   const menuClip = menu ? model.clips.find((c) => c.id === menu.clipId) : undefined;
   // The menu acts on the whole selection when the clicked clip is part of it, else on that clip
@@ -610,12 +629,14 @@ export function Arrangement() {
               if (e.clientY - rect.top >= MARKER_H) return;
               void dispatch({ type: "addSection", name: "", startTick: Math.max(0, snapTo((e.clientX - rect.left) / pxPerTick, grid)) });
             }}
-            title="click to seek · drag the strip under the markers to loop · double-click the top strip to add a section"
+            onContextMenu={onRulerMenu}
+            title="click to seek · drag the strip under the markers to loop · double-click the top strip to add a section · right-click the bars to insert, delete or duplicate time"
           >
             <div className="oob" style={{ left: endX }} />
             {sectionsShown.map((sec, i) => {
-              const next = sectionsShown[i + 1];
-              const end = next ? next.startTick : Math.max(songEnd, sec.startTick + barTick * 4);
+              // The band is the section's real extent, never a guess: a marker that claimed
+              // music it does not own would lie about what moving it moves.
+              const end = sectionSpan(sectionModel, sec)[1];
               const color = sec.color ?? SECTION_COLORS[i % SECTION_COLORS.length];
               return (
                 <div
@@ -833,6 +854,120 @@ export function Arrangement() {
           }}
         />
       )}
+      {rulerMenu && (
+        <RulerMenu
+          x={rulerMenu.x}
+          y={rulerMenu.y}
+          tick={rulerMenu.tick}
+          barTick={barTick}
+          range={rippleRange}
+          onClose={() => setRulerMenu(null)}
+          onInsert={(bars) => {
+            setRulerMenu(null);
+            void dispatch({ type: "insertTime", at: rulerMenu.tick, ticks: bars * barTick }, false, `insert ${bars} bar${bars === 1 ? "" : "s"}`);
+          }}
+          onDelete={(at, ticks) => {
+            setRulerMenu(null);
+            const bars = Math.round(ticks / barTick);
+            void dispatch({ type: "deleteTime", at, ticks }, false, `delete ${bars} bar${bars === 1 ? "" : "s"}`);
+          }}
+          onDuplicate={(from, to) => {
+            setRulerMenu(null);
+            void dispatch({ type: "duplicateRange", from, to, at: rulerMenu.tick }, false, "duplicate bars");
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** A menu pinned at the pointer closes on any press outside it, and when the window blurs. */
+function usePinnedMenu(onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) closeRef.current();
+    };
+    const onBlur = () => closeRef.current();
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+  return ref;
+}
+
+/**
+ * The right-click menu on the bar ruler: the arranging moves that change *when* the song
+ * happens. Insert opens bars at the clicked bar and pushes everything after it along; delete
+ * and duplicate work on the loop brace, which is how this screen already says "these bars".
+ */
+function RulerMenu({
+  x,
+  y,
+  tick,
+  barTick,
+  range,
+  onClose,
+  onInsert,
+  onDelete,
+  onDuplicate,
+}: {
+  x: number;
+  y: number;
+  /** The clicked bar's start, in ticks. */
+  tick: number;
+  barTick: number;
+  /** The loop brace, or null when there is none. */
+  range: [number, number] | null;
+  onClose: () => void;
+  onInsert: (bars: number) => void;
+  onDelete: (at: number, ticks: number) => void;
+  onDuplicate: (from: number, to: number) => void;
+}) {
+  const ref = usePinnedMenu(onClose);
+  const left = Math.min(x, window.innerWidth - 230);
+  const top = Math.min(y, window.innerHeight - 200);
+  const barOf = (t: number) => Math.floor(t / barTick) + 1;
+  const here = barOf(tick);
+  const rangeBars = range ? +((range[1] - range[0]) / barTick).toFixed(2) : 0;
+  const spans = range ? `bars ${barOf(range[0])}–${barOf(range[1] - 1)}` : "";
+  // The loop's own length as a fourth insert size, when it is not one of the three already here.
+  const sizes = [1, 2, 4, 8].concat(rangeBars >= 1 && ![1, 2, 4, 8].includes(rangeBars) ? [rangeBars] : []);
+  return (
+    <div className="dropdown clipmenu" ref={ref} style={{ left, top, minWidth: 210 }}>
+      <div className="item disabled">
+        <span>bar {here}</span>
+      </div>
+      {sizes.map((bars) => (
+        <div
+          key={bars}
+          className="item"
+          onClick={() => onInsert(bars)}
+          title={`open ${bars} empty bar${bars === 1 ? "" : "s"} here: everything from bar ${here} on moves that much later, in one undo step`}
+        >
+          <span>insert {bars} bar{bars === 1 ? "" : "s"} here</span>
+        </div>
+      ))}
+      <div className="sep" />
+      <div
+        className={`item${range ? "" : " disabled"}`}
+        onClick={range ? () => onDuplicate(range[0], range[1]) : undefined}
+        title={range ? `copy ${spans} to bar ${here}, pushing what is there along` : "set the loop brace over the bars to duplicate"}
+      >
+        <span>{range ? `duplicate ${spans} here` : "duplicate the loop here"}</span>
+      </div>
+      <div
+        className={`item danger${range ? "" : " disabled"}`}
+        onClick={range ? () => onDelete(range[0], range[1] - range[0]) : undefined}
+        title={range ? `cut ${spans} out of the song and close the gap` : "set the loop brace over the bars to delete"}
+      >
+        <span>{range ? `delete ${spans}` : "delete the loop's bars"}</span>
+      </div>
     </div>
   );
 }
@@ -864,21 +999,7 @@ function ClipMenu({
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) closeRef.current();
-    };
-    const onBlur = () => closeRef.current();
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, []);
+  const ref = usePinnedMenu(onClose);
   // Keep it on screen near the window's right and bottom edges.
   const left = Math.min(x, window.innerWidth - 200);
   const top = Math.min(y, window.innerHeight - 170);

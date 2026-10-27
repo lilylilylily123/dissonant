@@ -264,3 +264,34 @@ export function lengthText(ticks: number, barTicks: number): string {
   const beats = ticks / TICKS_PER_BEAT;
   return `${+beats.toFixed(2)} beat${beats === 1 ? "" : "s"}`;
 }
+
+// ─── Moving sections, and the music in them ────────────────────────────────────────────────
+
+/** The two ripple edits a gesture is made of, in order. */
+export interface SectionEdits {
+  copy: { from: number; to: number; at: number };
+  cut: { at: number; ticks: number } | null;
+}
+
+/**
+ * Swapping two neighbouring sections is a copy of the earlier one past the later one, then a
+ * cut of the original: both are ripples, so the music, its markers, its automation and its
+ * tempo changes all travel together. `dir` is -1 to move `index` earlier, +1 to move it later;
+ * null at the ends, or when either section owns no time.
+ */
+export function sectionSwap(spans: [number, number][], index: number, dir: -1 | 1): SectionEdits | null {
+  // Whichever way it is phrased, the move is "the earlier of the two goes after the later".
+  const first = dir < 0 ? index - 1 : index;
+  const second = first + 1;
+  if (first < 0 || second >= spans.length) return null;
+  const [from, to] = spans[first];
+  const end = spans[second][1];
+  if (to <= from || end <= to) return null;
+  return { copy: { from, to, at: end }, cut: { at: from, ticks: to - from } };
+}
+
+/** Duplicating a section drops a copy of it, and of everything inside it, right after itself. */
+export function sectionDuplicate(span: [number, number]): SectionEdits | null {
+  const [from, to] = span;
+  return to > from ? { copy: { from, to, at: to }, cut: null } : null;
+}

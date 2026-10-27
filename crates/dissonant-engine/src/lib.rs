@@ -17,6 +17,7 @@ pub mod channel;
 pub mod device;
 pub mod drums;
 pub mod dsp;
+pub mod effects;
 pub mod engine;
 pub mod input;
 pub mod render;
@@ -24,11 +25,12 @@ pub mod rig;
 pub mod synth;
 
 pub use audio::{AudioBuffer, AudioLane, AudioPool, BlockContext};
-pub use channel::{InsertSlot, Instrument};
+pub use channel::{InsertSlot, InsertUnit, Instrument};
 pub use device::{
     default_output_name, list_output_devices, AudioConfig, AudioDevice, DeviceError, EngineIo,
     OutputDeviceInfo,
 };
+pub use effects::NativeEffect;
 pub use drums::{render_drum, DrumBank, DrumKit, RenderedDrum};
 pub use engine::{
     Engine, EngineCommand, NoteShape, PreviewPatch, Shared, MAX_TRACKS, SCOPE_SAMPLES,

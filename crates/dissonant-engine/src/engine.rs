@@ -913,9 +913,7 @@ impl Engine {
                 value,
             } => {
                 if let Some(slot) = self.insert_mut(id) {
-                    if let Some(unit) = &mut slot.unit {
-                        unit.set_param(param_id, value);
-                    }
+                    slot.set_param(param_id, value);
                 }
             }
         }
@@ -1180,10 +1178,11 @@ impl Engine {
             .as_ref()
             .map(|c| (c.value_at(master_from) as f32, c.value_at(master_to) as f32));
         self.master.set_auto_gain(master_gain);
+        let beat_seconds = self.beat_seconds();
         let (l, r) = (&mut self.mix_l[..frames], &mut self.mix_r[..frames]);
         // The master's own inserts hear the mixed bus exactly as it leaves the tracks, ahead of
         // the low cut / EQ / reverb / gain the master settings describe.
-        run_inserts(&mut self.master_inserts, l, r);
+        run_inserts(&mut self.master_inserts, l, r, beat_seconds);
         self.master.process(l, r);
         if self.test_tone.0 > 0 {
             // 440 Hz at -12 dBFS with a 10 ms fade at both ends, after the master chain so it
@@ -1378,6 +1377,13 @@ impl Engine {
         )
     }
 
+    /// How long one beat lasts where the playhead is. A tempo-synced insert asks for this
+    /// every block, so a tempo map — and a ramp inside one — carries its repeats along, and an
+    /// offline bounce lands them exactly where playback did.
+    fn beat_seconds(&self) -> f32 {
+        (60.0 / self.sequence.tempo_map.bpm_at_tick(self.position).max(1.0)) as f32
+    }
+
     fn render_range(&mut self, from: usize, to: usize) {
         // `seconds_at_tick` is exact and `advance` moves the transport by exactly `frames/sr`
         // seconds, so the block's start time needs no extra state of its own.
@@ -1388,6 +1394,7 @@ impl Engine {
             pool: &self.audio_pool,
             clips: &self.sequence.audio,
             input: &self.input_block[from..to],
+            beat_seconds: self.beat_seconds(),
         };
         // Automation is read at the two ends of this sub-block, so a moving parameter is
         // continuous from one sub-block (and one block) to the next instead of stepping.

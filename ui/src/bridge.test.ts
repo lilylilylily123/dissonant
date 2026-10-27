@@ -1777,3 +1777,116 @@ describe("automation", () => {
     expect(await lane(MASTER_GAIN)).toBeDefined();
   });
 });
+
+// ─── ripple edits ──────────────────────────────────────────────────────────────────────────
+
+describe("insertTime / deleteTime / duplicateRange (ripple.rs)", () => {
+  const BAR = 4 * TICKS_PER_BEAT;
+
+  /** Everything inside `[from, to)` measured from `from`: two stretches of song, compared. */
+  const windowOf = (m: ProjectModel, from: number, to: number) => ({
+    clips: m.clips.filter((c) => c.startTick >= from && c.startTick < to).map((c) => [c.patternId, c.startTick - from, c.lengthTicks, c.offsetTicks]),
+    sections: m.sections.filter((s) => s.startTick >= from && s.startTick < to).map((s) => [s.name, s.startTick - from]),
+    chords: m.chords.filter((c) => c.startTick >= from && c.startTick < to).map((c) => [c.startTick - from, c.lengthTicks, c.pitchClasses]),
+    tempo: (m.tempoPoints ?? []).filter((p) => p.tick >= from && p.tick < to).map((p) => [p.tick - from, p.bpm]),
+  });
+
+  it("moves every kind of thing past the cut, and splits the clip it falls inside", async () => {
+    const { melody } = await ids();
+    await b.apply({ type: "addSection", name: "chorus", startTick: 16 * BAR });
+    await b.apply({ type: "addTempoPoint", tick: 16 * BAR, bpm: 140, ramp: false });
+    await b.apply({ type: "addAutomationPoint", target: { track: [melody, "volume"] } as AutoTarget, tick: 20 * BAR, value: 0.5, curve: "step" });
+    await b.apply({ type: "setLoopRegion", region: [16 * BAR, 20 * BAR] });
+    const before = await model();
+
+    await b.apply({ type: "insertTime", at: 16 * BAR, ticks: 4 * BAR });
+    const m = await model();
+
+    expect(m.songLengthTicks).toBe(before.songLengthTicks + 4 * BAR);
+    // The starter's clips run the whole song, so each is cut in two at bar 17 and the tail
+    // picks its pattern up exactly where the head left it.
+    expect(m.clips.map((c) => [c.startTick, c.lengthTicks, c.offsetTicks])).toEqual([
+      [0, 16 * BAR, 0],
+      [0, 16 * BAR, 0],
+      [20 * BAR, 16 * BAR, 16 * BAR],
+      [20 * BAR, 16 * BAR, 16 * BAR],
+    ]);
+    expect(m.sections[0].startTick).toBe(20 * BAR);
+    expect(m.tempoPoints![0].tick).toBe(20 * BAR);
+    expect(m.automation![0].points[0].tick).toBe(24 * BAR);
+    expect(m.loopRegion).toEqual([20 * BAR, 24 * BAR]);
+    // The progression moved with the music (the clips are asserted above; they start before
+    // the cut, so they are not part of this window either way).
+    expect(windowOf(m, 20 * BAR, m.songLengthTicks).chords).toEqual(windowOf(before, 16 * BAR, before.songLengthTicks).chords);
+
+    // One command, one undo step.
+    expect((await b.undo()).model).toEqual(before);
+  });
+
+  it("cuts a range out and closes the gap, taking what lived inside it", async () => {
+    const { melody } = await ids();
+    await b.apply({ type: "addSection", name: "break", startTick: 16 * BAR });
+    await b.apply({ type: "addTempoPoint", tick: 17 * BAR, bpm: 140, ramp: false });
+    await b.apply({ type: "addAutomationPoint", target: { track: [melody, "volume"] } as AutoTarget, tick: 18 * BAR, value: 0.5, curve: "step" });
+    const before = await model();
+
+    await b.apply({ type: "deleteTime", at: 16 * BAR, ticks: 4 * BAR });
+    const m = await model();
+
+    expect(m.songLengthTicks).toBe(before.songLengthTicks - 4 * BAR);
+    expect(m.clips.map((c) => [c.startTick, c.lengthTicks, c.offsetTicks])).toEqual([
+      [0, 16 * BAR, 0],
+      [0, 16 * BAR, 0],
+      [16 * BAR, 12 * BAR, 20 * BAR],
+      [16 * BAR, 12 * BAR, 20 * BAR],
+    ]);
+    expect(m.sections.map((s) => s.startTick)).toEqual([16 * BAR]);
+    expect(m.tempoPoints ?? []).toEqual([]);
+    expect(m.automation ?? []).toEqual([]);
+    expect(m.chords).toHaveLength(before.chords.length - 4);
+    expect(windowOf(m, 16 * BAR, m.songLengthTicks).chords).toEqual(windowOf(before, 20 * BAR, before.songLengthTicks).chords);
+  });
+
+  it("duplicates a range at the target, marker and all, pushing what was there along", async () => {
+    const { pattern, drumPattern } = await ids();
+    const start = await model();
+    await b.apply({ type: "removeClips", ids: start.clips.map((c) => c.id) });
+    await b.apply({ type: "addClip", patternId: pattern, startTick: 0, lengthTicks: 4 * BAR });
+    await b.apply({ type: "addClip", patternId: drumPattern, startTick: 4 * BAR, lengthTicks: 4 * BAR });
+    await b.apply({ type: "addClip", patternId: pattern, startTick: 8 * BAR, lengthTicks: 4 * BAR });
+    await b.apply({ type: "addSection", name: "verse", startTick: 0 });
+    await b.apply({ type: "addTempoPoint", tick: 2 * BAR, bpm: 100, ramp: false });
+    const before = await model();
+
+    await b.apply({ type: "duplicateRange", from: 0, to: 8 * BAR, at: 8 * BAR });
+    const m = await model();
+
+    expect(m.songLengthTicks).toBe(before.songLengthTicks + 8 * BAR);
+    expect(windowOf(m, 0, 8 * BAR)).toEqual(windowOf(before, 0, 8 * BAR));
+    expect(windowOf(m, 8 * BAR, 16 * BAR)).toEqual(windowOf(before, 0, 8 * BAR));
+    expect(windowOf(m, 16 * BAR, 24 * BAR)).toEqual(windowOf(before, 8 * BAR, 16 * BAR));
+    // Copies are copies: every id in the song is still its own.
+    expect(new Set(m.clips.map((c) => c.id)).size).toBe(m.clips.length);
+    expect(new Set(m.sections.map((s) => s.id)).size).toBe(m.sections.length);
+  });
+
+  it("grows a section the time opens inside instead of splitting it", async () => {
+    await b.apply({ type: "addSection", name: "outro", startTick: 8 * BAR });
+    const outro = (await model()).sections[0];
+    await b.apply({ type: "updateSection", section: { ...outro, lengthTicks: 4 * BAR } });
+    await b.apply({ type: "insertTime", at: 10 * BAR, ticks: 2 * BAR });
+    expect((await model()).sections[0]).toMatchObject({ startTick: 8 * BAR, lengthTicks: 6 * BAR });
+
+    // And one cut away to nothing goes with its music.
+    await b.apply({ type: "deleteTime", at: 8 * BAR, ticks: 6 * BAR });
+    expect((await model()).sections).toEqual([]);
+  });
+
+  it("refuses a ripple that cannot mean anything", async () => {
+    await rejectsAndKeepsModel({ type: "insertTime", at: -1, ticks: BAR }, "invalid value");
+    await rejectsAndKeepsModel({ type: "insertTime", at: 0, ticks: 0 }, "invalid value");
+    await rejectsAndKeepsModel({ type: "deleteTime", at: 0, ticks: -1 }, "invalid value");
+    await rejectsAndKeepsModel({ type: "duplicateRange", from: 4 * BAR, to: 4 * BAR, at: 0 }, "invalid value");
+    await rejectsAndKeepsModel({ type: "duplicateRange", from: -1, to: BAR, at: 0 }, "invalid value");
+  });
+});

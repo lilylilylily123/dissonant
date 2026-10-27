@@ -3,7 +3,8 @@
 
 use crate::audio::{AudioLane, BlockContext};
 use crate::drums::{DrumBank, DrumKit};
-use crate::dsp::{db_to_linear, linear_to_db, pan_gains, DelayLine, Reverb, StereoBiquad};
+use crate::dsp::{db_to_linear, linear_to_db, pan_gains, Limiter, Reverb, StereoBiquad};
+use crate::effects::NativeEffect;
 use crate::engine::NoteShape;
 use crate::synth::PolySynth;
 use dissonant_core::{MasterSettings, SequenceTrack, SynthPatch};
@@ -110,30 +111,47 @@ impl Instrument {
     }
 }
 
+/// What a slot actually runs: a hosted plugin, or one of the stock effects.
+///
+/// Both are built on the app thread and handed over whole, which is why they sit behind one
+/// enum rather than a trait object — the audio thread only ever calls `process` on them, and a
+/// two-armed match is cheaper and clearer than a vtable.
+pub enum InsertUnit {
+    Plugin(Box<PluginAudioUnit>),
+    /// Boxed so the enum stays the size of a pointer: a reverb's tank and a delay's line are
+    /// an order of magnitude larger than a plugin handle, and a chain is an array of these.
+    Native(Box<NativeEffect>),
+}
+
 /// One effect slot in a chain, on a track or on the master.
 ///
 /// `unit` is `None` when the plugin the project names is not installed: the slot keeps its place
 /// so the chain's order (and the name the UI shows) survives a round trip through a machine that
-/// cannot load it.
+/// cannot load it. A native effect is never missing.
 pub struct InsertSlot {
     pub id: Uuid,
     pub enabled: bool,
-    pub unit: Option<Box<PluginAudioUnit>>,
+    pub unit: Option<InsertUnit>,
 }
 
 impl std::fmt::Debug for InsertSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let loaded = match &self.unit {
+            Some(InsertUnit::Plugin(_)) => "plugin",
+            Some(InsertUnit::Native(n)) => n.kind().slug(),
+            None => "none",
+        };
         f.debug_struct("InsertSlot")
             .field("id", &self.id)
             .field("enabled", &self.enabled)
-            .field("loaded", &self.unit.is_some())
+            .field("loaded", &loaded)
             .finish()
     }
 }
 
 impl InsertSlot {
     /// A slot starts enabled; a bypassed one is set so by its own command right after.
-    pub fn new(id: Uuid, unit: Option<Box<PluginAudioUnit>>) -> Self {
+    pub fn new(id: Uuid, unit: Option<InsertUnit>) -> Self {
         InsertSlot {
             id,
             enabled: true,
@@ -143,11 +161,21 @@ impl InsertSlot {
 
     /// The unit this slot would run this block, or `None` when there is nothing to run.
     #[inline]
-    fn active(&mut self) -> Option<&mut PluginAudioUnit> {
+    fn active(&mut self) -> Option<&mut InsertUnit> {
         if self.enabled {
-            self.unit.as_deref_mut()
+            self.unit.as_mut()
         } else {
             None
+        }
+    }
+
+    /// Hand one parameter to whatever is loaded. A plugin takes its own id space; a native
+    /// effect takes [`dissonant_core::effects::NativeParam::id`].
+    pub fn set_param(&mut self, param_id: u32, value: f64) {
+        match &mut self.unit {
+            Some(InsertUnit::Plugin(p)) => p.set_param(param_id, value),
+            Some(InsertUnit::Native(n)) => n.set_param(param_id, value),
+            None => {}
         }
     }
 
@@ -155,7 +183,8 @@ impl InsertSlot {
     /// by definition; a loaded effect is silent once its tail has run out.
     fn is_silent(&self) -> bool {
         match &self.unit {
-            Some(unit) if self.enabled => unit.is_silent(),
+            Some(InsertUnit::Plugin(p)) if self.enabled => p.is_silent(),
+            Some(InsertUnit::Native(n)) if self.enabled => n.is_silent(),
             _ => true,
         }
     }
@@ -163,10 +192,12 @@ impl InsertSlot {
 
 /// Run a chain in place over one block. A bypassed slot, or one whose plugin is missing, is
 /// skipped outright: the signal passes through it untouched and unconverted.
-pub fn run_inserts(chain: &mut [InsertSlot], l: &mut [f32], r: &mut [f32]) {
+pub fn run_inserts(chain: &mut [InsertSlot], l: &mut [f32], r: &mut [f32], beat_seconds: f32) {
     for slot in chain {
-        if let Some(unit) = slot.active() {
-            unit.process_replace(l, r);
+        match slot.active() {
+            Some(InsertUnit::Plugin(unit)) => unit.process_replace(l, r),
+            Some(InsertUnit::Native(unit)) => unit.process(l, r, beat_seconds),
+            None => {}
         }
     }
 }
@@ -349,7 +380,7 @@ impl Channel {
                 self.hold_peak(0.0, frames);
                 return;
             }
-            self.strip(frames, mix_l, mix_r);
+            self.strip(frames, mix_l, mix_r, ctx.beat_seconds);
             return;
         }
 
@@ -368,7 +399,7 @@ impl Channel {
             // us rather than placing a mono source. The channel's tone filter is left for the
             // built-in voices.
             plugin.render_add(&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
-            self.strip(frames, mix_l, mix_r);
+            self.strip(frames, mix_l, mix_r, ctx.beat_seconds);
             return;
         }
         {
@@ -382,7 +413,7 @@ impl Channel {
                 ir[i] = tr;
             }
         }
-        self.strip(frames, mix_l, mix_r);
+        self.strip(frames, mix_l, mix_r, ctx.beat_seconds);
     }
 
     /// Grow the stereo scratch to `frames` and clear it.
@@ -404,7 +435,13 @@ impl Channel {
     /// are zero, so there is one loop and no branch per sample; with automation the parameter
     /// is continuous across sub-block and block boundaries alike, which is the difference
     /// between a fade and a staircase of clicks.
-    fn strip(&mut self, frames: usize, mix_l: &mut [f32], mix_r: &mut [f32]) {
+    fn strip(
+        &mut self,
+        frames: usize,
+        mix_l: &mut [f32],
+        mix_r: &mut [f32],
+        beat_seconds: f32,
+    ) {
         let peak = {
             let (g0, g1) = self.auto_gain.unwrap_or((self.gain, self.gain));
             let ((l0, r0), (l1, r1)) = self.auto_pan.unwrap_or((self.pan, self.pan));
@@ -418,7 +455,7 @@ impl Channel {
             );
             let (mut gain, mut gl, mut gr, mut wet) = (g0, l0, r0, w0);
             let (sl, sr) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
-            run_inserts(&mut self.inserts, sl, sr);
+            run_inserts(&mut self.inserts, sl, sr, beat_seconds);
             let reverb = &mut self.reverb;
             let mut peak = 0.0f32;
             for i in 0..frames {
@@ -469,85 +506,6 @@ fn hold(block_peak: f32, previous: f32, frames: usize, sample_rate: f32) -> f32 
         0.0
     } else {
         held
-    }
-}
-
-/// Lookahead, in seconds: long enough that the gain ramp has settled by the time the peak it was
-/// computed from reaches the output, short enough to stay inaudible against the rest of the chain.
-const LOOKAHEAD_S: f32 = 0.0015;
-
-/// Nominal release of the gain stage. Program dependence comes from the two-stage detector, not
-/// from this number.
-const LIMITER_RELEASE_MS: f32 = 60.0;
-
-/// One-pole coefficient for a time constant of `samples`.
-#[inline]
-fn pole(samples: f32) -> f32 {
-    (-1.0 / samples.max(1.0)).exp()
-}
-
-/// Lookahead peak limiter, stereo-linked.
-///
-/// The gain requirement is computed from the signal as it arrives and applied to the same signal
-/// a lookahead later, so the ramp is already down when the peak gets there: no clipping, and no
-/// step in the gain to click. The ceiling is then guaranteed outright by taking the smoothed gain
-/// against what the outgoing sample actually needs — the smoother converges to within a fraction
-/// of a dB over the lookahead, so that floor binds by a hair on an attack and never otherwise.
-#[derive(Debug, Clone)]
-struct Limiter {
-    left: DelayLine,
-    right: DelayLine,
-    /// Lookahead in samples, as a delay read distance.
-    delay: f32,
-    /// Instant-attack gain requirement, released toward unity.
-    hold: f32,
-    /// `hold` smoothed over the lookahead; what actually multiplies the signal.
-    gain: f32,
-    release_coef: f32,
-    smooth_coef: f32,
-}
-
-impl Limiter {
-    fn new(sample_rate: f32) -> Self {
-        let delay = (LOOKAHEAD_S * sample_rate).round().max(1.0);
-        Limiter {
-            left: DelayLine::new(delay as usize + 4),
-            right: DelayLine::new(delay as usize + 4),
-            delay,
-            hold: 1.0,
-            gain: 1.0,
-            // A fifth of the lookahead leaves the ramp within ~0.7% of its target by the time
-            // the peak lands, which is the error the output-side floor then absorbs.
-            smooth_coef: pole(delay / 5.0),
-            release_coef: pole(LIMITER_RELEASE_MS * 0.001 * sample_rate),
-        }
-    }
-
-    /// Samples between a sample going in and coming out: the lookahead, exactly.
-    fn latency(&self) -> usize {
-        self.delay as usize
-    }
-
-    #[inline]
-    fn process(&mut self, a: f32, b: f32, ceiling: f32) -> (f32, f32) {
-        let peak = a.abs().max(b.abs());
-        let req = if peak > ceiling { ceiling / peak } else { 1.0 };
-        // Smooth-decoupled detector in the gain domain: the first stage drops to the requirement
-        // at once and creeps back toward unity with the release time, so a run of transients
-        // releases as one gesture instead of once per hit.
-        self.hold = req.min(self.release_coef * self.hold + (1.0 - self.release_coef) * req);
-        self.gain = self.smooth_coef * self.gain + (1.0 - self.smooth_coef) * self.hold;
-
-        let (da, db) = (self.left.read(self.delay), self.right.read(self.delay));
-        self.left.write(a);
-        self.right.write(b);
-        let out_peak = da.abs().max(db.abs());
-        let g = if out_peak * self.gain > ceiling {
-            ceiling / out_peak
-        } else {
-            self.gain
-        };
-        (da * g, db * g)
     }
 }
 

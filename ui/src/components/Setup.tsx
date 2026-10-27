@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { barTicks, beatsPerBar, setStoredZoom, storedZoom, useStore } from "../store";
 import { chordName, diatonicChords, keyName, noteName, NOTE_NAMES, startersFor, progression } from "../theory";
-import { DEFAULT_SWING_GRID_TICKS, keyAt, replaceChordWindow, songLength, tempoMap, TICKS_PER_BEAT, TIME_SIGNATURES, uuid, type ChordEvent, type ScaleType, type Section } from "../types";
+import { DEFAULT_SWING_GRID_TICKS, keyAt, replaceChordWindow, sectionSpan, songLength, tempoMap, TICKS_PER_BEAT, TIME_SIGNATURES, uuid, type ChordEvent, type ScaleType, type Section } from "../types";
 import {
   barsForSeconds,
   barsText,
@@ -13,7 +13,10 @@ import {
   nextChords,
   parseMinSec,
   placeChord,
+  sectionDuplicate,
+  sectionSwap,
   tileStarter,
+  type SectionEdits,
 } from "../songSetup";
 import { ChordBuilder, ChordLane } from "./ChordLane";
 import { SECTION_COLORS, SectionEditor } from "./SectionEditor";
@@ -494,7 +497,8 @@ function SectionStrip({
   onSelect: (id: string | null) => void;
   colorOf: (s: Section) => string;
 }) {
-  const sections = useStore((s) => s.snapshot!.model.sections);
+  const model = useStore((s) => s.snapshot!.model);
+  const sections = model.sections;
   const dispatch = useStore((s) => s.dispatch);
   const [preview, setPreview] = useState<Section | null>(null);
   const drag = useRef<{ section: Section; x0: number; moved: boolean } | null>(null);
@@ -517,9 +521,10 @@ function SectionStrip({
         title="double-click to mark a section here"
       >
         {shown.length === 0 && <span className="st-empty">no sections yet. double-click to mark a verse, a chorus, a break</span>}
-        {shown.map((sec, i) => {
-          const next = shown[i + 1];
-          const end = Math.min(songTicks, next ? next.startTick : songTicks);
+        {shown.map((sec) => {
+          // The band is the section's real extent: it owns that music, and a marker that
+          // claimed more would lie about what moving it moves.
+          const end = Math.min(songTicks, sectionSpan({ ...model, sections: shown }, sec)[1]);
           const color = colorOf(sec);
           const k = sec.key?.rootPitchClass != null ? `${noteName(sec.key.rootPitchClass)} ${sec.key.scale === "major" ? "maj" : "min"}` : null;
           return (
@@ -570,14 +575,14 @@ function SectionStrip({
 
 /** Behind the chords: section colors, the bar grid, and the picked range. */
 function Underlay({ beatW, songTicks, barTick, sel, colorOf }: { beatW: number; songTicks: number; barTick: number; sel: [number, number] | null; colorOf: (s: Section) => string }) {
-  const sections = useStore((s) => s.snapshot!.model.sections);
+  const model = useStore((s) => s.snapshot!.model);
   const pxPerTick = beatW / TICKS_PER_BEAT;
   const barW = barTick * pxPerTick;
   const bars = Math.ceil(songTicks / barTick);
   return (
     <div className="st-underlay" aria-hidden>
-      {sections.map((sec, i) => {
-        const end = Math.min(songTicks, sections[i + 1]?.startTick ?? songTicks);
+      {model.sections.map((sec) => {
+        const end = Math.min(songTicks, sectionSpan(model, sec)[1]);
         return <div key={sec.id} className="band" style={{ left: sec.startTick * pxPerTick, width: Math.max(0, (end - sec.startTick) * pxPerTick), background: `${colorOf(sec)}12` }} />;
       })}
       {beatW >= 10 &&
@@ -833,6 +838,22 @@ function SectionPanel({
   // New sections go at the picked bars, else at the playhead's bar.
   const at = Math.min(songTicks - barTick, Math.max(0, addAt ?? Math.floor(playhead / barTick) * barTick));
   const taken = sections.some((x) => x.startTick === at);
+  const spans = sections.map((x) => sectionSpan(model, x));
+
+  /**
+   * Duplicating or reordering a section moves the music in it, which is a copy and then a cut.
+   * Both go in transient, so the pair is one undo step — the same trick a knob drag uses — and
+   * the section that ends up at `landsAt` is selected, since its copy carries a new id.
+   */
+  const run = async (edits: SectionEdits | null, label: string, landsAt: number) => {
+    if (!edits) return;
+    const st = useStore.getState();
+    await st.dispatch({ type: "duplicateRange", ...edits.copy }, true, label);
+    if (edits.cut) await st.dispatch({ type: "deleteTime", at: edits.cut.at, ticks: edits.cut.ticks }, true, label);
+    await st.commitGesture();
+    const landed = useStore.getState().snapshot!.model.sections.find((y) => y.startTick === landsAt);
+    onSelect(landed?.id ?? null);
+  };
 
   return (
     <div className="st-panel">
@@ -849,14 +870,42 @@ function SectionPanel({
       ) : (
         <div className="st-seclist">
           {sections.map((x, i) => {
-            const end = Math.min(songTicks, sections[i + 1]?.startTick ?? songTicks);
+            const [start, end] = spans[i];
+            const up = sectionSwap(spans, i, -1);
+            const down = sectionSwap(spans, i, 1);
             return (
               <div key={x.id} className={`sr${section?.id === x.id ? " sel" : ""}`} onClick={() => onSelect(section?.id === x.id ? null : x.id)}>
                 <span className="sw" style={{ background: colorOf(x) }} />
                 <span className="nm">{x.name}</span>
-                <span className="mono">bar {Math.floor(x.startTick / barTick) + 1}</span>
-                <span className="mono dim">{lengthText(Math.max(0, end - x.startTick), barTick)}</span>
+                <span className="mono">bar {Math.floor(start / barTick) + 1}</span>
+                <span className="mono dim">{lengthText(Math.max(0, end - start), barTick)}</span>
                 <span className="mono key">{x.key?.rootPitchClass != null ? keyName(x.key.rootPitchClass, x.key.scale) : "song key"}</span>
+                <span className="acts" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    className="ico"
+                    disabled={!up}
+                    onClick={() => void run(up, `move ${x.name} earlier`, spans[i - 1]?.[0] ?? start)}
+                    title="swap with the section before it, music and all"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    className="ico"
+                    disabled={!down}
+                    onClick={() => void run(down, `move ${x.name} later`, spans[i + 1] ? start + (spans[i + 1][1] - spans[i + 1][0]) : start)}
+                    title="swap with the section after it, music and all"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    className="ico"
+                    disabled={end <= start}
+                    onClick={() => void run(sectionDuplicate(spans[i]), `duplicate ${x.name}`, end)}
+                    title="drop a copy of this section, and everything in it, right after itself"
+                  >
+                    ⧉
+                  </button>
+                </span>
               </div>
             );
           })}

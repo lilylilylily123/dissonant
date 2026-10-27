@@ -45,6 +45,7 @@ import {
   ticksToBeats,
 } from "./types";
 import { applyUiScale } from "./uiScale";
+import { nativeEffect } from "./effects";
 import { FACTORY_SOUNDS, type Sound } from "./sound";
 import type { ArrSnap } from "./clipEditing";
 
@@ -1531,7 +1532,8 @@ export const useStore = create<State>((set, get) => {
     // "undo bypass Airwindows Consolidated" rather than "undo bypass insert".
     async addInsert(target, uid, index = null) {
       const b = await getBridge();
-      const name = get().plugins.find((p) => p.uid === uid)?.name ?? "effect";
+      const name =
+        nativeEffect(uid)?.name ?? get().plugins.find((p) => p.uid === uid)?.name ?? "effect";
       try {
         applySnapshot(await b.addInsert(target, uid, index, `add ${name}`));
       } catch (e) {

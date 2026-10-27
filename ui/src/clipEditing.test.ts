@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipsInBox, dropAt, duplicateClips, groupMoveDelta, moveClips, pasteClips, snapGrid, snapTo, toggleId, toggleMuted, trimClip } from "./clipEditing";
+import { clipsInBox, deletePieces, deletePoint, dropAt, duplicateClips, groupMoveDelta, insertPieces, insertPoint, moveClips, pasteClips, snapGrid, snapTo, toggleId, toggleMuted, trimClip, windowPiece } from "./clipEditing";
 import type { Clip } from "./types";
 import { TICKS_PER_BEAT as B } from "./types";
 
@@ -137,5 +137,47 @@ describe("clipboard", () => {
   it("duplicates nothing past the song end", () => {
     expect(duplicateClips([c("a", 60, 4)], 64 * B)).toEqual([]);
     expect(duplicateClips([], 64 * B)).toEqual([]);
+  });
+});
+
+describe("ripple", () => {
+  const piece = (start: number, skip: number, len: number) => ({ start: start * B, skip: skip * B, len: len * B });
+
+  it("moves a point only when the time opens at or before it", () => {
+    expect(insertPoint(4 * B, 8 * B, 4 * B)).toBe(4 * B);
+    expect(insertPoint(8 * B, 8 * B, 4 * B)).toBe(12 * B);
+    expect(insertPoint(20 * B, 8 * B, 4 * B)).toBe(24 * B);
+  });
+
+  it("collapses a point inside a cut onto the cut's start", () => {
+    expect(deletePoint(4 * B, 8 * B, 4 * B)).toBe(4 * B);
+    expect(deletePoint(8 * B, 8 * B, 4 * B)).toBe(8 * B);
+    expect(deletePoint(10 * B, 8 * B, 4 * B)).toBe(8 * B);
+    expect(deletePoint(12 * B, 8 * B, 4 * B)).toBe(8 * B);
+    expect(deletePoint(20 * B, 8 * B, 4 * B)).toBe(16 * B);
+  });
+
+  it("leaves material before the cut alone and moves material after it whole", () => {
+    expect(insertPieces(0, 8 * B, 8 * B, 4 * B)).toEqual([piece(0, 0, 8)]);
+    expect(insertPieces(8 * B, 8 * B, 8 * B, 4 * B)).toEqual([piece(12, 0, 8)]);
+    expect(deletePieces(0, 8 * B, 8 * B, 4 * B)).toEqual([piece(0, 0, 8)]);
+    expect(deletePieces(16 * B, 8 * B, 8 * B, 4 * B)).toEqual([piece(12, 0, 8)]);
+  });
+
+  it("splits what the cut falls inside, so both halves play what they played", () => {
+    expect(insertPieces(0, 16 * B, 4 * B, 4 * B)).toEqual([piece(0, 0, 4), piece(8, 4, 12)]);
+    expect(deletePieces(0, 16 * B, 4 * B, 4 * B)).toEqual([piece(0, 0, 4), piece(4, 8, 8)]);
+  });
+
+  it("drops material a delete swallows whole", () => {
+    expect(deletePieces(4 * B, 4 * B, 4 * B, 8 * B)).toEqual([]);
+    expect(deletePieces(4 * B, 0, 0, 8 * B)).toEqual([]);
+    expect(insertPieces(4 * B, 0, 0, 8 * B)).toEqual([]);
+  });
+
+  it("takes only the part of a span that overlaps the window it copies", () => {
+    expect(windowPiece(0, 16 * B, 4 * B, 8 * B, 32 * B)).toEqual(piece(32, 4, 4));
+    expect(windowPiece(4 * B, 4 * B, 4 * B, 8 * B, 32 * B)).toEqual(piece(32, 0, 4));
+    expect(windowPiece(0, 4 * B, 4 * B, 8 * B, 32 * B)).toBeNull();
   });
 });

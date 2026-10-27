@@ -12,10 +12,8 @@
 use dissonant_core::{InsertTarget, NoteEvent, ProjectModel, Sequence, TICKS_PER_BEAT};
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
 use dissonant_engine::render::{render_to_buffer, RenderOptions, RenderPlugins};
-use dissonant_engine::InsertSlot;
-use dissonant_plugins::{
-    HostedPlugin, PluginAudioUnit, PluginDescriptor, PluginFormat, PluginKind,
-};
+use dissonant_engine::{InsertSlot, InsertUnit};
+use dissonant_plugins::{HostedPlugin, PluginDescriptor, PluginFormat, PluginKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -84,10 +82,10 @@ fn trim() -> PluginDescriptor {
 /// Loads an effect the way `src-tauri` does: the plugin handle stays on the app side (here, the
 /// test's own stack) and only the audio unit crosses into the engine. The handle must outlive
 /// the unit, which is why every caller holds on to what this returns.
-fn open(desc: &PluginDescriptor) -> (HostedPlugin, Box<PluginAudioUnit>) {
+fn open(desc: &PluginDescriptor) -> (HostedPlugin, InsertUnit) {
     let (hosted, unit) =
         HostedPlugin::open(desc, SR as f64, MAX_FRAMES).expect("open fixture effect");
-    (hosted, Box::new(unit))
+    (hosted, InsertUnit::Plugin(Box::new(unit)))
 }
 
 /// Model with one track holding one long note, so the chain has something to chew on.

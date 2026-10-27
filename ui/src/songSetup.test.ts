@@ -16,6 +16,8 @@ import {
   placeChord,
   QUALITIES,
   rootOfName,
+  sectionDuplicate,
+  sectionSwap,
   tileStarter,
 } from "./songSetup";
 import { tempoMap, TICKS_PER_BEAT as B, type ChordEvent, type Section } from "./types";
@@ -182,5 +184,36 @@ describe("song length", () => {
     expect(lengthText(8 * B, 4 * B)).toBe("2 bars");
     expect(lengthText(2 * B, 4 * B)).toBe("2 beats");
     expect(lengthText(B, 4 * B)).toBe("1 beat");
+  });
+});
+
+describe("moving sections", () => {
+  // Three four-bar sections back to back, in ticks.
+  const spans: [number, number][] = [
+    [0, 16 * B],
+    [16 * B, 32 * B],
+    [32 * B, 48 * B],
+  ];
+
+  it("swaps two neighbours by copying the first past the second, then cutting it", () => {
+    expect(sectionSwap(spans, 0, 1)).toEqual({
+      copy: { from: 0, to: 16 * B, at: 32 * B },
+      cut: { at: 0, ticks: 16 * B },
+    });
+    // Moving the second one earlier is the same move, phrased from the other side.
+    expect(sectionSwap(spans, 1, -1)).toEqual(sectionSwap(spans, 0, 1));
+  });
+
+  it("has nothing to swap at the ends", () => {
+    expect(sectionSwap(spans, 0, -1)).toBeNull();
+    expect(sectionSwap(spans, 2, 1)).toBeNull();
+    expect(sectionSwap([], 0, 1)).toBeNull();
+    // A section that owns no time cannot take any with it.
+    expect(sectionSwap([[0, 0], [0, 16 * B]], 0, 1)).toBeNull();
+  });
+
+  it("duplicates a section right after itself, with no cut", () => {
+    expect(sectionDuplicate(spans[1])).toEqual({ copy: { from: 16 * B, to: 32 * B, at: 32 * B }, cut: null });
+    expect(sectionDuplicate([8 * B, 8 * B])).toBeNull();
   });
 });

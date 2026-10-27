@@ -439,11 +439,21 @@ export interface Clip {
   muted: boolean;
 }
 
-/** A song marker, optionally with its own key (modulation). */
+/**
+ * A song marker, optionally with its own key (modulation), and with an extent: see
+ * {@link sectionSpan}. Without one a marker would only ever be a label hung in front of music
+ * it does not own, and moving or copying "the chorus" could not move the chorus.
+ */
 export interface Section {
   id: string;
   name: string;
   startTick: number;
+  /**
+   * How far the section reaches. Absent (or 0) means "up to the next section, then the song's
+   * end" — the implicit extent a marker dropped on the ruler still gets, and the only thing an
+   * older project can mean. The backend skips it when implicit, so it really is absent.
+   */
+  lengthTicks?: number;
   key: KeyState | null;
   color: string | null;
 }
@@ -625,11 +635,35 @@ export function replaceChordWindow(chords: ChordEvent[], offset: number, length:
   return out.filter((c) => c.lengthTicks > 0).sort((a, b) => a.startTick - b.startTick);
 }
 
+/**
+ * Where a section stops, or null when nothing bounds it: with no explicit extent and no later
+ * marker, the last section names the music to the end of time. Mirrors `section_end`.
+ */
+function sectionEnd(sections: Section[], section: Section): number | null {
+  if (section.lengthTicks && section.lengthTicks > 0) return section.startTick + section.lengthTicks;
+  let next: number | null = null;
+  for (const s of sections)
+    if (s.startTick > section.startTick && (next === null || s.startTick < next)) next = s.startTick;
+  return next;
+}
+
+/**
+ * A section's extent in song ticks, `[start, end)`: its own `lengthTicks`, else up to the next
+ * marker, else the rest of the song. This is the music the section owns — what the arrangement
+ * draws as its band, and what moving or copying it moves. Mirrors `ProjectModel::section_span`.
+ */
+export function sectionSpan(m: ProjectModel, section: Section): [number, number] {
+  const end = sectionEnd(m.sections, section);
+  return [section.startTick, Math.max(section.startTick, end ?? songLength(m))];
+}
+
+/** The section whose extent contains `tick` (the last one, where two overlap). */
 export function sectionAt(m: ProjectModel, tick: number): Section | null {
   let best: Section | null = null;
-  for (const s of m.sections)
-    if (s.startTick <= tick && (!best || s.startTick >= best.startTick))
-      best = s;
+  for (const s of m.sections) {
+    const end = sectionEnd(m.sections, s);
+    if (s.startTick <= tick && (end === null || tick < end) && (!best || s.startTick >= best.startTick)) best = s;
+  }
   return best;
 }
 
@@ -708,9 +742,10 @@ export interface TrackPlugin {
 export const MAX_INSERTS = 8;
 
 /**
- * One effect slot in a chain, on a track or on the master. `uid` names a scanned plugin, `name`
- * is cached so an uninstalled effect can still be listed, and `state` is the effect's own
- * base64 blob — absent until it has been dialled. Mirrors `dissonant_core::Insert`.
+ * One effect slot in a chain, on a track or on the master. `uid` names a scanned plugin or —
+ * with the `native:` prefix — one of the stock effects in `effects.ts`; `name` is cached so an
+ * uninstalled effect can still be listed; `state` is a plugin's own base64 blob and `params` a
+ * native effect's knobs, keyed by parameter id. Mirrors `dissonant_core::Insert`.
  */
 export interface Insert {
   id: string;
@@ -718,6 +753,8 @@ export interface Insert {
   name: string;
   enabled: boolean;
   state?: string | null;
+  /** Absent ids are at their defaults, so a slot nobody has touched carries no map at all. */
+  params?: Record<string, number>;
 }
 
 /** Which chain an insert command addresses: one track's, or the master's. */
@@ -922,6 +959,13 @@ export type Command =
   | { type: "moveInsert"; target: InsertTarget; insertId: string; toIndex: number }
   | { type: "setInsertEnabled"; target: InsertTarget; insertId: string; on: boolean }
   | { type: "setInsertState"; target: InsertTarget; insertId: string; state: string }
+  | {
+      type: "setInsertParam";
+      target: InsertTarget;
+      insertId: string;
+      paramId: number;
+      value: number;
+    }
   | { type: "addPattern"; trackId: string }
   | { type: "duplicatePattern"; id: string }
   | { type: "deletePattern"; id: string }
@@ -967,7 +1011,17 @@ export type Command =
       clip: AudioClip;
     }
   | { type: "updateAudioClip"; clip: AudioClip }
-  | { type: "removeAudioClip"; id: string };
+  | { type: "removeAudioClip"; id: string }
+  /**
+   * Open `ticks` of empty time at song tick `at`: every clip, take, marker, tempo point, chord
+   * and automation breakpoint from `at` on moves that much later, in one undo step, and the
+   * song grows to match. A clip the cut falls inside is split, never stretched.
+   */
+  | { type: "insertTime"; at: number; ticks: number }
+  /** Cut `[at, at + ticks)` out of the song and close the gap, in one undo step. */
+  | { type: "deleteTime"; at: number; ticks: number }
+  /** Copy everything in `[from, to)` to `at`, pushing what was there along. */
+  | { type: "duplicateRange"; from: number; to: number; at: number };
 
 export interface PlayheadEvent {
   tick: number;

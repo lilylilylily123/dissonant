@@ -113,3 +113,64 @@ export function duplicateClips(group: Clip[], songEnd: number): { src: Clip; sta
   const span = Math.max(...group.map((c) => c.startTick + c.lengthTicks)) - first;
   return group.map((src) => ({ src, startTick: src.startTick + span })).filter((x) => x.startTick < songEnd);
 }
+
+// ─── Ripple: opening and cutting time ──────────────────────────────────────────────────────
+// These mirror `crates/dissonant-core/src/ripple.rs` exactly; the backend and the mock bridge
+// both work from them, and the ruler menu uses them to say what an edit will do before it does.
+
+/** A surviving piece of a span an edit cut: where it lands, how far into the original it
+ * begins (what it has to skip to keep playing the same material), and how long it is. */
+export interface Piece {
+  start: number;
+  skip: number;
+  len: number;
+}
+
+/** Where a point lands when `ticks` of empty time open at `at`. A point *on* `at` moves: the
+ * material starting there is what the new time is opened in front of. */
+export function insertPoint(tick: number, at: number, ticks: number): number {
+  return tick >= at ? tick + ticks : tick;
+}
+
+/** Where a point lands when `[at, at + ticks)` is cut out: inside the cut it collapses onto
+ * `at`, which is both where the gap closes and where an end reaching into it now stops. */
+export function deletePoint(tick: number, at: number, ticks: number): number {
+  if (tick < at) return tick;
+  return tick < at + ticks ? at : tick - ticks;
+}
+
+/** The pieces of material `[start, start + len)` after `ticks` open at `at`: at most two, and
+ * together they still play every tick the original did. */
+export function insertPieces(start: number, len: number, at: number, ticks: number): Piece[] {
+  if (len <= 0) return [];
+  const end = start + len;
+  if (end <= at) return [{ start, skip: 0, len }];
+  if (start >= at) return [{ start: start + ticks, skip: 0, len }];
+  return [
+    { start, skip: 0, len: at - start },
+    { start: at + ticks, skip: at - start, len: end - at },
+  ];
+}
+
+/** The pieces of `[start, start + len)` after `[at, at + ticks)` is cut out: what was inside
+ * the cut is gone and what followed closes up against what came before. */
+export function deletePieces(start: number, len: number, at: number, ticks: number): Piece[] {
+  if (len <= 0) return [];
+  const end = start + len;
+  const cutEnd = at + ticks;
+  const out: Piece[] = [];
+  if (start < at) out.push({ start, skip: 0, len: Math.min(at, end) - start });
+  if (end > cutEnd) {
+    const s = Math.max(start, cutEnd);
+    out.push({ start: s - ticks, skip: s - start, len: end - s });
+  }
+  return out;
+}
+
+/** The part of `[start, start + len)` inside the window `[from, to)`, moved so the window's
+ * own start lands on `at`. Null when the material misses the window. */
+export function windowPiece(start: number, len: number, from: number, to: number, at: number): Piece | null {
+  const s = Math.max(start, from);
+  const e = Math.min(start + len, to);
+  return e > s ? { start: at + (s - from), skip: s - start, len: e - s } : null;
+}

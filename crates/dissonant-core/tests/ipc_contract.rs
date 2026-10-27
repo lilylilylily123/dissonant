@@ -295,7 +295,8 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
             uid: uid.into(),
             name: "Pro-Q".into(),
             enabled: false,
-            state: None
+            state: None,
+            params: Default::default()
         })
         .unwrap(),
         json!({"id": insert_id, "uid": uid, "name": "Pro-Q", "enabled": false})

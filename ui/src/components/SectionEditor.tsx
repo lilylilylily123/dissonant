@@ -7,15 +7,18 @@ import { NOTE_NAMES } from "../theory";
 export const SECTION_COLORS = ["#9a9aa4", "#ff9d2a", "#ff3b30", "#3dc8ff", "#b48cff", "#3dffb0"];
 
 /**
- * One section: name, start bar, key (or inherit the song key), color, delete. A popover by
- * default; `docked` draws it as a plain panel (SETUP's sections column).
+ * One section: name, start bar, how many bars it owns, key (or inherit the song key), color,
+ * delete. A popover by default; `docked` draws it as a plain panel (SETUP's sections column).
  */
 export function SectionEditor({ section, color, onClose, docked = false }: { section: Section; color: string; onClose: () => void; docked?: boolean }) {
   const dispatch = useStore((s) => s.dispatch);
   const barTick = useStore(barTicks);
   const [name, setName] = useState(section.name);
   const [barText, setBarText] = useState<string | null>(null);
+  const [lenText, setLenText] = useState<string | null>(null);
   const bar = Math.floor(section.startTick / barTick) + 1;
+  // 0 bars is the implicit extent: the section runs to the next marker, then to the song's end.
+  const bars = Math.round((section.lengthTicks ?? 0) / barTick);
   const update = (patch: Partial<Section>) => void dispatch({ type: "updateSection", section: { ...section, ...patch } });
   const root = section.key?.rootPitchClass ?? null;
   const scale: ScaleType = section.key?.scale ?? "major";
@@ -23,6 +26,12 @@ export function SectionEditor({ section, color, onClose, docked = false }: { sec
     const v = parseInt(barText ?? "", 10);
     if (Number.isFinite(v) && v >= 1 && v !== bar) update({ startTick: (v - 1) * barTick });
     setBarText(null);
+  };
+  const commitLength = () => {
+    const text = (lenText ?? "").trim();
+    const v = text === "" || text === "auto" ? 0 : parseInt(text, 10);
+    if (Number.isFinite(v) && v >= 0 && v !== bars) update({ lengthTicks: v * barTick });
+    setLenText(null);
   };
   return (
     <div
@@ -71,6 +80,32 @@ export function SectionEditor({ section, color, onClose, docked = false }: { sec
           style={{ width: 48, textAlign: "right" }}
           aria-label="start bar"
         />
+      </div>
+      <div className="field">
+        <span className="flabel" title="how much music this section owns: what moving or duplicating it moves. 'auto' runs to the next section.">
+          lasts
+        </span>
+        <div className="row" style={{ gap: 4 }}>
+          <input
+            type="text"
+            className="mono"
+            value={lenText ?? (bars > 0 ? String(bars) : "auto")}
+            onChange={(e) => setLenText(e.target.value)}
+            onBlur={commitLength}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") setLenText(null);
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                e.preventDefault();
+                const v = Math.max(0, bars + (e.key === "ArrowUp" ? 1 : -1));
+                if (v !== bars) update({ lengthTicks: v * barTick });
+              }
+            }}
+            style={{ width: 48, textAlign: "right" }}
+            aria-label="section length in bars"
+          />
+          <span className="flabel">bars</span>
+        </div>
       </div>
       <div className="field">
         <span className="flabel">key</span>

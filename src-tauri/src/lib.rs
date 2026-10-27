@@ -10,13 +10,13 @@ pub mod settings;
 
 use dissonant_catalog::{install, CatalogEntry, InstallEvent, Platform};
 use dissonant_core::{
-    bar_ticks, midi_file, Command, Document, Insert, InsertTarget, MasterSettings, MidiScope, NoteEvent, ProjectModel,
-    Sequence, SongPattern, TrackPlugin, TICKS_PER_BEAT,
+    bar_ticks, midi_file, Command, Document, Insert, InsertTarget, MasterSettings, MidiScope, NativeKind, NoteEvent,
+    ProjectModel, Sequence, SongPattern, TrackPlugin, TICKS_PER_BEAT,
 };
 use dissonant_engine::audio::{AudioBuffer, AudioPool};
 use dissonant_engine::{
     default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, AudioInput, EngineCommand, EngineIo,
-    InputDeviceInfo, InsertSlot, RenderOptions, RenderPlugins,
+    InputDeviceInfo, InsertSlot, InsertUnit, NativeEffect, RenderOptions, RenderPlugins,
 };
 use dissonant_plugins::{ParamInfo, PluginDescriptor, PluginFormat};
 use plugins::PluginHostThread;
@@ -760,9 +760,25 @@ impl AppState {
                 }
                 self.send(EngineCommand::SetInsertEnabled { target, id: insert.id, on: insert.enabled });
                 if restore_state {
-                    if let Some(state) = insert.state.as_deref().and_then(b64_decode) {
-                        if let Err(e) = self.plugin_host.load_state(insert.id, state) {
-                            log::warn!("could not restore insert state for {}: {e}", insert.uid);
+                    // Undo, redo and opening a project all land here. A native effect's values
+                    // are the document's own, so they are pushed straight at the engine; a
+                    // plugin's are an opaque blob only it can read.
+                    match insert.native_kind() {
+                        Some(kind) => {
+                            for param in kind.params() {
+                                self.send(EngineCommand::SetInsertParam {
+                                    id: insert.id,
+                                    param_id: param.id,
+                                    value: kind.value_of(&insert.params, param.id),
+                                });
+                            }
+                        }
+                        None => {
+                            if let Some(state) = insert.state.as_deref().and_then(b64_decode) {
+                                if let Err(e) = self.plugin_host.load_state(insert.id, state) {
+                                    log::warn!("could not restore insert state for {}: {e}", insert.uid);
+                                }
+                            }
                         }
                     }
                 }
@@ -796,16 +812,24 @@ impl AppState {
         }
     }
 
-    /// Load one insert's plugin, or report why it could not be loaded and leave the slot empty.
+    /// Build one insert's unit: a stock effect, or a hosted plugin — or report why the plugin
+    /// could not be loaded and leave the slot empty.
     ///
     /// A project naming an effect this machine does not have keeps the slot and its name, the
     /// same bargain a missing instrument gets: losing the reference would be worse than playing
-    /// the chain without it.
-    fn open_insert(&self, insert: &Insert, sample_rate: f64) -> Option<Box<dissonant_plugins::PluginAudioUnit>> {
+    /// the chain without it. A native effect is never in that position.
+    fn open_insert(&self, insert: &Insert, sample_rate: f64) -> Option<InsertUnit> {
+        if let Some(kind) = insert.native_kind() {
+            // Built here, on the app thread, with its stored values already dialled in: the
+            // engine is handed a finished effect exactly as it is handed a loaded plugin.
+            let effect = NativeEffect::with_params(kind, sample_rate as f32, &insert.params);
+            self.loaded_plugin_uids.lock().unwrap().insert(insert.id, insert.uid.clone());
+            return Some(InsertUnit::Native(Box::new(effect)));
+        }
         match self.plugin_host.open(insert.id, &insert.uid, sample_rate) {
             Ok((unit, _)) => {
                 self.loaded_plugin_uids.lock().unwrap().insert(insert.id, insert.uid.clone());
-                Some(Box::new(unit))
+                Some(InsertUnit::Plugin(Box::new(unit)))
             }
             Err(e) => {
                 log::warn!("could not load insert {} ({}): {e}", insert.name, insert.uid);
@@ -966,6 +990,7 @@ fn apply(state: State<'_, AppState>, command: Command, transient: Option<bool>, 
             | Command::RemoveInsert { .. }
             | Command::MoveInsert { .. }
             | Command::SetInsertEnabled { .. }
+            | Command::SetInsertParam { .. }
             | Command::DeleteTrack { .. }
     );
     state
@@ -1672,15 +1697,24 @@ pub fn open_render_plugins(host: &PluginHostThread, model: &ProjectModel, sample
         }
         let mut chain = Vec::with_capacity(inserts.len());
         for insert in inserts {
-            let unit = match open_for_render(host, insert.id, &insert.uid, insert.state.as_deref(), sample_rate) {
-                Some((id, unit)) => {
-                    rig.opened.push(id);
-                    Some(Box::new(unit))
-                }
-                None => {
-                    rig.missing.push(insert.name.clone());
-                    None
-                }
+            // The same effect, built the same way, from the same stored values: an offline
+            // bounce of a native chain is the render of what plays, not an approximation.
+            let unit = match insert.native_kind() {
+                Some(kind) => Some(InsertUnit::Native(Box::new(NativeEffect::with_params(
+                    kind,
+                    sample_rate as f32,
+                    &insert.params,
+                )))),
+                None => match open_for_render(host, insert.id, &insert.uid, insert.state.as_deref(), sample_rate) {
+                    Some((id, unit)) => {
+                        rig.opened.push(id);
+                        Some(InsertUnit::Plugin(Box::new(unit)))
+                    }
+                    None => {
+                        rig.missing.push(insert.name.clone());
+                        None
+                    }
+                },
             };
             // An empty slot still takes its place, so everything after it keeps its index.
             let mut slot = InsertSlot::new(insert.id, unit);
@@ -2459,13 +2493,17 @@ fn add_insert(
     index: Option<usize>,
     label: Option<String>,
 ) -> Result<Snapshot, String> {
-    let name = state
-        .plugin_host
-        .scan(false)
-        .into_iter()
-        .find(|d| d.uid == uid)
-        .map(|d| d.name)
-        .ok_or("no such plugin")?;
+    // A stock effect names itself; only a plugin has to be found in the scan.
+    let name = match NativeKind::from_uid(&uid) {
+        Some(kind) => kind.display_name().to_string(),
+        None => state
+            .plugin_host
+            .scan(false)
+            .into_iter()
+            .find(|d| d.uid == uid)
+            .map(|d| d.name)
+            .ok_or("no such plugin")?,
+    };
     state
         .doc
         .lock()
@@ -2531,14 +2569,42 @@ fn set_insert_enabled(
 
 /// One insert's parameters. An id nothing is loaded under answers with an empty list rather than
 /// an error: the UI fetches these as the selection moves, and a fetch can land after a removal.
+///
+/// A native effect answers from the catalogue and the document, in the same shape a plugin
+/// answers in, so one column of knobs draws either kind.
 #[tauri::command]
 fn insert_params(state: State<'_, AppState>, insert_id: Uuid) -> Vec<ParamInfo> {
-    state.plugin_host.params(insert_id)
+    let native = {
+        let doc = state.doc.lock().unwrap();
+        insert_target_of(doc.model(), insert_id)
+            .and_then(|t| insert_in(doc.model(), t, insert_id))
+            .and_then(|i| i.native_kind().map(|k| (k, i.params.clone())))
+    };
+    match native {
+        Some((kind, params)) => kind
+            .params()
+            .iter()
+            .map(|p| ParamInfo {
+                id: p.id,
+                name: p.name.to_string(),
+                module: p.module.to_string(),
+                min: p.min,
+                max: p.max,
+                default: p.default,
+                value: kind.value_of(&params, p.id),
+                is_stepped: p.stepped,
+            })
+            .collect(),
+        None => state.plugin_host.params(insert_id),
+    }
 }
 
 /// A parameter move on an insert, with the same bargain as `set_plugin_param`: while the knob is
-/// being dragged (`commit` false) it only reaches the audio thread, and on release the plugin's
-/// state is read once and recorded as a single undo step.
+/// being dragged (`commit` false) it only reaches the audio thread, and on release the value is
+/// recorded as a single undo step.
+///
+/// A plugin's value is recovered from its own state blob; a native effect's is the document's
+/// already, so it is written straight in.
 #[tauri::command]
 fn set_insert_param(
     app: AppHandle,
@@ -2552,28 +2618,29 @@ fn set_insert_param(
     if !commit.unwrap_or(false) {
         return Ok(None);
     }
-    let Some(bytes) = state.plugin_host.save_state(insert_id) else {
-        // An effect with no state extension still sounds right; there is simply nothing to
-        // record, so the move is not undoable. Saying so beats inventing a blob.
-        return Ok(None);
-    };
     // Which chain the slot lives in is the document's business, not the UI's: a knob knows its
     // own insert and nothing else.
-    let (target, name) = {
+    let (target, name, native) = {
         let doc = state.doc.lock().unwrap();
         let target = insert_target_of(doc.model(), insert_id).ok_or("no such insert")?;
-        let name = insert_in(doc.model(), target, insert_id).map(|i| i.name.clone()).unwrap_or_default();
-        (target, name)
+        let insert = insert_in(doc.model(), target, insert_id).ok_or("no such insert")?;
+        (target, insert.name.clone(), insert.native_kind().is_some())
+    };
+    let command = if native {
+        Command::SetInsertParam { target, insert_id, param_id, value }
+    } else {
+        let Some(bytes) = state.plugin_host.save_state(insert_id) else {
+            // An effect with no state extension still sounds right; there is simply nothing to
+            // record, so the move is not undoable. Saying so beats inventing a blob.
+            return Ok(None);
+        };
+        Command::SetInsertState { target, insert_id, state: b64_encode(&bytes) }
     };
     state
         .doc
         .lock()
         .unwrap()
-        .apply_labeled(
-            Command::SetInsertState { target, insert_id, state: b64_encode(&bytes) },
-            false,
-            Some(format!("{name} settings")),
-        )
+        .apply_labeled(command, false, Some(format!("{name} settings")))
         .map_err(|e| e.to_string())?;
     let snapshot = state.snapshot();
     // Mirrors `set_plugin_param`: the edit can come from a window that is not the one holding
