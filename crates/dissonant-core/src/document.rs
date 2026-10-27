@@ -1101,6 +1101,7 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 master.low_eq,
                 master.mid_eq,
                 master.high_eq,
+                master.ceiling_db,
             ];
             if v.iter().any(|x| !x.is_finite()) {
                 return Err(EditError::InvalidValue);
@@ -1113,6 +1114,10 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 low_eq: master.low_eq.clamp(0.0, 2.0),
                 mid_eq: master.mid_eq.clamp(0.0, 2.0),
                 high_eq: master.high_eq.clamp(0.0, 2.0),
+                // Above 0 dBFS the limiter would be asked to hold a ceiling the device cannot
+                // pass; -12 is as far down as the control is useful.
+                ceiling_db: master.ceiling_db.clamp(-12.0, 0.0),
+                limiter: master.limiter,
             };
         }
         AddAudioTrack { name } => {

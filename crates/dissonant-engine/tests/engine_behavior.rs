@@ -11,8 +11,9 @@ use std::sync::Arc;
 use dissonant_core::{
     Clip, MasterSettings, NoteEvent, ProjectModel, Sequence, SongPattern, TICKS_PER_BEAT,
 };
+use dissonant_engine::channel::Master;
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
-use dissonant_engine::render::{render_to_buffer, RenderOptions};
+use dissonant_engine::render::{render_to_buffer, RenderOptions, RenderPlugins};
 
 const SR: f32 = 44_100.0;
 const SRD: f64 = 44_100.0;
@@ -64,7 +65,7 @@ fn render(m: &ProjectModel, tail_seconds: f64) -> (Vec<f32>, Vec<f32>) {
         // Measurements below compare raw sample values, so no normalising, dither or extra loops.
         ..RenderOptions::default()
     };
-    let inter = render_to_buffer(sequence(m), &opts).expect("render");
+    let inter = render_to_buffer(sequence(m), &opts, RenderPlugins::default()).expect("render");
     split(&inter)
 }
 
@@ -563,6 +564,11 @@ fn overlapping_same_pitch_notes_do_not_cut_each_other_off() {
 
 // ─── 5. loop boundaries ──────────────────────────────────────────────────────────────────────
 
+/// Onsets are measured at the engine's output, which the master limiter's 1.5 ms lookahead
+/// (≈66 samples at 44.1 k) shifts as a whole. That is latency, not a timing error, so the
+/// tolerance below has to clear it.
+const ONSET_SLACK: i64 = 128;
+
 fn onsets(x: &[f32], thresh: f32) -> Vec<usize> {
     let mut out = Vec::new();
     let mut armed = true;
@@ -597,7 +603,7 @@ fn looping_retriggers_at_the_loop_point() {
     for (cycle, idx) in o.iter().take(3).enumerate() {
         let expected = cycle * 44_100;
         assert!(
-            (*idx as i64 - expected as i64).abs() < 64,
+            (*idx as i64 - expected as i64).abs() < ONSET_SLACK,
             "cycle {cycle} onset at {idx}, expected ~{expected}"
         );
     }
@@ -624,7 +630,7 @@ fn a_pattern_shorter_than_its_clip_sounds_on_every_turn() {
     for (turn, idx) in o.iter().enumerate() {
         let expected = turn * 44_100; // one second per 2-beat turn
         assert!(
-            (*idx as i64 - expected as i64).abs() < 64,
+            (*idx as i64 - expected as i64).abs() < ONSET_SLACK,
             "turn {turn} sounded at {idx}, expected ~{expected}"
         );
     }
@@ -840,6 +846,7 @@ fn master_clamp_never_emits_nan() {
         low_eq: 0.0,
         mid_eq: 4.0,
         high_eq: 4.0,
+        ..MasterSettings::default()
     };
     let notes: Vec<NoteEvent> = (0..16)
         .map(|i| NoteEvent::new(0, 2 * B, 40 + i * 4))
@@ -850,14 +857,175 @@ fn master_clamp_never_emits_nan() {
     assert_finite(&r, "right");
 }
 
+/// A mix loud enough to ask for far more than full scale: sixteen saws, every gain stage open.
+fn overdriven_model() -> ProjectModel {
+    let mut m = model("saw", 2 * B);
+    m.tracks[0].volume = 1.5;
+    m.master.gain = 1.5;
+    let notes: Vec<NoteEvent> = (0..16)
+        .map(|i| NoteEvent::new(0, 2 * B, 40 + i * 3).with_velocity(127))
+        .collect();
+    set_notes(&mut m, 0, notes);
+    m
+}
+
+fn ceiling_of(m: &ProjectModel) -> f32 {
+    10f32.powf(m.master.ceiling_db as f32 / 20.0)
+}
+
+/// Run `blocks` blocks of 256 frames, returning the audio and the highest master meter reading
+/// seen along the way. The meter is a decaying hold, so reading it once at the end of a long
+/// run measures the decay, not the music.
+fn run_watching_the_meter(
+    e: &mut Engine,
+    shared: &Shared,
+    frames: usize,
+) -> (Vec<f32>, Vec<f32>, f32) {
+    let mut out = Vec::with_capacity(frames * 2);
+    let mut buf = vec![0.0f32; 256 * 2];
+    let mut meter = 0.0f32;
+    let mut done = 0;
+    while done < frames {
+        let n = (frames - done).min(256);
+        e.process(&mut buf[..n * 2]);
+        out.extend_from_slice(&buf[..n * 2]);
+        let (ml, mr) = shared.master_peak();
+        meter = meter.max(ml).max(mr);
+        done += n;
+    }
+    let (l, r) = split(&out);
+    (l, r, meter)
+}
+
+#[test]
+fn the_limiter_holds_the_ceiling_while_the_meter_reports_the_true_level() {
+    let m = overdriven_model();
+    let ceiling = ceiling_of(&m);
+    let (mut e, shared) = engine_with(&m);
+    e.handle(EngineCommand::SetLooping(false));
+    e.handle(EngineCommand::Play);
+    let (l, r, meter) = run_watching_the_meter(&mut e, &shared, secs(1.2));
+
+    let out = peak(&l).max(peak(&r));
+    assert!(out > 0.1, "the overdriven render went quiet: {out}");
+    assert!(
+        out <= ceiling + 1e-5,
+        "the limiter let {out} through a {ceiling} ceiling"
+    );
+
+    // The meter is read before the limiter, so it reports the mix as it really is — a bar
+    // pinned at the ceiling would say the mix is fine while it is dB over.
+    assert!(
+        meter > out * 1.05,
+        "the meter reported {meter} against a {out} output: that is the limited signal, not the mix"
+    );
+    assert!(shared.master_over(), "an over this loud was not latched");
+}
+
+#[test]
+fn the_clip_latch_survives_the_silence_after_it_and_only_clear_clip_lowers_it() {
+    let m = overdriven_model();
+    let (mut e, shared) = engine_with(&m);
+    e.handle(EngineCommand::SetLooping(false));
+    e.handle(EngineCommand::Play);
+    run(&mut e, secs(0.3), 256);
+    assert!(shared.master_over());
+
+    e.handle(EngineCommand::Stop);
+    let (l, _) = run(&mut e, secs(2.0), 256);
+    assert!(
+        peak(&l[secs(1.0)..]) < 1e-4,
+        "the transport did not go quiet"
+    );
+    assert!(
+        shared.master_over(),
+        "the clip latch cleared itself once the sound stopped"
+    );
+
+    e.handle(EngineCommand::ClearClip);
+    run(&mut e, secs(0.1), 256);
+    assert!(!shared.master_over(), "ClearClip did not lower the latch");
+}
+
+/// The master chain up to the limiter is linear, so a signal driven four times harder must come
+/// out exactly four times harder — clamped. That is the old behaviour, to the last bit.
+#[test]
+fn limiter_off_reproduces_the_old_hard_clamp() {
+    let settings = MasterSettings {
+        gain: 1.2,
+        reverb_wet: 0.3,
+        limiter: false,
+        // A ceiling the clamp must ignore: with the limiter off, ±1.0 is the only bound.
+        ceiling_db: -6.0,
+        ..MasterSettings::default()
+    };
+    let source: Vec<f32> = (0..4096)
+        .map(|i| (i as f32 * 0.07).sin() * 0.2 + (i as f32 * 0.31).sin() * 0.05)
+        .collect();
+
+    let mut quiet = Master::new(SR, &settings);
+    let (mut ql, mut qr) = (source.clone(), source.clone());
+    quiet.process(&mut ql, &mut qr);
+
+    let mut loud = Master::new(SR, &settings);
+    let (mut ll, mut lr) = (
+        source.iter().map(|x| x * 4.0).collect::<Vec<_>>(),
+        source.iter().map(|x| x * 4.0).collect::<Vec<_>>(),
+    );
+    loud.process(&mut ll, &mut lr);
+
+    assert!(
+        ql.iter().all(|x| x.abs() < 1.0),
+        "the quiet reference already clipped, so it cannot stand in for the chain"
+    );
+    assert!(
+        ll.iter().any(|x| (x.abs() - 1.0).abs() < 1e-6),
+        "the loud pass never reached the clamp: peak {}",
+        peak(&ll)
+    );
+    for (i, (got, dry)) in ll.iter().zip(&ql).enumerate() {
+        let want = (dry * 4.0).clamp(-1.0, 1.0);
+        assert!(
+            (got - want).abs() < 1e-4,
+            "sample {i}: limiter-off gave {got}, the old clamp gives {want}"
+        );
+    }
+}
+
+#[test]
+fn the_offline_render_is_limited_too() {
+    let m = overdriven_model();
+    let ceiling = ceiling_of(&m);
+    let (l, r) = render(&m, 0.5);
+    let limited = peak(&l).max(peak(&r));
+    assert!(limited > 0.1, "the export went quiet: {limited}");
+    assert!(
+        limited <= ceiling + 1e-5,
+        "the export peaked at {limited} against a {ceiling} ceiling"
+    );
+
+    let mut raw = m.clone();
+    raw.master.limiter = false;
+    let (rl, rr) = render(&raw, 0.5);
+    let clamped = peak(&rl).max(peak(&rr));
+    assert!(
+        clamped > ceiling + 1e-3,
+        "the opt-out render peaked at {clamped}: nothing was actually over the ceiling to limit"
+    );
+}
+
 // ─── 8. meters ───────────────────────────────────────────────────────────────────────────────
 
 /// Step the engine one block at a time, checking the published meter against the audio that
 /// block actually produced. `Shared`'s meters are decaying peak-holds, so after every block
 /// the reading must be at least that block's peak and never above the running maximum.
+///
+/// The limiter is off here only so the two are sample-aligned: it is metered on its input and
+/// delays its output by the lookahead, which would put the meter a block ahead of the audio.
 #[test]
 fn master_peak_tracks_each_block_then_falls_back_to_zero() {
     let mut m = model("sine", 8 * B);
+    m.master.limiter = false;
     set_notes(&mut m, 0, vec![NoteEvent::new(0, B / 2, 69)]);
     let (mut e, shared) = engine_with(&m);
     e.handle(EngineCommand::SetLooping(false));

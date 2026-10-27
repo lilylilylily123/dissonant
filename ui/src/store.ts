@@ -40,6 +40,7 @@ import {
   fileNameOf,
   insertChain,
   keyAt,
+  TICKS_PER_BEAT,
   TIER_COLORS,
   ticksToBeats,
 } from "./types";
@@ -134,6 +135,8 @@ interface State {
   /** Loop start/end in ticks. */
   loopRegion: [number, number] | null;
   armed: boolean;
+  /** The grid recorded notes snap to, in ticks; `null` records the take as it was played. */
+  recordQuantize: number | null;
   midi: MidiStatus | null;
   midiActivityAt: number;
   liveKeyboard: LiveKeyboard;
@@ -229,6 +232,8 @@ interface State {
   setLoopRegion(region: [number, number] | null): void;
   toggleLooping(): void;
   toggleRecord(): void;
+  /** The grid a take snaps to; `null` records it as played. */
+  setRecordQuantize(ticks: number | null): void;
   openMidi(name?: string): Promise<void>;
   closeMidi(): Promise<void>;
   refreshMidi(): Promise<void>;
@@ -307,6 +312,8 @@ interface State {
   ): Promise<void>;
   refreshOutputDevices(): Promise<void>;
   testTone(): void;
+  /** Acknowledge the latched master clip indicator. */
+  clearClip(): void;
   refreshAudio(): Promise<void>;
   /** Plugins found on this computer; refreshed after an install. */
   refreshPlugins(rescan?: boolean): Promise<void>;
@@ -581,6 +588,7 @@ export const useStore = create<State>((set, get) => {
     looping: true,
     loopRegion: null,
     armed: false,
+    recordQuantize: TICKS_PER_BEAT / 4,
     midi: null,
     midiActivityAt: 0,
     liveKeyboard: "off",
@@ -640,6 +648,9 @@ export const useStore = create<State>((set, get) => {
       );
       b.onDocument((snap) => applySnapshot(snap));
       b.onMidiActivity(() => set({ midiActivityAt: performance.now() }));
+      // Something the player needs to know about and did not ask for: a note the recorder
+      // could not place, say. Shown as a warning, because it is one.
+      b.onNotice((message) => get().showToast(message, true));
       b.onCloseRequested(() => void get().requestClose());
       b.onFileDropped((path) => void get().openPath(path));
       b.onAudioDropped((path) => void get().importAudioPath(path));
@@ -781,7 +792,6 @@ export const useStore = create<State>((set, get) => {
     },
     setNoteLength(ticks) {
       set({ noteLength: ticks });
-      if (get().armed) void getBridge().then((b) => b.setRecord(true, ticks));
     },
     setZoom(zoom) {
       set({ zoom: Math.min(3, Math.max(0.25, zoom)) });
@@ -874,8 +884,12 @@ export const useStore = create<State>((set, get) => {
       const armed = !get().armed;
       set({ armed });
       void getBridge().then(async (b) =>
-        set({ midi: await b.setRecord(armed, get().noteLength) }),
+        set({ midi: await b.setRecord(armed, get().recordQuantize) }),
       );
+    },
+    setRecordQuantize(ticks) {
+      set({ recordQuantize: ticks });
+      if (get().armed) void getBridge().then((b) => b.setRecord(true, ticks));
     },
     async openMidi(name) {
       const b = await getBridge();
@@ -1046,10 +1060,16 @@ export const useStore = create<State>((set, get) => {
       });
       try {
         const out = await b.exportWav({ ...request, path });
-        get().showToast(
+        const what =
           out.files.length > 1
             ? `exported ${out.files.length} files next to ${fileNameOf(path)}`
-            : `exported ${fileNameOf(path)}`,
+            : `exported ${fileNameOf(path)}`;
+        // A plugin that would not open is not a failed export, but the mix is not the one
+        // being heard — say so rather than letting a wrong file look finished.
+        const missing = out.missingPlugins;
+        get().showToast(
+          missing.length ? `${what} — without: ${missing.join(", ")}` : what,
+          missing.length > 0,
         );
       } catch (e) {
         get().showToast(String(e), true);
@@ -1314,6 +1334,13 @@ export const useStore = create<State>((set, get) => {
     },
     testTone() {
       void getBridge().then((b) => b.testTone());
+    },
+    clearClip() {
+      // Clear the local copy at once so the indicator responds to the click; the 2 s status
+      // poll would otherwise leave it lit, and the engine re-latches on the next over anyway.
+      const audio = get().audio;
+      if (audio) set({ audio: { ...audio, masterOver: false } });
+      void getBridge().then((b) => b.clearClip());
     },
     async refreshAudio() {
       const b = await getBridge();

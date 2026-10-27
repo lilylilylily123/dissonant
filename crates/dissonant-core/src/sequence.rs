@@ -4,7 +4,7 @@
 
 use crate::arrangement::Arrangement;
 use crate::chord_track::ChordTrack;
-use crate::model::{AmpRig, Insert, NoteEvent, ProjectModel, Track, TrackPlugin};
+use crate::model::{AmpRig, NoteEvent, ProjectModel, Track, TrackPlugin};
 use crate::sound::{ResolvedPad, SynthPatch};
 use crate::tempo::TempoMap;
 use crate::ticks::{bar_ticks, TICKS_PER_BEAT};
@@ -26,8 +26,6 @@ pub struct SequenceTrack {
     pub plugin: Option<TrackPlugin>,
     /// Set on an audio track: the rig its audio and live input run through.
     pub amp: Option<AmpRig>,
-    /// This track's effect chain, in order, applied pre-fader.
-    pub inserts: Vec<Insert>,
     pub notes: Vec<NoteEvent>,
     /// The synth patch `voice` resolves to (meaningless on drum tracks).
     pub synth: SynthPatch,
@@ -59,7 +57,6 @@ impl SequenceTrack {
             pan: track.pan,
             plugin: track.plugin.clone(),
             amp: track.amp.clone(),
-            inserts: track.inserts.clone(),
             notes,
             synth: model.resolve_synth(&track.voice),
             drum_pads,
@@ -92,8 +89,6 @@ pub struct Sequence {
     pub tempo_map: TempoMap,
     /// Audio placed on the song timeline, in seconds. Empty in pattern mode.
     pub audio: Vec<SequenceAudioClip>,
-    /// The master effect chain, in order, ahead of the master bus processing.
-    pub master_inserts: Vec<Insert>,
 }
 
 /// An audio clip flattened for the engine: start and length in seconds, so the audio thread
@@ -162,7 +157,6 @@ impl Sequence {
             tempo_map: TempoMap::constant(model.tempo),
             // Audio clips live on the song timeline; pattern mode is a notes-only loop.
             audio: vec![],
-            master_inserts: model.master_inserts.clone(),
         }
     }
 
@@ -288,7 +282,6 @@ impl Sequence {
             bar_ticks: bar_ticks(model.time_signature),
             tempo_map: map,
             audio,
-            master_inserts: model.master_inserts.clone(),
         }
     }
 

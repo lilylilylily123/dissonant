@@ -5,6 +5,15 @@ import { detectKey, keyName } from "../theory";
 import { HMeter } from "./Meter";
 import { keys } from "../platform";
 
+/** What the chip beside REC cycles through: the grid a take snaps to, and "free" — as played. */
+const RECORD_GRIDS: { ticks: number | null; label: string }[] = [
+  { ticks: TICKS_PER_BEAT, label: "1/4" },
+  { ticks: TICKS_PER_BEAT / 2, label: "1/8" },
+  { ticks: TICKS_PER_BEAT / 4, label: "1/16" },
+  { ticks: TICKS_PER_BEAT / 8, label: "1/32" },
+  { ticks: null, label: "free" },
+];
+
 function pad(n: number, w: number) {
   return String(n).padStart(w, "0");
 }
@@ -51,8 +60,14 @@ export function Transport() {
 
   const [pl, pr] = s.masterPeak;
   const peak = Math.max(pl, pr);
+  // Latched by the engine the moment the mix went over the ceiling, so a single over during a
+  // take is still there when the take ends. Only the click below lowers it.
+  const clipped = s.audio?.masterOver ?? false;
   // On the guitar screen the record button captures audio instead of arming MIDI.
   const audioRecord = s.screen === "guitar" && s.armedAudioTrackId !== null;
+  // Which grid the chip shows; a value off the list (an older session's) reads as "free".
+  const foundGrid = RECORD_GRIDS.findIndex((g) => g.ticks === s.recordQuantize);
+  const recGrid = foundGrid < 0 ? RECORD_GRIDS.length - 1 : foundGrid;
 
   return (
     <div className="transport">
@@ -100,15 +115,28 @@ export function Transport() {
             />
           </button>
         ) : (
-          <button
-            className="tbtn"
-            style={s.armed ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
-            onClick={() => s.toggleRecord()}
-            disabled={!s.armed && !recInto}
-            title={recInto ? `record arm (R): notes you play land in ${recInto} while playing` : "record arm (R): pick a pattern to record into first"}
-          >
-            <div style={{ width: 11, height: 11, borderRadius: "50%", background: s.armed ? "#ff3b30" : "#5f5f68", boxShadow: s.armed ? "0 0 8px #ff3b30" : "none" }} />
-          </button>
+          <>
+            <button
+              className="tbtn"
+              style={s.armed ? { background: "var(--rec-bg)", borderColor: "var(--rec-border)" } : undefined}
+              onClick={() => s.toggleRecord()}
+              disabled={!s.armed && !recInto}
+              title={recInto ? `record arm (R): notes you play land in ${recInto} while playing` : "record arm (R): pick a pattern to record into first"}
+            >
+              <div style={{ width: 11, height: 11, borderRadius: "50%", background: s.armed ? "#ff3b30" : "#5f5f68", boxShadow: s.armed ? "0 0 8px #ff3b30" : "none" }} />
+            </button>
+            <button
+              className="chip tiny"
+              onClick={() => s.setRecordQuantize(RECORD_GRIDS[(recGrid + 1) % RECORD_GRIDS.length].ticks)}
+              title={
+                RECORD_GRIDS[recGrid].ticks === null
+                  ? "recording grid: none — the take is kept exactly as played · click to change"
+                  : `recording grid: notes snap to ${RECORD_GRIDS[recGrid].label} · click to change`
+              }
+            >
+              {RECORD_GRIDS[recGrid].label}
+            </button>
+          </>
         )}
         <button
           className="tbtn"
@@ -303,9 +331,19 @@ export function Transport() {
       <div className="mastermeter">
         <div className="hdr">
           <span>master</span>
-          <span className="mono" style={{ color: peak > 0.99 ? "var(--rec)" : "var(--text-6)" }}>
-            {peak > 0.99 ? "CLIP " : ""}
-            {peakDb(peak).toFixed(1)}
+          <span className="row" style={{ gap: 4 }}>
+            {clipped && (
+              <button
+                className="chip tiny on"
+                title="the mix asked for more than the master ceiling — the limiter held it, but the gain staging is hot. click to reset"
+                onClick={() => s.clearClip()}
+              >
+                CLIP
+              </button>
+            )}
+            <span className="mono" style={{ color: clipped ? "var(--rec)" : "var(--text-6)" }}>
+              {peakDb(peak).toFixed(1)}
+            </span>
           </span>
         </div>
         <HMeter peak={pl} />

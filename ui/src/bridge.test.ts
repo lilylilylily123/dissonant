@@ -112,7 +112,7 @@ describe("newProject", () => {
       [m.patterns[0].id, 0, 128 * TICKS_PER_BEAT, 0],
       [m.patterns[1].id, 0, 128 * TICKS_PER_BEAT, 0],
     ]);
-    expect(m.master).toEqual({ gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 });
+    expect(m.master).toEqual({ gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1, ceilingDb: -0.3, limiter: true });
     expect([s.canUndo, s.canRedo, s.dirty, s.path]).toEqual([false, false, false, null]);
   });
 
@@ -585,21 +585,29 @@ describe("setMaster", () => {
     lowEq: 1,
     midEq: 1,
     highEq: 1,
+    ceilingDb: -0.3,
+    limiter: true,
     ...over,
   });
 
   it("clamps every field", async () => {
     await b.apply({
       type: "setMaster",
-      master: master({ gain: 9, reverbWet: 3, lowCutHz: 1, highCutHz: 99_999, lowEq: 5, midEq: -1, highEq: 5 }),
+      master: master({ gain: 9, reverbWet: 3, lowCutHz: 1, highCutHz: 99_999, lowEq: 5, midEq: -1, highEq: 5, ceilingDb: 6 }),
     });
-    expect((await model()).master).toEqual({ gain: 1.5, reverbWet: 1, lowCutHz: 10, highCutHz: 20_000, lowEq: 2, midEq: 0, highEq: 2 });
-    await b.apply({ type: "setMaster", master: master({ lowCutHz: 9_999, highCutHz: 1 }) });
-    expect((await model()).master).toMatchObject({ lowCutHz: 2_000, highCutHz: 500 });
+    expect((await model()).master).toEqual({ gain: 1.5, reverbWet: 1, lowCutHz: 10, highCutHz: 20_000, lowEq: 2, midEq: 0, highEq: 2, ceilingDb: 0, limiter: true });
+    await b.apply({ type: "setMaster", master: master({ lowCutHz: 9_999, highCutHz: 1, ceilingDb: -99 }) });
+    expect((await model()).master).toMatchObject({ lowCutHz: 2_000, highCutHz: 500, ceilingDb: -12 });
+  });
+
+  it("turns the limiter off and leaves everything else alone", async () => {
+    await b.apply({ type: "setMaster", master: master({ limiter: false }) });
+    expect((await model()).master).toEqual(master({ limiter: false }));
   });
 
   it("rejects a non-finite field", async () => {
     await rejectsAndKeepsModel({ type: "setMaster", master: master({ gain: Number.NaN }) });
+    await rejectsAndKeepsModel({ type: "setMaster", master: master({ ceilingDb: Number.NaN }) });
   });
 });
 

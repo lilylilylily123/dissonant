@@ -456,6 +456,10 @@ export interface MasterSettings {
   lowEq: number;
   midEq: number;
   highEq: number;
+  /** Ceiling the limiter holds the output under, in dBFS. */
+  ceilingDb: number;
+  /** Off restores a hard clamp at ±1.0. */
+  limiter: boolean;
 }
 
 export interface ProjectModel {
@@ -881,6 +885,8 @@ export interface AudioStatus {
   /** What a guitarist actually feels: in plus out. */
   roundTripMs?: number;
   inputUnderruns?: number;
+  /** Latched until cleared: the mix asked the master for more than its ceiling. */
+  masterOver?: boolean;
 }
 
 /** What the export dialog sends; `null` fields fall back to the export settings. */
@@ -904,6 +910,8 @@ export interface ExportProgress {
 
 export interface ExportResult {
   files: string[];
+  /** Plugins the render could not open. The files were written without them. */
+  missingPlugins: string[];
 }
 
 export interface TemplateInfo {

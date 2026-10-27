@@ -34,5 +34,7 @@ pub use engine::{
     Engine, EngineCommand, NoteShape, PreviewPatch, Shared, MAX_TRACKS, SCOPE_SAMPLES,
 };
 pub use input::{default_input_name, list_input_devices, AudioInput, InputDeviceInfo};
-pub use render::{normalize, render_to_buffer, render_wav, write_wav, RenderError, RenderOptions};
+pub use render::{
+    normalize, render_to_buffer, render_wav, write_wav, RenderError, RenderOptions, RenderPlugins,
+};
 pub use rig::Rig;

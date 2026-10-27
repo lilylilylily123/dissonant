@@ -125,12 +125,14 @@ export interface Bridge {
   /** The backend changed the document on its own (e.g. a recorded note landed). */
   onDocument(cb: (s: Snapshot) => void): () => void;
   onMidiActivity(cb: (pitch: number) => void): () => void;
+  /** The backend has something to tell the player (a note it could not place, say). */
+  onNotice(cb: (message: string) => void): () => void;
   midiStatus(): Promise<MidiStatus>;
   openMidiInput(name?: string): Promise<MidiStatus>;
   closeMidiInput(): Promise<MidiStatus>;
   setLiveTrack(trackId: string | null): Promise<void>;
-  /** `quantize` is the recording grid in ticks; 0 leaves the take unquantized. */
-  setRecord(armed: boolean, quantize?: number): Promise<MidiStatus>;
+  /** `quantize` is the recording grid in ticks; `null` records the take as played. */
+  setRecord(armed: boolean, quantize: number | null): Promise<MidiStatus>;
   noteOn(pitch: number, velocity?: number): Promise<void>;
   noteOff(pitch: number): Promise<void>;
   /** Loop bounds in ticks. */
@@ -161,6 +163,8 @@ export interface Bridge {
   setSettings(settings: Settings): Promise<AudioStatus>;
   outputDevices(): Promise<OutputDevice[]>;
   testTone(): Promise<void>;
+  /** Acknowledge the latched master clip indicator. */
+  clearClip(): Promise<void>;
   /** The backend opened or dropped a MIDI input on its own. */
   onMidiStatus(cb: (s: MidiStatus) => void): () => void;
   /** Plugins found on this computer. `rescan` walks the folders again instead of answering
@@ -349,13 +353,14 @@ async function tauriBridge(): Promise<Bridge> {
     onPlayhead: (cb) => subscribe<PlayheadEvent>("playhead", cb),
     onDocument: (cb) => subscribe<Snapshot>("document", cb),
     onMidiActivity: (cb) => subscribe<number>("midi-activity", cb),
+    onNotice: (cb) => subscribe<string>("notice", cb),
     midiStatus: () => invoke<MidiStatus>("midi_status"),
     openMidiInput: (name) =>
       invoke<MidiStatus>("open_midi_input", { name: name ?? null }),
     closeMidiInput: () => invoke<MidiStatus>("close_midi_input"),
     setLiveTrack: (trackId) => invoke("set_live_track", { trackId }),
     setRecord: (armed, quantize) =>
-      invoke<MidiStatus>("set_record", { armed, quantize: quantize ?? null }),
+      invoke<MidiStatus>("set_record", { armed, quantize }),
     noteOn: (pitch, velocity = 100) => invoke("note_on", { pitch, velocity }),
     noteOff: (pitch) => invoke("note_off", { pitch }),
     setLoop: (start, end) => invoke("set_loop", { start, end }),
@@ -399,6 +404,7 @@ async function tauriBridge(): Promise<Bridge> {
       invoke<AudioStatus>("set_settings", { settings }),
     outputDevices: () => invoke<OutputDevice[]>("output_devices"),
     testTone: () => invoke("test_tone"),
+    clearClip: () => invoke("clear_clip"),
     librarySounds: () => invoke<Sound[]>("library_sounds"),
     saveLibrarySound: (sound) => invoke<Sound[]>("save_library_sound", { sound }),
     deleteLibrarySound: (id) => invoke<Sound[]>("delete_library_sound", { id }),
@@ -770,6 +776,19 @@ function mockSettings(): Settings {
 /** `editing.defaultSongBars`: how long every fresh project's song is. */
 const defaultSongBars = () => Math.max(1, Math.round(mockSettings().editing.defaultSongBars) || 32);
 
+/** `MasterSettings::default()`: what a file that predates a field opens with. */
+const DEFAULT_MASTER: MasterSettings = {
+  gain: 1,
+  reverbWet: 0,
+  lowCutHz: 20,
+  highCutHz: 18000,
+  lowEq: 1,
+  midEq: 1,
+  highEq: 1,
+  ceilingDb: -0.3,
+  limiter: true,
+};
+
 /** `ProjectModel::empty()`: one melody track with one empty pattern, no key, nothing arranged. */
 function emptyModel(songBars = defaultSongBars()): ProjectModel {
   const melody = newTrack(false, "melody");
@@ -783,7 +802,7 @@ function emptyModel(songBars = defaultSongBars()): ProjectModel {
     audioSources: [],
     audioClips: [],
     sections: [],
-    master: { gain: 1, reverbWet: 0, lowCutHz: 20, highCutHz: 18000, lowEq: 1, midEq: 1, highEq: 1 },
+    master: { ...DEFAULT_MASTER },
     chords: [],
     songLengthTicks: songBars * BAR_TICKS,
   };
@@ -1160,6 +1179,9 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   if (m.tracks.length === 0) m.tracks = [newTrack(false, "melody")];
   // `#[serde(default)]` on the Rust side: a project saved before plugins existed has no field.
   for (const t of m.tracks) t.plugin ??= null;
+  // Same `#[serde(default)]` story for the master: a project saved before the limiter existed
+  // opens with it on, not off, because a bare `false` here would be a different mix.
+  m.master = { ...DEFAULT_MASTER, ...m.master };
   const trackIds = new Set(m.tracks.map((t) => t.id));
   // A pattern of a track that no longer exists is invisible and never played.
   m.patterns = (m.patterns ?? []).filter((p) => trackIds.has(p.trackId));
@@ -1524,6 +1546,7 @@ function reduce(m: ProjectModel, c: Command): void {
           v.lowEq,
           v.midEq,
           v.highEq,
+          v.ceilingDb,
         )
       )
         fail(INVALID_VALUE);
@@ -1535,6 +1558,8 @@ function reduce(m: ProjectModel, c: Command): void {
         lowEq: clamp(v.lowEq, 0, 2),
         midEq: clamp(v.midEq, 0, 2),
         highEq: clamp(v.highEq, 0, 2),
+        ceilingDb: clamp(v.ceilingDb, -12, 0),
+        limiter: v.limiter,
       };
       m.master = master;
       break;
@@ -2294,6 +2319,40 @@ function syntheticPeaks(sourceId: string, buckets: number): [number, number][] {
 }
 const LIVE_MODEL_KEY = "dissonant.mock.live";
 
+/**
+ * `place_recorded_note` in src-tauri/src/lib.rs: where a note held from `start` to `end` lands
+ * in the pattern being recorded into. In song mode that is resolved through the clip actually
+ * being heard; played where the pattern is not placed, the note has nowhere to go and `null`
+ * says so rather than folding it in with a modulo. `quantize` is the grid, `null` as played.
+ */
+function placeRecordedNote(
+  model: ProjectModel,
+  mode: PlayMode,
+  pattern: SongPattern,
+  start: number,
+  end: number,
+  quantize: number | null,
+): { startTick: number; lengthTicks: number } | null {
+  const loop = Math.max(1, pattern.lengthTicks);
+  let len = end - start;
+  if (len < 0) len += loop; // the loop wrapped while the key was held
+  let startIn: number;
+  if (mode === "pattern") {
+    startIn = ((start % loop) + loop) % loop;
+  } else {
+    const clips = model.clips.filter((c) => c.patternId === pattern.id && start >= c.startTick && start < c.startTick + c.lengthTicks);
+    if (!clips.length) return null;
+    const clip = clips.reduce((a, b) => (b.startTick >= a.startTick ? b : a));
+    const into = start - clip.startTick + clip.offsetTicks;
+    startIn = ((into % loop) + loop) % loop;
+  }
+  const grid = quantize && quantize > 0 ? quantize : null;
+  const startTick = grid ? Math.round(startIn / grid) * grid : Math.round(startIn);
+  const lengthTicks = grid ? Math.max(grid, Math.round(len / grid) * grid) : Math.max(1, Math.round(len));
+  const last = Math.max(0, loop - (grid ?? 1));
+  return { startTick: Math.min(last, Math.max(0, startTick)), lengthTicks };
+}
+
 function mockBridge(): Bridge {
   // Adopt the shared document only in a browser, where a second window can exist. The test
   // runner drives the mock directly and builds a fresh one per case; restoring there would leak
@@ -2324,12 +2383,15 @@ function mockBridge(): Bridge {
   let loop: [number, number] | null = null;
   let looping = true;
   let armed = false;
-  let quantize = TICKS_PER_BEAT / 4;
+  let quantize: number | null = TICKS_PER_BEAT / 4;
   let liveTrack: string | null = null;
   const held = new Map<number, { start: number; velocity: number }>();
+  /** Ids the current take wrote, so a second pass over a loop layers instead of erasing. */
+  const take = new Set<string>();
   const listeners = new Set<(e: PlayheadEvent) => void>();
   const docListeners = new Set<(s: Snapshot) => void>();
   const midiListeners = new Set<(p: number) => void>();
+  const noticeListeners = new Set<(m: string) => void>();
 
   const undoLabels: string[] = [];
   const redoLabels: string[] = [];
@@ -2513,6 +2575,12 @@ function mockBridge(): Bridge {
     pending = null;
   };
 
+  /** End the recorded pass: what it wrote becomes one undo step and the next pass starts clean. */
+  const endTake = () => {
+    take.clear();
+    commitGesture();
+  };
+
   /** Named so the plugin commands can reach it too: a committed param edit is an ordinary
    *  undoable document edit, it just does not originate from a UI dispatch. */
   const applyCommand = async (
@@ -2666,7 +2734,11 @@ function mockBridge(): Bridge {
     },
     // The mock plays no sound, so the chord offset and the ghost only matter to the engine.
     setPlaybackContext: async (m, pid) => {
-      if (m !== mode || pid !== patternId) playTick = 0;
+      if (m !== mode || pid !== patternId) {
+        playTick = 0;
+        // A take belongs to the pattern it was played into: switching ends it.
+        endTake();
+      }
       mode = m;
       patternId = pid;
     },
@@ -2677,6 +2749,7 @@ function mockBridge(): Bridge {
     setMetronome: async () => {},
     stop: async () => {
       playing = false;
+      endTake();
     },
     seek: async (t) => {
       playTick = Math.max(0, t);
@@ -2748,6 +2821,10 @@ function mockBridge(): Bridge {
       midiListeners.add(cb);
       return () => midiListeners.delete(cb);
     },
+    onNotice: (cb) => {
+      noticeListeners.add(cb);
+      return () => noticeListeners.delete(cb);
+    },
     midiStatus: async () => ({ inputs: [], open: null, armed }),
     openMidiInput: async () => ({ inputs: [], open: null, armed }),
     closeMidiInput: async () => ({ inputs: [], open: null, armed }),
@@ -2756,8 +2833,11 @@ function mockBridge(): Bridge {
     },
     setRecord: async (a, q) => {
       armed = a;
-      if (q !== undefined) quantize = q;
-      if (!a) held.clear();
+      quantize = q && q > 0 ? q : null;
+      if (!a) {
+        held.clear();
+        endTake();
+      }
       return { inputs: [], open: null, armed };
     },
     noteOn: async (pitch, velocity = 100) => {
@@ -2772,23 +2852,19 @@ function mockBridge(): Bridge {
       // Recording lands in the context pattern, and only while the live track is its track.
       const p = model.patterns.find((x) => x.id === patternId);
       if (!p || (liveTrack ?? model.tracks[0]?.id) !== p.trackId) return;
-      const grid = quantize > 0 ? quantize : TICKS_PER_BEAT / 32;
-      let len = playTick - h.start;
-      if (len < 0) len += p.lengthTicks;
-      const start = Math.round((h.start % p.lengthTicks) / grid) * grid;
-      const notes = p.notes.filter((n) => !(n.pitch === pitch && Math.abs(n.startTick - start) < grid / 2));
-      notes.push({
-        id: uuid(),
-        startTick: Math.min(start, p.lengthTicks - grid),
-        lengthTicks: Math.max(grid, Math.round(len / grid) * grid),
-        pitch,
-        velocity: h.velocity,
-      });
-      pushUndo(clone(model), "record notes");
-      redo.length = 0;
-      redoLabels.length = 0;
-      reduce(model, { type: "setNotes", patternId: p.id, notes });
-      notifyDoc();
+      const placed = placeRecordedNote(model, mode, p, h.start, playTick, quantize);
+      if (!placed) {
+        for (const cb of noticeListeners) cb(`nothing of ${p.name} is playing here — note not recorded`);
+        return;
+      }
+      const slot = Math.max(1, Math.round((quantize ?? TICKS_PER_BEAT / 32) / 2));
+      const note = { id: uuid(), startTick: placed.startTick, lengthTicks: placed.lengthTicks, pitch, velocity: h.velocity };
+      // Only this take's own notes are swallowed; an earlier pass is another overdub layer.
+      const notes = p.notes.filter((n) => !(take.has(n.id) && n.pitch === pitch && Math.abs(n.startTick - note.startTick) < slot));
+      take.add(note.id);
+      notes.push(note);
+      // Transient, so the whole take is one undo step; `endTake` closes it.
+      await applyCommand({ type: "setNotes", patternId: p.id, notes }, true, "record");
     },
     setLoop: async (s, e) => {
       loop = [s, e];
@@ -2856,6 +2932,8 @@ function mockBridge(): Bridge {
       },
     ],
     testTone: async () => blip(69, 100),
+    // No engine in the browser, so nothing ever latches and there is nothing to clear.
+    clearClip: async () => {},
     librarySounds: async () => loadLibrary(),
     // `library::save` / `library::delete`: factory and non-`u-` ids are refused, the sound is
     // sanitized and replaces its id in place; deleting an unknown id changes nothing.

@@ -1,9 +1,9 @@
 //! A track channel (instrument → tone → inserts → reverb/gain/pan) and the master chain
-//! (master inserts → low-cut → 3-band EQ → high-cut → reverb → gain).
+//! (master inserts → low-cut → 3-band EQ → high-cut → reverb → gain → limiter).
 
 use crate::audio::{AudioLane, BlockContext};
 use crate::drums::{DrumBank, DrumKit};
-use crate::dsp::{linear_to_db, pan_gains, Reverb, StereoBiquad};
+use crate::dsp::{db_to_linear, linear_to_db, pan_gains, DelayLine, Reverb, StereoBiquad};
 use crate::engine::NoteShape;
 use crate::synth::PolySynth;
 use dissonant_core::{MasterSettings, SequenceTrack, SynthPatch};
@@ -403,6 +403,85 @@ fn hold(block_peak: f32, previous: f32, frames: usize, sample_rate: f32) -> f32 
     }
 }
 
+/// Lookahead, in seconds: long enough that the gain ramp has settled by the time the peak it was
+/// computed from reaches the output, short enough to stay inaudible against the rest of the chain.
+const LOOKAHEAD_S: f32 = 0.0015;
+
+/// Nominal release of the gain stage. Program dependence comes from the two-stage detector, not
+/// from this number.
+const LIMITER_RELEASE_MS: f32 = 60.0;
+
+/// One-pole coefficient for a time constant of `samples`.
+#[inline]
+fn pole(samples: f32) -> f32 {
+    (-1.0 / samples.max(1.0)).exp()
+}
+
+/// Lookahead peak limiter, stereo-linked.
+///
+/// The gain requirement is computed from the signal as it arrives and applied to the same signal
+/// a lookahead later, so the ramp is already down when the peak gets there: no clipping, and no
+/// step in the gain to click. The ceiling is then guaranteed outright by taking the smoothed gain
+/// against what the outgoing sample actually needs — the smoother converges to within a fraction
+/// of a dB over the lookahead, so that floor binds by a hair on an attack and never otherwise.
+#[derive(Debug, Clone)]
+struct Limiter {
+    left: DelayLine,
+    right: DelayLine,
+    /// Lookahead in samples, as a delay read distance.
+    delay: f32,
+    /// Instant-attack gain requirement, released toward unity.
+    hold: f32,
+    /// `hold` smoothed over the lookahead; what actually multiplies the signal.
+    gain: f32,
+    release_coef: f32,
+    smooth_coef: f32,
+}
+
+impl Limiter {
+    fn new(sample_rate: f32) -> Self {
+        let delay = (LOOKAHEAD_S * sample_rate).round().max(1.0);
+        Limiter {
+            left: DelayLine::new(delay as usize + 4),
+            right: DelayLine::new(delay as usize + 4),
+            delay,
+            hold: 1.0,
+            gain: 1.0,
+            // A fifth of the lookahead leaves the ramp within ~0.7% of its target by the time
+            // the peak lands, which is the error the output-side floor then absorbs.
+            smooth_coef: pole(delay / 5.0),
+            release_coef: pole(LIMITER_RELEASE_MS * 0.001 * sample_rate),
+        }
+    }
+
+    /// Samples between a sample going in and coming out: the lookahead, exactly.
+    fn latency(&self) -> usize {
+        self.delay as usize
+    }
+
+    #[inline]
+    fn process(&mut self, a: f32, b: f32, ceiling: f32) -> (f32, f32) {
+        let peak = a.abs().max(b.abs());
+        let req = if peak > ceiling { ceiling / peak } else { 1.0 };
+        // Smooth-decoupled detector in the gain domain: the first stage drops to the requirement
+        // at once and creeps back toward unity with the release time, so a run of transients
+        // releases as one gesture instead of once per hit.
+        self.hold = req.min(self.release_coef * self.hold + (1.0 - self.release_coef) * req);
+        self.gain = self.smooth_coef * self.gain + (1.0 - self.smooth_coef) * self.hold;
+
+        let (da, db) = (self.left.read(self.delay), self.right.read(self.delay));
+        self.left.write(a);
+        self.right.write(b);
+        let out_peak = da.abs().max(db.abs());
+        let g = if out_peak * self.gain > ceiling {
+            ceiling / out_peak
+        } else {
+            self.gain
+        };
+        (da * g, db * g)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Master {
     low_cut: StereoBiquad,
@@ -411,11 +490,17 @@ pub struct Master {
     eq_high: StereoBiquad,
     high_cut: StereoBiquad,
     reverb: Reverb,
+    limiter: Limiter,
+    /// `settings.ceiling_db` as linear amplitude.
+    ceiling: f32,
     gain: f32,
     sample_rate: f32,
     settings: MasterSettings,
     pub peak_l: f32,
     pub peak_r: f32,
+    /// Whether the last [`Master::process`] saw a sample over the ceiling *before* limiting.
+    /// The latch that survives until the user clears it lives in the engine's `Shared`.
+    pub over: bool,
 }
 
 impl Master {
@@ -427,6 +512,8 @@ impl Master {
             eq_high: StereoBiquad::identity(),
             high_cut: StereoBiquad::identity(),
             reverb: Reverb::new(sample_rate),
+            limiter: Limiter::new(sample_rate),
+            ceiling: 1.0,
             gain: 1.0,
             sample_rate,
             settings: MasterSettings {
@@ -435,6 +522,7 @@ impl Master {
             },
             peak_l: 0.0,
             peak_r: 0.0,
+            over: false,
         };
         m.apply(settings);
         m
@@ -457,11 +545,24 @@ impl Master {
             .configure(|b| b.lowpass(sr, s.high_cut_hz as f32, 0.707));
         self.reverb.wet = s.reverb_wet.clamp(0.0, 1.0) as f32;
         self.gain = s.gain.clamp(0.0, 1.5) as f32;
+        self.ceiling = db_to_linear(s.ceiling_db.clamp(-12.0, 0.0) as f32);
         self.settings = s.clone();
+    }
+
+    /// How far behind its input the master's output runs. The limiter's lookahead is the only
+    /// delay in the chain, so this is zero whenever the limiter is off.
+    pub fn latency_samples(&self) -> usize {
+        if self.settings.limiter {
+            self.limiter.latency()
+        } else {
+            0
+        }
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         let (mut pl, mut pr) = (0.0f32, 0.0f32);
+        let (ceiling, limiting) = (self.ceiling, self.settings.limiter);
+        self.over = false;
         for i in 0..l.len() {
             let (mut a, mut b) = self.low_cut.process(l[i], r[i]);
             (a, b) = self.eq_low.process(a, b);
@@ -469,12 +570,23 @@ impl Master {
             (a, b) = self.eq_high.process(a, b);
             (a, b) = self.high_cut.process(a, b);
             (a, b) = self.reverb.process(a, b);
-            a = (a * self.gain).clamp(-1.0, 1.0);
-            b = (b * self.gain).clamp(-1.0, 1.0);
-            l[i] = a;
-            r[i] = b;
+            a *= self.gain;
+            b *= self.gain;
+            // Metered before the limiter: a mix driven 6 dB over has to read 6 dB over, not sit
+            // pinned at the ceiling looking fine.
+            let peak = a.abs().max(b.abs());
             pl = pl.max(a.abs());
             pr = pr.max(b.abs());
+            self.over |= peak > ceiling;
+            if limiting {
+                (a, b) = self.limiter.process(a, b, ceiling);
+            } else {
+                // The opt-out is the clamp this stage used to be, unchanged.
+                a = a.clamp(-1.0, 1.0);
+                b = b.clamp(-1.0, 1.0);
+            }
+            l[i] = a;
+            r[i] = b;
         }
         let frames = l.len();
         self.peak_l = hold(pl, self.peak_l, frames, self.sample_rate);

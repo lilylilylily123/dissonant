@@ -11,6 +11,7 @@
 
 use dissonant_core::{InsertTarget, NoteEvent, ProjectModel, Sequence, TICKS_PER_BEAT};
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
+use dissonant_engine::render::{render_to_buffer, RenderOptions, RenderPlugins};
 use dissonant_engine::InsertSlot;
 use dissonant_plugins::{
     HostedPlugin, PluginAudioUnit, PluginDescriptor, PluginFormat, PluginKind,
@@ -287,21 +288,21 @@ fn removing_an_insert_returns_the_track_to_dry() {
     assert!(rms(&wet) > rms(&dry) * 1.5);
 
     // The bare engine takes the same seek, so both are rendering the same part of the same
-    // note. They are not bit-identical: the master's filters and the channel's send still carry
-    // state from the block the saturator was loud in. What must be true is that the slot is
-    // gone — the level is the dry one again, not the saturated one.
+    // note. They are not bit-identical: the master's filters and send still carry state from
+    // the block the saturator was loud in, and the limiter carries a lookahead buffer full of
+    // it plus a gain envelope still releasing. Those all die out inside the first half, so the
+    // question — is the slot gone? — is asked of the second half, where the level has to be the
+    // dry one again rather than the saturated one.
     bare.handle(EngineCommand::Seek { tick: 0.0 });
     e.handle(EngineCommand::Seek { tick: 0.0 });
     e.handle(EngineCommand::RemoveInsert { target: track, id });
     bare.handle(EngineCommand::Play);
     e.handle(EngineCommand::Play);
-    let dry_again = run(&mut bare, 8_192);
-    let after = run(&mut e, 8_192);
+    let dry_again = rms(&run(&mut bare, 8_192)[4_096..]);
+    let after = rms(&run(&mut e, 8_192)[4_096..]);
     assert!(
-        (rms(&after) - rms(&dry_again)).abs() < rms(&dry_again) * 0.02,
-        "removing the insert did not restore the dry signal (dry rms {}, after rms {})",
-        rms(&dry_again),
-        rms(&after)
+        (after - dry_again).abs() < dry_again * 0.02,
+        "removing the insert did not restore the dry signal (dry rms {dry_again}, after rms {after})"
     );
     // The engine dropped the unit when the slot went; the handle outlives it, as it must.
     drop(hosted);
@@ -339,5 +340,44 @@ fn a_master_insert_runs_on_the_mixed_bus() {
         dry,
         run(&mut bypassed, 8_192),
         "a bypassed master insert altered the output"
+    );
+}
+
+/// The offline renderer is the same engine, so it has to run the same chains. Without this the
+/// export is a dry mix of a project the user never mixed.
+#[test]
+fn the_offline_render_runs_the_insert_chain() {
+    let m = model();
+    let seq = Arc::new(Sequence::from_pattern(&m, &m.patterns[0].id, 0).expect("pattern"));
+    let opts = RenderOptions {
+        sample_rate: SR as u32,
+        tail_seconds: 0.0,
+        master: m.master.clone(),
+        ..Default::default()
+    };
+
+    let dry = render_to_buffer(Arc::clone(&seq), &opts, RenderPlugins::default()).expect("dry");
+    assert!(
+        peak(&dry) > 1e-3,
+        "the dry render is silent, so a difference would prove nothing"
+    );
+
+    // The handle has to outlive the unit the engine took, exactly as on the app side.
+    let (_hosted, unit) = open(&boost());
+    let plugins = RenderPlugins {
+        instruments: vec![],
+        inserts: vec![(
+            InsertTarget::Track(m.tracks[0].id),
+            vec![InsertSlot::new(Uuid::new_v4(), Some(unit))],
+        )],
+    };
+    let wet = render_to_buffer(seq, &opts, plugins).expect("wet");
+
+    assert_eq!(dry.len(), wet.len());
+    assert!(
+        rms(&wet) > rms(&dry) * 1.5,
+        "the offline render ignored the insert chain (dry rms {}, wet rms {})",
+        rms(&dry),
+        rms(&wet)
     );
 }

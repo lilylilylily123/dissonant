@@ -1355,6 +1355,11 @@ fn default_low_cut() -> f64 {
 }
 
 /// The master chain's persisted settings (previously lived in UI state and was lost on save).
+///
+/// The container-level `default` is what keeps new fields off the schema version: a file written
+/// before `ceiling_db` / `limiter` existed deserializes them from [`MasterSettings::default`],
+/// not from the field type's default — which matters for `limiter`, whose honest value for an
+/// old project is on, not `false`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MasterSettings {
@@ -1365,6 +1370,10 @@ pub struct MasterSettings {
     pub low_eq: f64,
     pub mid_eq: f64,
     pub high_eq: f64,
+    /// Ceiling the limiter holds the output under, in dBFS.
+    pub ceiling_db: f64,
+    /// Off restores the old behaviour: a hard clamp at ±1.0.
+    pub limiter: bool,
 }
 
 impl Default for MasterSettings {
@@ -1377,6 +1386,8 @@ impl Default for MasterSettings {
             low_eq: 1.0,
             mid_eq: 1.0,
             high_eq: 1.0,
+            ceiling_db: -0.3,
+            limiter: true,
         }
     }
 }

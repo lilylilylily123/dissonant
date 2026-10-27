@@ -2,12 +2,14 @@
 //! Deterministic, no device needed — this is what export, stems and tests use.
 
 use crate::audio::AudioPool;
+use crate::channel::{InsertSlot, Instrument};
 use crate::drums::DrumBank;
 use crate::engine::{Engine, EngineCommand, Shared};
-use dissonant_core::{MasterSettings, Sequence};
+use dissonant_core::{InsertTarget, MasterSettings, Sequence};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -51,11 +53,25 @@ impl Default for RenderOptions {
     }
 }
 
+/// The live plugin instances one render pass is to run with.
+///
+/// Separate from [`RenderOptions`] because a hosted plugin can be neither cloned nor shared:
+/// the engine takes ownership of every unit it is handed, so N passes need N sets, opened at
+/// the render sample rate. An empty set renders the built-in voices and dry channels.
+#[derive(Default)]
+pub struct RenderPlugins {
+    /// Instrument per track, already opened at the render sample rate.
+    pub instruments: Vec<(Uuid, Instrument)>,
+    /// Insert chains, in order, per target (track or master).
+    pub inserts: Vec<(InsertTarget, Vec<InsertSlot>)>,
+}
+
 /// Render `sequence` once (no looping) plus a tail, as interleaved stereo f32. The chord bed
 /// is a monitor for writing, never part of the song, so a render never includes it.
 pub fn render_to_buffer(
     sequence: Arc<Sequence>,
     options: &RenderOptions,
+    plugins: RenderPlugins,
 ) -> Result<Vec<f32>, RenderError> {
     if sequence.length_ticks <= 0 {
         return Err(RenderError::Empty);
@@ -76,6 +92,29 @@ pub fn render_to_buffer(
     // Kits are built exactly as for live playback: from a bank rendered up front.
     let drums = Arc::new(DrumBank::for_sequence(&sequence, sr));
     engine.handle(EngineCommand::SetSequenceWithDrums { sequence, drums });
+    // After the sequence: a channel has to exist before its instrument or chain can land on
+    // it. Same order as the live `sync_plugins` then `sync_inserts`.
+    for (track_id, instrument) in plugins.instruments {
+        engine.handle(EngineCommand::SetInstrument {
+            track_id,
+            instrument: Box::new(instrument),
+        });
+    }
+    for (target, chain) in plugins.inserts {
+        for (index, slot) in chain.into_iter().enumerate() {
+            let (id, enabled) = (slot.id, slot.enabled);
+            engine.handle(EngineCommand::AddInsert {
+                target,
+                index,
+                slot,
+            });
+            engine.handle(EngineCommand::SetInsertEnabled {
+                target,
+                id,
+                on: enabled,
+            });
+        }
+    }
     engine.handle(EngineCommand::Play);
 
     let total_frames = (seconds * sr as f64).ceil() as usize;
@@ -116,8 +155,9 @@ pub fn render_wav(
     sequence: Arc<Sequence>,
     path: &Path,
     options: &RenderOptions,
+    plugins: RenderPlugins,
 ) -> Result<(), RenderError> {
-    let mut samples = render_to_buffer(sequence, options)?;
+    let mut samples = render_to_buffer(sequence, options, plugins)?;
     if let Some(db) = options.normalize_db {
         normalize(&mut samples, db);
     }
@@ -200,7 +240,7 @@ mod tests {
             tail_seconds: 0.5,
             ..Default::default()
         };
-        render_wav(seq, &path, &opts).unwrap();
+        render_wav(seq, &path, &opts, RenderPlugins::default()).unwrap();
         let reader = hound::WavReader::open(&path).unwrap();
         // 4 beats @120 = 2 s + 0.5 s tail = 2.5 s → 110250 frames.
         assert_eq!(reader.duration(), 110_250);
@@ -227,7 +267,7 @@ mod tests {
             loops: 3,
             ..Default::default()
         };
-        let buf = render_to_buffer(seq, &opts).unwrap();
+        let buf = render_to_buffer(seq, &opts, RenderPlugins::default()).unwrap();
         // 2 beats @120 = 1 s per loop → 3 s total; the note sounds at the start of each loop.
         assert_eq!(buf.len() / 2, 44_100 * 3);
         for k in 0..3 {
@@ -282,6 +322,7 @@ mod tests {
                 tail_seconds: 0.0,
                 ..Default::default()
             },
+            RenderPlugins::default(),
         )
         .unwrap();
         assert!(buf.iter().all(|s| s.abs() < 1e-6));
@@ -325,7 +366,7 @@ mod tests {
             master: model.master.clone(),
             ..Default::default()
         };
-        let buf = render_to_buffer(seq, &opts).unwrap();
+        let buf = render_to_buffer(seq, &opts, RenderPlugins::default()).unwrap();
         // 120 bpm: one beat = 22050 frames, one hit per beat.
         for i in 0..10 {
             let at = i * 22_050;
@@ -340,7 +381,7 @@ mod tests {
     fn empty_sequence_is_an_error() {
         let seq = Arc::new(Sequence::default());
         assert!(matches!(
-            render_to_buffer(seq, &RenderOptions::default()),
+            render_to_buffer(seq, &RenderOptions::default(), RenderPlugins::default()),
             Err(RenderError::Empty)
         ));
     }

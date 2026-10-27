@@ -44,6 +44,9 @@ pub struct Shared {
     /// Per-track peak (index = position in the current sequence), as f32 bits.
     track_peaks: [AtomicU32; MAX_TRACKS],
     master_peak: [AtomicU32; 2],
+    /// Latched: the master went over the ceiling before limiting. Stays set until `ClearClip`,
+    /// because an over that lasted one block is still an over the user has to be told about.
+    master_over: AtomicBool,
     /// Frames per device callback, as last observed.
     block_frames: AtomicU32,
     /// Render time / block time, smoothed, as f32 bits (1.0 = no headroom left).
@@ -79,6 +82,7 @@ impl Default for Shared {
             sample_rate: AtomicU32::new(44_100),
             track_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
             master_peak: [AtomicU32::new(0), AtomicU32::new(0)],
+            master_over: AtomicBool::new(false),
             block_frames: AtomicU32::new(0),
             load: AtomicU32::new(0),
             xruns: AtomicU32::new(0),
@@ -116,6 +120,10 @@ impl Shared {
             f32::from_bits(self.master_peak[0].load(Ordering::Relaxed)),
             f32::from_bits(self.master_peak[1].load(Ordering::Relaxed)),
         )
+    }
+    /// Latched since the last clear: the mix asked for more than the ceiling.
+    pub fn master_over(&self) -> bool {
+        self.master_over.load(Ordering::Relaxed)
     }
     pub fn block_frames(&self) -> u32 {
         self.block_frames.load(Ordering::Relaxed)
@@ -269,6 +277,9 @@ pub enum EngineCommand {
     },
     /// A short sine on the master bus, for checking the output device from Settings.
     TestTone,
+    /// Reset the latched over-the-ceiling flag in `Shared` — the user acknowledging the clip
+    /// indicator, not a mix change.
+    ClearClip,
     /// Click on every beat (accented on the bar) while playing; `volume` 0…1.
     SetMetronome {
         on: bool,
@@ -650,6 +661,13 @@ impl Engine {
         self.playing
     }
 
+    /// Samples by which the engine's music output trails the transport, from the master
+    /// limiter's lookahead. The metronome and test tone are summed in after it and are not
+    /// delayed, which is what makes a click a reliable reference while playing.
+    pub fn output_latency_samples(&self) -> usize {
+        self.master.latency_samples()
+    }
+
     pub fn handle(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::Play => {
@@ -777,6 +795,7 @@ impl Engine {
                     .retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
             EngineCommand::TestTone => self.test_tone = ((self.sample_rate * 0.6) as usize, 0.0),
+            EngineCommand::ClearClip => self.shared.master_over.store(false, Ordering::Relaxed),
             EngineCommand::SetInstrument {
                 track_id,
                 instrument,
@@ -1068,6 +1087,10 @@ impl Engine {
         }
         self.shared.master_peak[0].store(self.master.peak_l.to_bits(), Ordering::Relaxed);
         self.shared.master_peak[1].store(self.master.peak_r.to_bits(), Ordering::Relaxed);
+        if self.master.over {
+            // Latch, never clear: only `ClearClip` lowers it.
+            self.shared.master_over.store(true, Ordering::Relaxed);
+        }
         // Still published in beats: it is a UI countdown ("3, 2, 1"), not a time position.
         let left = match self.count_in {
             Some((total, done)) => {
@@ -1157,6 +1180,12 @@ impl Engine {
         }
         if !self.clicks.is_empty() {
             self.render_clicks(out);
+        }
+        // The safety net sits here, after the metronome and the test tone, so the device never
+        // receives an over — while those monitor sounds stay out of the limiter's detector and
+        // out of the meters. With the limiter on this is a no-op on the music itself.
+        for s in out.iter_mut() {
+            *s = s.clamp(-1.0, 1.0);
         }
 
         if self.playing {
@@ -1694,6 +1723,13 @@ mod tests {
         samples.iter().position(|s| s.abs() > 1e-6)
     }
 
+    /// `first_onset` against the transport rather than against the buffer: the master limiter's
+    /// lookahead delays the music by a fixed, reported amount, so scheduling stays sample-exact
+    /// once that latency is taken off.
+    fn onset_tick_sample(e: &Engine, samples: &[f32]) -> i64 {
+        first_onset(samples).expect("nothing sounded") as i64 - e.output_latency_samples() as i64
+    }
+
     #[test]
     fn note_starts_on_the_exact_sample_regardless_of_block_size() {
         for block in [64usize, 480, 1024, 4096] {
@@ -1701,12 +1737,9 @@ mod tests {
             e.handle(EngineCommand::SetSequence(sequence_with_note(B, B, 16 * B)));
             e.handle(EngineCommand::Play);
             let left = render(&mut e, 30_000, block);
-            let onset = first_onset(&left).expect("note should sound");
+            let onset = onset_tick_sample(&e, &left);
             // 120 bpm → beat 1 = 22050 samples; the first non-zero sample is one after onset.
-            assert!(
-                (onset as i64 - 22_050).abs() <= 2,
-                "block {block}: onset {onset}"
-            );
+            assert!((onset - 22_050).abs() <= 2, "block {block}: onset {onset}");
         }
     }
 
@@ -1722,8 +1755,8 @@ mod tests {
         let left = render(&mut e, 44_100 * 2, 512);
         // One loop = 2 beats = 44100 samples. The second onset must land at the loop start.
         let second_half = &left[44_100 - 10..];
-        let onset = first_onset(second_half).unwrap() + 44_100 - 10;
-        assert!((onset as i64 - 44_100).abs() <= 2, "second onset {onset}");
+        let onset = onset_tick_sample(&e, second_half) + 44_100 - 10;
+        assert!((onset - 44_100).abs() <= 2, "second onset {onset}");
         // Between the release tail (0.5 beat = 11025 samples + 0.2 s release) and the loop, silence.
         let quiet = &left[11_025 + 10_000..44_000];
         assert!(quiet.iter().all(|s| s.abs() < 1e-3));
@@ -1898,7 +1931,7 @@ mod tests {
         e.handle(EngineCommand::SetSequence(seq));
         e.handle(EngineCommand::Play);
         let left = render(&mut e, 44_100 * 6 + 2_000, 1000);
-        let onset = first_onset(&left).unwrap() as i64;
+        let onset = onset_tick_sample(&e, &left);
         assert!((onset - 44_100 * 6).abs() <= 2, "onset {onset}");
         // The playhead: 6 s + 2000 samples at 60 bpm ≈ beat 8.045.
         let expected = 8.0 + (2_000.0 / 44_100.0) * (60.0 / 60.0);
@@ -1938,7 +1971,7 @@ mod tests {
         e.handle(EngineCommand::SetSequence(seq));
         e.handle(EngineCommand::Play);
         let left = render(&mut e, 30_000, 512);
-        let onset = first_onset(&left).unwrap() as i64;
+        let onset = onset_tick_sample(&e, &left);
         let expected = (22_050.0 * 2.0 / 3.0) as i64;
         assert!((onset - expected).abs() <= 2, "onset {onset} vs {expected}");
     }
@@ -1989,8 +2022,8 @@ mod tests {
         assert!(e.is_playing());
         assert_eq!(shared.count_in_beats(), 0.0);
         // The note at beat 0 starts exactly when the count-in ends (sample 88200 overall).
-        let onset = first_onset(&rest[44_100 - 10..]).unwrap() + 44_100 - 10;
-        assert!((onset as i64 - 44_100).abs() <= 2, "onset {onset}");
+        let onset = onset_tick_sample(&e, &rest[44_100 - 10..]) + 44_100 - 10;
+        assert!((onset - 44_100).abs() <= 2, "onset {onset}");
         // Position advanced only for the part of the block after the start.
         assert!(
             (in_beats(e.position()) - 2_000.0 / 22_050.0).abs() < 1e-6,
@@ -2088,10 +2121,10 @@ mod tests {
         e.handle(EngineCommand::Play);
         // 4 beats = 88200 samples per loop pass; render two passes.
         let left = render(&mut e, 88_200 * 2 + 100, 512);
-        let first = first_onset(&left).unwrap();
+        let first = onset_tick_sample(&e, &left);
         assert!(first <= 2, "first onset {first}");
-        let second = first_onset(&left[88_200 - 10..]).unwrap() + 88_200 - 10;
-        assert!((second as i64 - 88_200).abs() <= 2, "second onset {second}");
+        let second = onset_tick_sample(&e, &left[88_200 - 10..]) + 88_200 - 10;
+        assert!((second - 88_200).abs() <= 2, "second onset {second}");
         assert!(e.position() >= (4 * B) as f64 && e.position() < (8 * B) as f64);
     }
 
@@ -2208,8 +2241,9 @@ mod tests {
         n.shift_ticks = -B / 4;
         e.handle(EngineCommand::SetSequence(sequence_with(n, 8 * B)));
         e.handle(EngineCommand::Play);
-        let onset = first_onset(&render(&mut e, 30_000, 512)).expect("a shifted note must sound");
-        assert!((onset as i64 - 16_538).abs() <= 2, "onset {onset}");
+        let left = render(&mut e, 30_000, 512);
+        let onset = onset_tick_sample(&e, &left);
+        assert!((onset - 16_538).abs() <= 2, "onset {onset}");
     }
 
     /// `repeats = r` sounds the note `r + 1` times, evenly spaced across its *own* length.

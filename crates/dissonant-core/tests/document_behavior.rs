@@ -1157,6 +1157,8 @@ fn out_of_range_values_that_are_accepted_are_clamped_not_stored_raw() {
                 low_eq: -1.0,
                 mid_eq: 99.0,
                 high_eq: -1.0,
+                ceiling_db: 6.0,
+                limiter: false,
             },
         },
         false,
@@ -1166,6 +1168,7 @@ fn out_of_range_values_that_are_accepted_are_clamped_not_stored_raw() {
     assert_eq!((m.gain, m.reverb_wet), (1.5, 1.0));
     assert_eq!((m.low_cut_hz, m.high_cut_hz), (10.0, 20_000.0));
     assert_eq!((m.low_eq, m.mid_eq, m.high_eq), (0.0, 2.0, 0.0));
+    assert_eq!((m.ceiling_db, m.limiter), (0.0, false));
 }
 
 #[test]
@@ -2178,6 +2181,8 @@ fn save_load_round_trip_preserves_every_edit() {
                 low_eq: 1.2,
                 mid_eq: 0.8,
                 high_eq: 1.1,
+                ceiling_db: -1.0,
+                limiter: false,
             },
         },
         false,
@@ -3368,33 +3373,6 @@ fn deleting_a_track_takes_its_chain_with_it_and_undo_brings_it_back() {
         before,
         "undo lost the track's effect chain"
     );
-}
-
-#[test]
-fn the_sequence_carries_both_insert_chains_through_from_the_model() {
-    // This is how the engine learns what to host and in which order; losing it here silently
-    // plays the track dry.
-    let m = fixture();
-    let expected = m.tracks[0].inserts.clone();
-    assert_eq!(expected.len(), 2);
-
-    for sequence in [
-        Sequence::from_pattern(&m, &m.patterns[0].id, 0).unwrap(),
-        Sequence::from_song(&m),
-    ] {
-        assert_eq!(
-            sequence.tracks[0].inserts, expected,
-            "the sequence dropped a track's inserts"
-        );
-        assert!(
-            sequence.tracks[1].inserts.is_empty(),
-            "a track with no inserts gained some"
-        );
-        assert_eq!(
-            sequence.master_inserts, m.master_inserts,
-            "the sequence dropped the master inserts"
-        );
-    }
 }
 
 #[test]

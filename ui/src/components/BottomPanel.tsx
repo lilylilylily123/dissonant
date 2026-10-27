@@ -26,6 +26,7 @@ const TONE = log(200, 20000);
 const LOWCUT = log(10, 2000);
 const HICUT = log(500, 20000);
 const EQ = lin(0, 2);
+const CEILING = lin(-12, 0);
 
 /** The 300px bottom panel in SONG mode: DEVICES (track instrument + bus + master), MIXER, or
  *  the free-plugin browser. */
@@ -142,7 +143,7 @@ function Devices() {
         <div className="title">
           <span className="led" />
           <span>master</span>
-          <span className="meta">low cut → eq → high cut → reverb → gain</span>
+          <span className="meta">low cut → eq → high cut → reverb → gain → limiter</span>
         </div>
         <div className="pad">
           <div className="knobrow">
@@ -153,6 +154,26 @@ function Devices() {
             <Knob label="high" value={EQ.to(master.highEq)} display={eqDb(master.highEq)} color="#3dc8ff" defaultValue={0.5} onChange={(p) => setMaster({ highEq: EQ.from(p) })} onCommit={commit} />
             <Knob label="hi cut" value={HICUT.to(master.highCutHz)} display={hz(master.highCutHz)} color="#3dc8ff" defaultValue={HICUT.to(18000)} onChange={(p) => setMaster({ highCutHz: HICUT.from(p) })} onCommit={commit} />
             <Knob label="reverb" value={master.reverbWet} display={pct(master.reverbWet)} color="#b48cff" defaultValue={0} onChange={(p) => setMaster({ reverbWet: p })} onCommit={commit} />
+            <Knob
+              label="ceiling"
+              value={CEILING.to(master.ceilingDb)}
+              display={`${master.ceilingDb.toFixed(1)} dB`}
+              color="#ffb03d"
+              defaultValue={CEILING.to(-0.3)}
+              onChange={(p) => setMaster({ ceilingDb: CEILING.from(p) })}
+              onCommit={commit}
+            />
+          </div>
+          <div className="row" style={{ gap: 6 }}>
+            <button
+              className={`chip tiny${master.limiter ? " on" : ""}`}
+              title="lookahead limiter holding the output under the ceiling · off is the old hard clamp at 0 dBFS, which distorts instead"
+              onClick={() =>
+                void dispatch({ type: "setMaster", master: { ...master, limiter: !master.limiter } }, false, "toggle limiter")
+              }
+            >
+              limiter
+            </button>
           </div>
           <div className="row" style={{ gap: 6, fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-4b)" }}>
             <span>OUT</span>

@@ -11,12 +11,12 @@ pub mod settings;
 use dissonant_catalog::{install, CatalogEntry, InstallEvent, Platform};
 use dissonant_core::{
     bar_ticks, midi_file, Command, Document, Insert, InsertTarget, MasterSettings, MidiScope, NoteEvent, ProjectModel,
-    Sequence, TrackPlugin, TICKS_PER_BEAT,
+    Sequence, SongPattern, TrackPlugin, TICKS_PER_BEAT,
 };
 use dissonant_engine::audio::{AudioBuffer, AudioPool};
 use dissonant_engine::{
     default_output_name, list_output_devices, render_wav, AudioConfig, AudioDevice, AudioInput, EngineCommand, EngineIo,
-    InputDeviceInfo, InsertSlot, RenderOptions,
+    InputDeviceInfo, InsertSlot, RenderOptions, RenderPlugins,
 };
 use dissonant_plugins::{ParamInfo, PluginDescriptor, PluginFormat};
 use plugins::PluginHostThread;
@@ -24,7 +24,7 @@ use recording::TakeWriter;
 use settings::{NewProjectKind, Settings};
 use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -84,9 +84,11 @@ impl Default for PlaybackContext {
 #[derive(Default)]
 struct Recorder {
     armed: bool,
-    /// Grid in ticks to snap recorded note starts to (0 = off).
-    quantize: i64,
+    /// Grid in ticks recorded starts snap to; `None` keeps the take exactly as it was played.
+    quantize: Option<i64>,
     held: HashMap<(Uuid, u8), (f64, u8)>,
+    /// The pass being recorded right now.
+    take: Take,
 }
 
 pub struct AppState {
@@ -189,6 +191,8 @@ pub struct AudioStatusEvent {
 
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RECENT: usize = 12;
+/// What a project file is called, everywhere: the save dialog, the open filter, templates.
+const PROJECT_EXT: &str = "dissonant";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,6 +235,8 @@ pub struct AudioStatus {
     pub round_trip_ms: f64,
     /// Blocks in which the input ring ran dry.
     pub input_underruns: u32,
+    /// Latched since the last `clear_clip`: the mix asked the master for more than its ceiling.
+    pub master_over: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,8 +248,14 @@ pub struct OutputDevice {
     pub default_sample_rate: u32,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        AppState::new()
+    }
+}
+
 impl AppState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         AppState {
             doc: Mutex::new(Document::new(ProjectModel::starter())),
             audio: Mutex::new(None),
@@ -304,7 +316,7 @@ impl AppState {
         audio.as_ref().map(|a| (a.shared().position_ticks(), a.shared().is_playing()))
     }
 
-    fn snapshot(&self) -> Snapshot {
+    pub fn snapshot(&self) -> Snapshot {
         let doc = self.doc.lock().unwrap();
         Snapshot {
             model: doc.model().clone(),
@@ -348,6 +360,7 @@ impl AppState {
             input_latency_ms,
             round_trip_ms: latency_ms + input_latency_ms,
             input_underruns: shared.map(|s| s.input_underruns()).unwrap_or(0),
+            master_over: shared.map(|s| s.master_over()).unwrap_or(false),
         }
     }
 
@@ -378,11 +391,14 @@ impl AppState {
         self.start_audio();
         self.sync_engine();
         self.sync_audio_pool();
-        // The new engine starts with empty chains, and its plugins have to be re-opened for
-        // whatever rate the new device came up at. Forgetting what the old engine held is what
-        // makes the reconcile below rebuild every chain instead of thinking it is already right.
+        // The new engine starts with no instruments and empty chains, and every plugin has to
+        // be re-opened for whatever rate the new device came up at — a unit opened at 44.1 k
+        // cannot be handed to a 48 k engine. Forgetting what the old engine held is what makes
+        // the reconcile below rebuild everything instead of thinking it is already right.
         self.loaded_insert_chains.lock().unwrap().clear();
-        self.sync_inserts(true);
+        self.loaded_plugin_uids.lock().unwrap().clear();
+        // `sync_plugins` ends in `sync_inserts(true)`, so this covers both.
+        self.sync_plugins();
         self.resend_transport();
         let (armed, monitor) = *self.armed_audio.lock().unwrap();
         self.send(EngineCommand::SetAudioArm { track_id: armed, monitor });
@@ -515,6 +531,24 @@ impl AppState {
         }
         let revision = self.doc.lock().unwrap().revision();
         self.autosaved_revision.store(revision, Ordering::Relaxed);
+    }
+
+    /// Write the document to `target`, and only if that lands treat it as saved. The safety
+    /// net — the autosave beside the file, the dirty flag, the undo history's save point —
+    /// stays until there is a real file on disk to fall back on.
+    pub fn save_to(&self, target: &std::path::Path) -> Result<(), String> {
+        let json = self.doc.lock().unwrap().model().to_json().map_err(|e| e.to_string())?;
+        write_project_atomically(target, &json).map_err(|e| format!("could not write {}: {e}", target.display()))?;
+        {
+            let mut doc = self.doc.lock().unwrap();
+            doc.path = Some(target.to_path_buf());
+            doc.mark_saved();
+        }
+        self.remember_recent(target);
+        self.clear_autosave();
+        // A stale autosave next to the file would otherwise be offered on the next launch.
+        let _ = std::fs::remove_file(autosave_path_for(target));
+        Ok(())
     }
 
     /// Autosaves lying around from an earlier run: the untitled slot plus one next to any
@@ -840,6 +874,50 @@ fn autosave_path_for(project: &std::path::Path) -> PathBuf {
     project.with_file_name(name)
 }
 
+/// `song.dissonant` + `.tmp` → `song.dissonant.tmp`. Appending rather than replacing the
+/// extension keeps the sibling unambiguous: two projects in one folder cannot collide.
+fn sibling_path(file: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = file.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "project".into());
+    name.push(suffix);
+    file.with_file_name(name)
+}
+
+/// The open dialog filters on `.dissonant`, so a file saved under a bare name could never be
+/// picked again.
+pub fn with_project_extension(target: PathBuf) -> PathBuf {
+    match target.extension() {
+        Some(_) => target,
+        None => target.with_extension(PROJECT_EXT),
+    }
+}
+
+/// Write the project the way every other writer in the app does: a sibling `.tmp`, flushed to
+/// the disk, then renamed over the target. A crash or a full disk leaves the previous file
+/// whole instead of a half-written one — and that previous file is kept as `<target>.bak`,
+/// one rolling generation, before the rename takes it.
+pub fn write_project_atomically(target: &std::path::Path, json: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = sibling_path(target, ".tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    let flushed = file.write_all(json.as_bytes()).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(e) = flushed {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if target.exists() {
+        // Not fatal: a backup that cannot be made is worth less than the save itself.
+        if let Err(e) = std::fs::copy(target, sibling_path(target, ".bak")) {
+            log::warn!("could not back up {}: {e}", target.display());
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Song mode (SETUP and SONG in the UI) plays the whole song, empty or not. Pattern mode plays
 /// the context pattern alone against the chords from `chord_offset_ticks`; with no pattern (or
 /// one that is gone) it plays nothing, but every track is still there for live input. A ghost
@@ -965,20 +1043,14 @@ fn open_project(state: State<'_, AppState>, path: String) -> Result<Snapshot, St
 
 #[tauri::command]
 fn save_project(state: State<'_, AppState>, path: Option<String>) -> Result<Snapshot, String> {
-    let mut doc = state.doc.lock().unwrap();
     let target = match path {
-        Some(p) => PathBuf::from(p),
-        None => doc.path.clone().ok_or_else(|| "no file path yet — use Save As".to_string())?,
+        Some(p) => with_project_extension(PathBuf::from(p)),
+        None => {
+            let doc = state.doc.lock().unwrap();
+            doc.path.clone().ok_or_else(|| "no file path yet — use Save As".to_string())?
+        }
     };
-    let json = doc.model().to_json().map_err(|e| e.to_string())?;
-    std::fs::write(&target, json).map_err(|e| format!("could not write {}: {e}", target.display()))?;
-    doc.path = Some(target.clone());
-    doc.mark_saved();
-    drop(doc);
-    state.remember_recent(&target);
-    state.clear_autosave();
-    // A stale autosave next to the file would otherwise be offered on the next launch.
-    let _ = std::fs::remove_file(autosave_path_for(&target));
+    state.save_to(&target)?;
     Ok(state.snapshot())
 }
 
@@ -1047,7 +1119,7 @@ fn set_playback_context(
     ghost_level: Option<f64>,
 ) {
     let offset = chord_offset_ticks.unwrap_or(0).max(0);
-    {
+    let changed = {
         let mut ctx = state.playback.lock().unwrap();
         let changed = ctx.mode != mode || ctx.pattern_id != pattern_id;
         ctx.mode = mode;
@@ -1058,6 +1130,11 @@ fn set_playback_context(
         if changed {
             state.send(EngineCommand::Seek { tick: 0.0 });
         }
+        changed
+    };
+    // A take belongs to the pattern it was played into: switching ends it.
+    if changed {
+        state.commit_take();
     }
     state.sync_engine();
 }
@@ -1088,6 +1165,8 @@ fn set_metronome(state: State<'_, AppState>, on: bool, volume: Option<f32>) {
 #[tauri::command]
 fn transport_stop(state: State<'_, AppState>) {
     state.send(EngineCommand::Stop);
+    // The pass is over, whether or not the player disarms: one undo takes it back.
+    state.commit_take();
 }
 
 #[tauri::command]
@@ -1197,6 +1276,102 @@ fn live_note_on(app: &AppHandle, pitch: u8, velocity: u8) {
     let _ = app.emit("midi-activity", pitch);
 }
 
+/// Where a note the player held from tick `start` to tick `end` belongs in the pattern being
+/// recorded into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Pattern-local start and length, in ticks.
+    At { start_tick: i64, length_ticks: i64 },
+    /// The playhead is outside every clip of this pattern, so a song tick says nothing about
+    /// pattern time. Folding it in with a modulo — what the recorder used to do — files the
+    /// note somewhere it was never played.
+    NotPlaying,
+}
+
+/// Resolve a played note into pattern time. In song mode that is done through the clip the
+/// player is actually hearing: the pattern tick is how far into that clip the note fell, plus
+/// whatever the clip is offset by, wrapped by the pattern's own length (a clip longer than its
+/// pattern loops it). `quantize` is the grid starts and lengths snap to; `None` records the
+/// take as it was played.
+pub fn place_recorded_note(
+    model: &ProjectModel,
+    mode: PlayMode,
+    pattern: &SongPattern,
+    start: f64,
+    end: f64,
+    quantize: Option<i64>,
+) -> Placement {
+    let length_ticks = pattern.length_ticks.max(1);
+    let mut len = end - start;
+    if len < 0.0 {
+        len += length_ticks as f64; // the loop wrapped while the key was held
+    }
+    let start_in = match mode {
+        // Pattern mode plays the pattern alone, so the engine's tick is already pattern time.
+        PlayMode::Pattern => start.rem_euclid(length_ticks as f64),
+        PlayMode::Song => {
+            // Clips can overlap; the one that starts last is the one on top, and the one heard.
+            let clip = model
+                .clips
+                .iter()
+                .filter(|c| c.pattern_id == pattern.id && start >= c.start_tick as f64 && start < c.end_tick() as f64)
+                .max_by_key(|c| c.start_tick);
+            let Some(clip) = clip else { return Placement::NotPlaying };
+            (start - clip.start_tick as f64 + clip.offset_ticks as f64).rem_euclid(length_ticks as f64)
+        }
+    };
+    let (start_tick, note_len) = match quantize.filter(|g| *g > 0) {
+        Some(grid) => (
+            (start_in / grid as f64).round() as i64 * grid,
+            ((len / grid as f64).round() as i64 * grid).max(grid),
+        ),
+        None => (start_in.round() as i64, (len.round() as i64).max(1)),
+    };
+    // Rounding up can land a start on the pattern's end; keep it inside, a slot short.
+    let last = (length_ticks - quantize.filter(|g| *g > 0).unwrap_or(1)).max(0);
+    Placement::At { start_tick: start_tick.clamp(0, last), length_ticks: note_len }
+}
+
+/// One recorded pass. It remembers what it has written, which is what lets a second pass over
+/// the same loop layer onto the first instead of erasing it, and what lets the whole take
+/// collapse into a single undo step.
+#[derive(Default)]
+pub struct Take {
+    written: HashSet<Uuid>,
+}
+
+impl Take {
+    /// Write `note` into `pattern_id`, transient the way a knob drag is: nothing becomes an
+    /// undo step until [`Take::finish`] closes the take. `slot` is the window within which a
+    /// repeat of the same pitch counts as a double trigger rather than a second layer.
+    pub fn write(&mut self, doc: &mut Document, pattern_id: Uuid, note: NoteEvent, slot: i64) -> bool {
+        let Some(pattern) = doc.model().pattern(&pattern_id) else { return false };
+        let mut notes = pattern.notes.clone();
+        // Only this pass's own notes are swallowed: an earlier pass is another overdub layer.
+        notes.retain(|n| {
+            !(self.written.contains(&n.id) && n.pitch == note.pitch && (n.start_tick - note.start_tick).abs() < slot)
+        });
+        self.written.insert(note.id);
+        notes.push(note);
+        doc.apply_labeled(Command::SetNotes { pattern_id, notes }, true, Some("record".into())).is_ok()
+    }
+
+    /// Close the take: what it wrote becomes one undo step, and the next pass starts clean.
+    pub fn finish(&mut self, doc: &mut Document) {
+        self.written.clear();
+        doc.commit_gesture();
+    }
+}
+
+/// What became of a note the player held while armed.
+pub enum Recorded {
+    Written,
+    /// Nothing of the pattern is placed under the playhead. The name is for the player.
+    NotPlaying { pattern: String },
+    /// Nothing to record into: no context pattern, or it belongs to another track.
+    Nowhere,
+}
+
 /// A note ended: release it and, if it was being recorded, write it into the context pattern.
 /// Only a pattern of the live track can take it; playing another track records nothing.
 fn live_note_off(app: &AppHandle, pitch: u8) {
@@ -1206,42 +1381,15 @@ fn live_note_off(app: &AppHandle, pitch: u8) {
     let held = state.recorder.lock().unwrap().held.remove(&(track_id, pitch));
     let Some((start, velocity)) = held else { return };
     let Some((end, _)) = state.engine_position() else { return };
-    let quantize = state.recorder.lock().unwrap().quantize;
-
-    let (pattern_id, length_ticks, existing) = {
-        let ctx = state.playback.lock().unwrap();
-        let doc = state.doc.lock().unwrap();
-        let model = doc.model();
-        let Some(p) = ctx.pattern_id.and_then(|id| model.pattern(&id)).filter(|p| p.track_id == track_id) else {
-            return;
-        };
-        (p.id, p.length_ticks, p.notes.clone())
-    };
-    // In song mode the engine position is a song position; fold it into the loop.
-    let loop_ticks = length_ticks.max(1) as f64;
-    let start_in = start % loop_ticks;
-    let mut len = end - start;
-    if len < 0.0 {
-        len += loop_ticks; // the loop wrapped while the key was held
-    }
-    let grid = if quantize > 0 { quantize } else { TICKS_PER_BEAT / 32 };
-    let snapped_start = (start_in / grid as f64).round() as i64 * grid;
-    let snapped_len = ((len / grid as f64).round() as i64 * grid).max(grid);
-    let note = NoteEvent::new(snapped_start.min(length_ticks - grid).max(0), snapped_len, pitch as i32)
-        .with_velocity(velocity as i32);
-
-    let mut notes = existing;
-    // Replace a note that starts on the same pitch and grid slot instead of stacking.
-    notes.retain(|n| !(n.pitch == note.pitch && (n.start_tick - note.start_tick).abs() < grid / 2));
-    notes.push(note);
-    let applied = state
-        .doc
-        .lock()
-        .unwrap()
-        .apply(Command::SetNotes { pattern_id, notes }, false);
-    if applied.is_ok() {
-        state.sync_engine();
-        let _ = app.emit("document", state.snapshot());
+    match state.record_note(track_id, pitch, velocity, start, end) {
+        Recorded::Written => {
+            state.sync_engine();
+            let _ = app.emit("document", state.snapshot());
+        }
+        Recorded::NotPlaying { pattern } => {
+            let _ = app.emit("notice", format!("nothing of {pattern} is playing here — note not recorded"));
+        }
+        Recorded::Nowhere => {}
     }
 }
 
@@ -1252,6 +1400,45 @@ impl AppState {
             open: self.midi_port.lock().unwrap().clone(),
             armed: self.recorder.lock().unwrap().armed,
         }
+    }
+
+    /// Write a note the player held into the context pattern. Where it goes is
+    /// [`place_recorded_note`]'s decision; this is the document side of it.
+    pub fn record_note(&self, track_id: Uuid, pitch: u8, velocity: u8, start: f64, end: f64) -> Recorded {
+        let (mode, context) = {
+            let ctx = self.playback.lock().unwrap();
+            (ctx.mode, ctx.pattern_id)
+        };
+        let quantize = self.recorder.lock().unwrap().quantize;
+        let (pattern_id, name, placement) = {
+            let doc = self.doc.lock().unwrap();
+            let model = doc.model();
+            let Some(p) = context.and_then(|id| model.pattern(&id)).filter(|p| p.track_id == track_id) else {
+                return Recorded::Nowhere;
+            };
+            (p.id, p.name.clone(), place_recorded_note(model, mode, p, start, end, quantize))
+        };
+        let Placement::At { start_tick, length_ticks } = placement else {
+            return Recorded::NotPlaying { pattern: name };
+        };
+        let note = NoteEvent::new(start_tick, length_ticks, pitch as i32).with_velocity(velocity as i32);
+        // Half a grid step either side of the start, or a 128th of a beat when recording as
+        // played: close enough to be the same key, struck twice.
+        let slot = (quantize.unwrap_or(TICKS_PER_BEAT / 32) / 2).max(1);
+        let mut rec = self.recorder.lock().unwrap();
+        let mut doc = self.doc.lock().unwrap();
+        if rec.take.write(&mut doc, pattern_id, note, slot) {
+            Recorded::Written
+        } else {
+            Recorded::Nowhere
+        }
+    }
+
+    /// End the take, so the pass the player just made takes one undo to take back. Called on
+    /// disarm, on stop, and when the mode or the pattern being recorded into changes.
+    pub fn commit_take(&self) {
+        let mut rec = self.recorder.lock().unwrap();
+        rec.take.finish(&mut self.doc.lock().unwrap());
     }
 }
 
@@ -1348,17 +1535,21 @@ fn set_live_track(state: State<'_, AppState>, track_id: Option<Uuid>) {
     state.playback.lock().unwrap().live_track = track_id;
 }
 
+/// Arm or disarm recording. `quantize` is the grid in ticks recorded notes snap to; `None`
+/// (or 0) records the take exactly as played.
 #[tauri::command]
 fn set_record(state: State<'_, AppState>, armed: bool, quantize: Option<i64>) -> MidiStatus {
     let mut rec = state.recorder.lock().unwrap();
     rec.armed = armed;
-    if let Some(q) = quantize {
-        rec.quantize = q.max(0);
-    }
+    rec.quantize = quantize.filter(|q| *q > 0);
     if !armed {
         rec.held.clear();
     }
     drop(rec);
+    // Disarming ends the pass: one undo takes the whole take back.
+    if !armed {
+        state.commit_take();
+    }
     midi_status(state)
 }
 
@@ -1422,6 +1613,120 @@ pub struct ExportProgress {
 #[serde(rename_all = "camelCase")]
 pub struct ExportResult {
     pub files: Vec<String>,
+    /// Plugins the render could not open, by name. The files were written without them, and
+    /// saying so is the whole point: a silently substituted voice is a wrong mix that looks
+    /// finished.
+    pub missing_plugins: Vec<String>,
+}
+
+/// One render pass's plugin instances, plus what the caller owes afterwards.
+///
+/// Not `Clone` and not reusable: [`RenderPlugins`] holds live units the engine takes ownership
+/// of, so each pass opens its own set and closes it again.
+#[derive(Default)]
+pub struct RenderRig {
+    pub plugins: RenderPlugins,
+    /// The fresh ids the plugin host now holds, to close once the pass has rendered.
+    pub opened: Vec<Uuid>,
+    /// Names of the plugins that would not open.
+    pub missing: Vec<String>,
+}
+
+/// Open one offline render pass's worth of plugins: every audible track's instrument and every
+/// slot of every chain, at the render sample rate.
+///
+/// The engine consumes the units it is handed, so a pass cannot borrow the live ones and two
+/// passes cannot share a set — hence open-per-pass, with [`RenderRig::opened`] naming what the
+/// caller has to close afterwards.
+///
+/// Free of [`AppState`] so a test can drive it with a host of its own.
+pub fn open_render_plugins(host: &PluginHostThread, model: &ProjectModel, sample_rate: f64) -> RenderRig {
+    let mut rig = RenderRig::default();
+    // A stem pass mutes every track but one, and a muted track is never fed a note: opening its
+    // plugins would cost a load each for a channel that renders silence.
+    let any_solo = model.tracks.iter().any(|t| t.soloed);
+    let audible = |t: &dissonant_core::Track| if any_solo { t.soloed } else { !t.muted };
+    for track in model.tracks.iter().filter(|t| audible(t)) {
+        let Some(plugin) = &track.plugin else { continue };
+        match open_for_render(host, track.id, &plugin.uid, plugin.state.as_deref(), sample_rate) {
+            Some((id, unit)) => {
+                rig.opened.push(id);
+                rig.plugins
+                    .instruments
+                    .push((track.id, dissonant_engine::Instrument::Plugin(Box::new(unit))));
+            }
+            // Rendering the built-in voice here would sound like a finished export of a mix the
+            // user never made; the name goes back to the UI instead.
+            None => rig.missing.push(plugin.name.clone()),
+        }
+    }
+    let chains = model
+        .tracks
+        .iter()
+        .filter(|t| audible(t))
+        .map(|t| (InsertTarget::Track(t.id), &t.inserts))
+        .chain(std::iter::once((InsertTarget::Master, &model.master_inserts)));
+    for (target, inserts) in chains {
+        if inserts.is_empty() {
+            continue;
+        }
+        let mut chain = Vec::with_capacity(inserts.len());
+        for insert in inserts {
+            let unit = match open_for_render(host, insert.id, &insert.uid, insert.state.as_deref(), sample_rate) {
+                Some((id, unit)) => {
+                    rig.opened.push(id);
+                    Some(Box::new(unit))
+                }
+                None => {
+                    rig.missing.push(insert.name.clone());
+                    None
+                }
+            };
+            // An empty slot still takes its place, so everything after it keeps its index.
+            let mut slot = InsertSlot::new(insert.id, unit);
+            slot.enabled = insert.enabled;
+            chain.push(slot);
+        }
+        rig.plugins.inserts.push((target, chain));
+    }
+    rig
+}
+
+/// Open one plugin for a render pass under a **fresh** id — never the live key, or this instance
+/// and the live one would collide in the host's table and in the reconcile caches, and closing
+/// the render copy would silence playback.
+///
+/// State comes from the live instance first: `save_state` is the sound the user is hearing right
+/// now, while the model's blob is only as fresh as the last edit that wrote it.
+fn open_for_render(
+    host: &PluginHostThread,
+    live_id: Uuid,
+    uid: &str,
+    stored: Option<&str>,
+    sample_rate: f64,
+) -> Option<(Uuid, dissonant_plugins::PluginAudioUnit)> {
+    let id = Uuid::new_v4();
+    let unit = match host.open(id, uid, sample_rate) {
+        Ok((unit, _)) => unit,
+        Err(e) => {
+            log::warn!("export: could not open {uid}: {e}");
+            return None;
+        }
+    };
+    let state = host
+        .save_state(live_id)
+        .map(|s| (s, "the live instance"))
+        .or_else(|| stored.and_then(b64_decode).map(|s| (s, "the project")));
+    match state {
+        Some((state, from)) => {
+            log::debug!("export: {uid} state from {from}");
+            if let Err(e) = host.load_state(id, state) {
+                log::warn!("export: could not restore state for {uid}: {e}");
+            }
+        }
+        None => log::debug!("export: {uid} renders with its default state"),
+    }
+    Some((id, unit))
 }
 
 /// Render to WAV faster than real time on a worker thread: the mix, and with `stems` one file
@@ -1482,21 +1787,38 @@ async fn export_wav(app: AppHandle, state: State<'_, AppState>, request: ExportR
     let total = jobs.len() as u32;
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        // The managed state outlives the app, so the blocking pass can reach the plugin host the
+        // same way a command would.
+        let state = handle.state::<AppState>();
+        let sample_rate = options.sample_rate as f64;
         let mut files = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
         for (i, (path, m)) in jobs.into_iter().enumerate() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
             let _ = handle.emit("export-progress", ExportProgress { done: i as u32, total, current: name });
-            render_wav(Arc::new(build(&m)), &path, &options).map_err(|e| e.to_string())?;
+            // One set per pass: the engine consumes the units, so they cannot be reused, and
+            // closing them before the next pass keeps peak memory at one set.
+            let rig = open_render_plugins(&state.plugin_host, &m, sample_rate);
+            let written = render_wav(Arc::new(build(&m)), &path, &options, rig.plugins).map_err(|e| e.to_string());
+            for id in rig.opened {
+                state.plugin_host.close(id);
+            }
+            written?;
+            for name in rig.missing {
+                if !missing.contains(&name) {
+                    missing.push(name);
+                }
+            }
             files.push(path.display().to_string());
         }
         let _ = handle.emit("export-progress", ExportProgress { done: total, total, current: String::new() });
-        Ok::<_, String>(files)
+        Ok::<_, String>((files, missing))
     })
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
     state.exporting.store(false, Ordering::SeqCst);
-    result.map(|files| ExportResult { files })
+    result.map(|(files, missing_plugins)| ExportResult { files, missing_plugins })
 }
 
 // ─── MIDI files ──────────────────────────────────────────────────────────────────────────────
@@ -1705,6 +2027,12 @@ fn output_devices() -> Vec<OutputDevice> {
 #[tauri::command]
 fn test_tone(state: State<'_, AppState>) {
     state.send(EngineCommand::TestTone);
+}
+
+/// Acknowledge the latched clip indicator; the next over lights it again.
+#[tauri::command]
+fn clear_clip(state: State<'_, AppState>) {
+    state.send(EngineCommand::ClearClip);
 }
 
 // ─── Guitar: input, recording and audio import ───────────────────────────────────────────────
@@ -2665,6 +2993,7 @@ pub fn run() {
             set_settings,
             output_devices,
             test_tone,
+            clear_clip,
             export_midi,
             import_midi,
             list_templates,
