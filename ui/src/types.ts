@@ -485,6 +485,9 @@ export interface ProjectModel {
   tempoPoints?: TempoPoint[];
   /** The master effect chain, ahead of the master bus. Absent when empty. */
   masterInserts?: Insert[];
+  /** Automated parameters, one lane each. Absent when empty, so an automation-free project
+   *  is byte-identical to one saved before lanes existed. */
+  automation?: AutomationLane[];
   /** The project-wide progression in song ticks: sorted, non-overlapping. */
   chords: ChordEvent[];
   /** The song's hard end in ticks: clips can't start at or run past it. At least one bar. */
@@ -785,6 +788,108 @@ export type PlayMode = "pattern" | "song";
 export type ViewMode = "setup" | "pattern" | "song" | "sound";
 export type Tier = "chordTone" | "tension" | "dissonance";
 
+/** Which parameter of the master bus a lane writes to. */
+export type MasterParam = "gain";
+
+/** What a lane writes to. Mirrors `dissonant_core::automation::AutoTarget`; `insert` and
+ *  `trackPlugin` name a CLAP parameter by its stable id. */
+export type AutoTarget =
+  | { track: [string, TrackParam] }
+  | { master: MasterParam }
+  | { insert: [InsertTarget, string, number] }
+  | { trackPlugin: [string, number] };
+
+/** How a breakpoint is reached from the one before it. */
+export type Curve = "step" | "ramp";
+
+/** One point on a lane. */
+export interface Breakpoint {
+  id: string;
+  tick: number;
+  value: number;
+  curve: Curve;
+}
+
+/** One automated parameter: sorted by tick, at most one point per tick. */
+export interface AutomationLane {
+  id: string;
+  target: AutoTarget;
+  points: Breakpoint[];
+}
+
+/** Mirror of `AutoTarget::clamp` / `track_param_range`. */
+export function trackParamRange(param: TrackParam): [number, number] {
+  switch (param) {
+    case "volume":
+      return [0, 1.5];
+    case "reverbSend":
+      return [0, 1];
+    case "tone":
+      return [200, 20_000];
+    case "pan":
+      return [-1, 1];
+  }
+}
+
+/** `null` for plugin/insert targets, whose range only the plugin knows. */
+export function autoTargetRange(target: AutoTarget): [number, number] | null {
+  if ("track" in target) return trackParamRange(target.track[1]);
+  if ("master" in target) return [0, 1.5];
+  return null;
+}
+
+export function sameAutoTarget(a: AutoTarget, b: AutoTarget): boolean {
+  if ("track" in a && "track" in b)
+    return a.track[0] === b.track[0] && a.track[1] === b.track[1];
+  if ("master" in a && "master" in b) return a.master === b.master;
+  if ("insert" in a && "insert" in b) {
+    const [ca, ia, pa] = a.insert;
+    const [cb, ib, pb] = b.insert;
+    const sameChain =
+      ca === "master" || cb === "master" ? ca === cb : ca.track === cb.track;
+    return sameChain && ia === ib && pa === pb;
+  }
+  if ("trackPlugin" in a && "trackPlugin" in b)
+    return a.trackPlugin[0] === b.trackPlugin[0] && a.trackPlugin[1] === b.trackPlugin[1];
+  return false;
+}
+
+export function autoTrackId(target: AutoTarget): string | null {
+  if ("track" in target) return target.track[0];
+  if ("trackPlugin" in target) return target.trackPlugin[0];
+  if ("insert" in target)
+    return target.insert[0] === "master" ? null : target.insert[0].track;
+  return null;
+}
+
+/** The lane rule: before the first point the first value holds; a `ramp` point glides
+ *  linearly from the previous point's value into itself; a `step` point holds the previous
+ *  value until its own tick then jumps; past the last point the last value holds.
+ *  `null` when `points` is empty. */
+export function automationValueAt(points: Breakpoint[], tick: number): number | null {
+  const first = points[0];
+  if (!first) return null;
+  // Index of the first point strictly after `tick`.
+  let i = 0;
+  while (i < points.length && points[i].tick <= tick) i++;
+  if (i === 0) return first.value;
+  const prev = points[i - 1];
+  const next = points[i];
+  if (next && next.curve === "ramp" && next.tick > prev.tick) {
+    const t = (tick - prev.tick) / (next.tick - prev.tick);
+    return prev.value + (next.value - prev.value) * Math.min(1, Math.max(0, t));
+  }
+  return prev.value;
+}
+
+/** The lane for `target`, or undefined. */
+export function automationLane(
+  m: ProjectModel,
+  target: AutoTarget,
+): AutomationLane | undefined {
+  return (m.automation ?? []).find((l) => sameAutoTarget(l.target, target));
+}
+
 export type Command =
   | { type: "setTempo"; bpm: number }
   | { type: "setKey"; key: KeyState }
@@ -846,6 +951,13 @@ export type Command =
   | { type: "addTempoPoint"; tick: number; bpm: number; ramp: boolean }
   | { type: "updateTempoPoint"; point: TempoPoint }
   | { type: "removeTempoPoint"; id: string }
+  /** Draw or redraw the point on `tick`: one drag is one undo step like a knob's. */
+  | { type: "addAutomationPoint"; target: AutoTarget; tick: number; value: number; curve: Curve }
+  /** Move / retune / re-curve a point (matched by id inside `lane`). */
+  | { type: "updateAutomationPoint"; lane: string; point: Breakpoint }
+  | { type: "removeAutomationPoint"; lane: string; id: string }
+  /** Drop the whole lane for `target`: the parameter goes back to its static control. */
+  | { type: "clearAutomation"; target: AutoTarget }
   | { type: "addAudioTrack"; name: string }
   | { type: "setTrackAmp"; id: string; amp: AmpRig }
   | {

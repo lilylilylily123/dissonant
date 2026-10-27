@@ -167,6 +167,10 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::AddTempoPoint { .. } => "AddTempoPoint",
         Command::UpdateTempoPoint { .. } => "UpdateTempoPoint",
         Command::RemoveTempoPoint { .. } => "RemoveTempoPoint",
+        Command::AddAutomationPoint { .. } => "AddAutomationPoint",
+        Command::UpdateAutomationPoint { .. } => "UpdateAutomationPoint",
+        Command::RemoveAutomationPoint { .. } => "RemoveAutomationPoint",
+        Command::ClearAutomation { .. } => "ClearAutomation",
         Command::AddAudioTrack { .. } => "AddAudioTrack",
         Command::SetTrackAmp { .. } => "SetTrackAmp",
         Command::AddAudioTake { .. } => "AddAudioTake",
@@ -347,6 +351,12 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
             tick: 8 * BEAT,
             bpm: 140.0,
             ramp: true,
+        },
+        Command::AddAutomationPoint {
+            target: AutoTarget::Track(t0, TrackParam::Volume),
+            tick: 8 * BEAT,
+            value: 0.25,
+            curve: Curve::Ramp,
         },
         Command::AddAudioTrack {
             name: "gtr 2".into(),
@@ -3407,4 +3417,292 @@ fn loading_repairs_a_broken_kit_and_unclamped_sounds() {
     assert_eq!(m.tracks[1].drum_pads, default_kit());
     assert_eq!(m.resolve_synth("u-test").level, 1.0);
     assert_eq!(embedded(&m), ["u-test"], "an unused sound survived loading");
+}
+
+// ---------------------------------------------------------------- 9. automation
+
+/// `(document, track id, volume target)` for the automation tests.
+fn auto_doc() -> (Document, Uuid, AutoTarget) {
+    let d = doc();
+    let t = d.model().tracks[0].id;
+    (d, t, AutoTarget::Track(t, TrackParam::Volume))
+}
+
+fn add_point(d: &mut Document, target: AutoTarget, tick: i64, value: f64, curve: Curve) {
+    d.apply(
+        Command::AddAutomationPoint {
+            target,
+            tick,
+            value,
+            curve,
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_lane_appears_with_its_first_point_and_one_point_holds_each_tick() {
+    let (mut d, t, target) = auto_doc();
+    add_point(&mut d, target, 8 * BEAT, 0.5, Curve::Ramp);
+    assert_eq!(d.model().automation.len(), 1);
+    assert_eq!(d.model().automation[0].target, target);
+    assert_eq!(d.model().automation[0].points.len(), 1);
+
+    // A second point on the same tick replaces the first rather than stacking on it.
+    add_point(&mut d, target, 8 * BEAT, 0.25, Curve::Step);
+    assert_eq!(d.model().automation[0].points.len(), 1);
+    assert_eq!(d.model().automation[0].points[0].value, 0.25);
+    assert_eq!(d.model().automation[0].points[0].curve, Curve::Step);
+
+    // A second parameter is a second lane, not a second entry on the first.
+    add_point(
+        &mut d,
+        AutoTarget::Track(t, TrackParam::Pan),
+        0,
+        -0.5,
+        Curve::Step,
+    );
+    assert_eq!(d.model().automation.len(), 2);
+}
+
+#[test]
+fn a_point_moves_keeps_its_id_and_swallows_the_neighbour_it_lands_on() {
+    let (mut d, _, target) = auto_doc();
+    add_point(&mut d, target, 0, 1.0, Curve::Step);
+    add_point(&mut d, target, 8 * BEAT, 0.0, Curve::Ramp);
+    let lane = d.model().automation[0].id;
+    let moved = d.model().automation[0].points[1].clone();
+    let id = moved.id;
+
+    d.apply(
+        Command::UpdateAutomationPoint {
+            lane,
+            point: Breakpoint {
+                tick: 0,
+                value: 0.4,
+                ..moved
+            },
+        },
+        false,
+    )
+    .unwrap();
+    let points = &d.model().automation[0].points;
+    assert_eq!(points.len(), 1, "the point it landed on should be gone");
+    assert_eq!(points[0].id, id, "the dragged point kept its identity");
+    assert_eq!(points[0].value, 0.4);
+}
+
+#[test]
+fn removing_the_last_point_takes_the_lane_with_it() {
+    let (mut d, _, target) = auto_doc();
+    add_point(&mut d, target, 0, 1.0, Curve::Step);
+    add_point(&mut d, target, 4 * BEAT, 0.5, Curve::Ramp);
+    let lane = d.model().automation[0].id;
+    let (first, second) = (
+        d.model().automation[0].points[0].id,
+        d.model().automation[0].points[1].id,
+    );
+    d.apply(Command::RemoveAutomationPoint { lane, id: first }, false)
+        .unwrap();
+    assert_eq!(d.model().automation.len(), 1);
+    d.apply(Command::RemoveAutomationPoint { lane, id: second }, false)
+        .unwrap();
+    assert!(
+        d.model().automation.is_empty(),
+        "an empty lane is no automation at all"
+    );
+    assert_eq!(
+        d.apply(Command::RemoveAutomationPoint { lane, id: second }, false),
+        Err(EditError::NoSuchAutomationLane)
+    );
+}
+
+#[test]
+fn automation_edits_are_validated_and_a_refused_one_changes_nothing() {
+    let (mut d, t, target) = auto_doc();
+    add_point(&mut d, target, 0, 1.0, Curve::Step);
+    let before = d.model().clone();
+    let lane = before.automation[0].id;
+    let point = before.automation[0].points[0].clone();
+
+    for bad in [
+        Command::AddAutomationPoint {
+            target,
+            tick: -1,
+            value: 0.5,
+            curve: Curve::Step,
+        },
+        Command::AddAutomationPoint {
+            target,
+            tick: 0,
+            value: f64::NAN,
+            curve: Curve::Step,
+        },
+        Command::AddAutomationPoint {
+            target: AutoTarget::Track(Uuid::new_v4(), TrackParam::Volume),
+            tick: 0,
+            value: 0.5,
+            curve: Curve::Step,
+        },
+        Command::UpdateAutomationPoint {
+            lane: Uuid::new_v4(),
+            point: point.clone(),
+        },
+        Command::UpdateAutomationPoint {
+            lane,
+            point: Breakpoint::new(0, 0.5, Curve::Step),
+        },
+        Command::ClearAutomation {
+            target: AutoTarget::Track(t, TrackParam::Tone),
+        },
+    ] {
+        assert!(d.apply(bad.clone(), false).is_err(), "{bad:?} was accepted");
+        assert_eq!(d.model(), &before, "{bad:?} changed the project");
+    }
+
+    // Values are held to the control's own range, the same table the fader uses.
+    add_point(&mut d, target, 2 * BEAT, 99.0, Curve::Step);
+    assert_eq!(d.model().automation[0].points[1].value, 1.5);
+    add_point(
+        &mut d,
+        AutoTarget::Track(t, TrackParam::Pan),
+        0,
+        -99.0,
+        Curve::Step,
+    );
+    assert_eq!(
+        d.model()
+            .automation
+            .iter()
+            .find(|l| l.target == AutoTarget::Track(t, TrackParam::Pan))
+            .unwrap()
+            .points[0]
+            .value,
+        -1.0
+    );
+}
+
+#[test]
+fn a_freehand_drag_is_one_undo_step() {
+    let (mut d, _, target) = auto_doc();
+    add_point(&mut d, target, 0, 1.0, Curve::Step);
+    add_point(&mut d, target, 8 * BEAT, 1.0, Curve::Ramp);
+    let before = d.model().clone();
+    let lane = d.model().automation[0].id;
+    let dragged = d.model().automation[0].points[1].clone();
+
+    // What the lane sends while the pointer moves: one transient command per frame.
+    for v in [0.8, 0.6, 0.4, 0.2, 0.0] {
+        d.apply(
+            Command::UpdateAutomationPoint {
+                lane,
+                point: Breakpoint {
+                    value: v,
+                    ..dragged.clone()
+                },
+            },
+            true,
+        )
+        .unwrap();
+    }
+    d.commit_gesture();
+    assert_eq!(d.model().automation[0].points[1].value, 0.0);
+    assert_eq!(d.undo_label(), Some("move automation point"));
+    d.undo();
+    assert_eq!(
+        d.model(),
+        &before,
+        "a drag should undo in one step, back to where the point started"
+    );
+}
+
+#[test]
+fn clearing_a_lane_and_deleting_its_track_both_remove_it() {
+    let (mut d, t, target) = auto_doc();
+    add_point(&mut d, target, 0, 0.5, Curve::Step);
+    add_point(
+        &mut d,
+        AutoTarget::Master(MasterParam::Gain),
+        0,
+        0.9,
+        Curve::Step,
+    );
+    d.apply(Command::ClearAutomation { target }, false).unwrap();
+    assert_eq!(
+        d.model().automation.len(),
+        1,
+        "clearing one target must leave the others"
+    );
+
+    add_point(&mut d, target, 0, 0.5, Curve::Step);
+    d.apply(Command::DeleteTrack { id: t }, false).unwrap();
+    assert!(
+        d.model()
+            .automation
+            .iter()
+            .all(|l| l.target.track_id() != Some(t)),
+        "a deleted track left its lanes behind"
+    );
+    assert_eq!(
+        d.model().automation.len(),
+        1,
+        "the master lane is not a track's and must survive"
+    );
+}
+
+#[test]
+fn song_mode_flattens_lanes_as_they_are_and_pattern_mode_windows_them() {
+    let (mut d, _, target) = auto_doc();
+    // A fade across bars 3 → 5 of the song, and a master lane alongside it.
+    add_point(&mut d, target, 8 * BEAT, 1.0, Curve::Step);
+    add_point(&mut d, target, 16 * BEAT, 0.0, Curve::Ramp);
+    add_point(
+        &mut d,
+        AutoTarget::Master(MasterParam::Gain),
+        0,
+        0.75,
+        Curve::Step,
+    );
+
+    let song = Sequence::from_song(d.model());
+    let volume = song.tracks[0]
+        .automation
+        .volume
+        .as_ref()
+        .expect("song mode carries the lane");
+    assert_eq!(volume.value_at(0.0), 1.0, "before the first point it holds");
+    assert_eq!(volume.value_at(12.0 * BEAT as f64), 0.5, "a ramp interpolates");
+    assert_eq!(volume.value_at(99.0 * BEAT as f64), 0.0, "past the end it holds");
+    assert_eq!(
+        song.master_automation.gain.as_ref().map(|c| c.value_at(0.0)),
+        Some(0.75)
+    );
+    assert!(song.tracks[0].automation.tone.is_none());
+
+    // Pattern mode hears the pattern where it sits in the song, so the lane is windowed from
+    // the offset: the value in force there becomes the window's tick 0.
+    let pid = d.model().patterns[0].id;
+    let windowed = Sequence::from_pattern(d.model(), &pid, 12 * BEAT).unwrap();
+    let w = windowed.tracks[0]
+        .automation
+        .volume
+        .as_ref()
+        .expect("pattern mode carries the window");
+    assert_eq!(w.value_at(0.0), 0.5, "the window opens where the song was");
+    assert_eq!(w.value_at(4.0 * BEAT as f64), 0.0, "and the rest shifts back");
+    assert_eq!(
+        windowed
+            .master_automation
+            .gain
+            .as_ref()
+            .map(|c| c.value_at(0.0)),
+        Some(0.75)
+    );
+
+    // Two builds of the same sequence must compare equal, window or no window.
+    assert_eq!(
+        Sequence::from_pattern(d.model(), &pid, 12 * BEAT).unwrap(),
+        windowed
+    );
 }

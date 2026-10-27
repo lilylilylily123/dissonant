@@ -10,8 +10,8 @@
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
-import type { AudioClip, AudioSource, ChordEvent, Clip, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel } from "./types";
-import { defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, SOUND_PRESETS, soundPresetOf, TICKS_PER_BEAT } from "./types";
+import type { AudioClip, AudioSource, AutoTarget, ChordEvent, Clip, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel } from "./types";
+import { automationLane, defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, SOUND_PRESETS, soundPresetOf, TICKS_PER_BEAT } from "./types";
 import { DEFAULT_DRUM_PATCH, DEFAULT_SYNTH_PATCH, defaultKit, FACTORY_SOUNDS, type DrumPad, type Sound } from "./sound";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
@@ -1658,5 +1658,122 @@ describe("audio tracks", () => {
       expect(lo).toBeGreaterThanOrEqual(-1);
       expect(hi).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+/** Mirrors the automation section of crates/dissonant-core/src/document.rs. */
+describe("automation", () => {
+  const MASTER_GAIN: AutoTarget = { master: "gain" };
+  const lane = async (target: AutoTarget) => automationLane(await model(), target);
+  /** One lane's points as `[tick, value, curve]`, which is what the rules are about. */
+  const shape = async (target: AutoTarget) =>
+    (await lane(target))!.points.map((p) => [p.tick, p.value, p.curve]);
+
+  it("creates one lane per target and replaces the point already on a tick", async () => {
+    const { melody } = await ids();
+    const volume: AutoTarget = { track: [melody, "volume"] };
+    await b.apply({ type: "addAutomationPoint", target: volume, tick: 4 * TICKS_PER_BEAT, value: 0.5, curve: "ramp" });
+    await b.apply({ type: "addAutomationPoint", target: volume, tick: 0, value: 1, curve: "step" });
+    expect((await model()).automation).toHaveLength(1);
+    expect(await shape(volume)).toEqual([
+      [0, 1, "step"],
+      [4 * TICKS_PER_BEAT, 0.5, "ramp"],
+    ]);
+    // Drawing again on a tick replaces what was there rather than stacking a second point.
+    await b.apply({ type: "addAutomationPoint", target: volume, tick: 0, value: 0.25, curve: "ramp" });
+    expect(await shape(volume)).toEqual([
+      [0, 0.25, "ramp"],
+      [4 * TICKS_PER_BEAT, 0.5, "ramp"],
+    ]);
+    await b.apply({ type: "addAutomationPoint", target: MASTER_GAIN, tick: 0, value: 1, curve: "step" });
+    expect((await model()).automation).toHaveLength(2);
+  });
+
+  it("keeps a point's id when it moves and swallows the neighbour it lands on", async () => {
+    await b.apply({ type: "addAutomationPoint", target: MASTER_GAIN, tick: 0, value: 1, curve: "step" });
+    await b.apply({ type: "addAutomationPoint", target: MASTER_GAIN, tick: 8 * TICKS_PER_BEAT, value: 0, curve: "ramp" });
+    const l = (await lane(MASTER_GAIN))!;
+    const moved = { ...l.points[1], tick: 4 * TICKS_PER_BEAT, value: 0.5 };
+    await b.apply({ type: "updateAutomationPoint", lane: l.id, point: moved });
+    expect(await shape(MASTER_GAIN)).toEqual([
+      [0, 1, "step"],
+      [4 * TICKS_PER_BEAT, 0.5, "ramp"],
+    ]);
+    expect((await lane(MASTER_GAIN))!.points[1].id).toBe(l.points[1].id);
+    // Dragged onto its neighbour, the edited point wins and the other one goes.
+    await b.apply({ type: "updateAutomationPoint", lane: l.id, point: { ...moved, tick: 0 } });
+    expect(await shape(MASTER_GAIN)).toEqual([[0, 0.5, "ramp"]]);
+    expect((await lane(MASTER_GAIN))!.points[0].id).toBe(l.points[1].id);
+  });
+
+  it("drops the lane when its last point is removed, and clears a whole lane", async () => {
+    await b.apply({ type: "addAutomationPoint", target: MASTER_GAIN, tick: 0, value: 1, curve: "step" });
+    await b.apply({ type: "addAutomationPoint", target: MASTER_GAIN, tick: 960, value: 0.5, curve: "ramp" });
+    const l = (await lane(MASTER_GAIN))!;
+    await b.apply({ type: "removeAutomationPoint", lane: l.id, id: l.points[0].id });
+    expect(await shape(MASTER_GAIN)).toEqual([[960, 0.5, "ramp"]]);
+    await b.apply({ type: "removeAutomationPoint", lane: l.id, id: l.points[1].id });
+    expect(await lane(MASTER_GAIN)).toBeUndefined();
+    // An automation-free project carries no lanes at all, not an empty list.
+    expect((await model()).automation).toBeUndefined();
+
+    await b.apply({ type: "addAutomationPoint", target: MASTER_GAIN, tick: 0, value: 1, curve: "step" });
+    await b.apply({ type: "clearAutomation", target: MASTER_GAIN });
+    expect((await model()).automation).toBeUndefined();
+  });
+
+  it("rejects an edit that names nothing and leaves the model alone", async () => {
+    const { melody } = await ids();
+    const volume: AutoTarget = { track: [melody, "volume"] };
+    await rejectsAndKeepsModel({ type: "addAutomationPoint", target: volume, tick: -1, value: 1, curve: "step" }, "invalid value");
+    await rejectsAndKeepsModel({ type: "addAutomationPoint", target: volume, tick: 0, value: Number.NaN, curve: "step" }, "invalid value");
+    await rejectsAndKeepsModel({ type: "addAutomationPoint", target: { track: [FAKE_ID, "volume"] }, tick: 0, value: 1, curve: "step" }, "no such track");
+    await rejectsAndKeepsModel({ type: "addAutomationPoint", target: { trackPlugin: [FAKE_ID, 7] }, tick: 0, value: 1, curve: "step" }, "no such track");
+    await rejectsAndKeepsModel({ type: "addAutomationPoint", target: { insert: [{ track: FAKE_ID }, FAKE_ID, 3] }, tick: 0, value: 1, curve: "step" }, "no such track");
+    await rejectsAndKeepsModel({ type: "clearAutomation", target: volume }, "no such automation lane");
+    await rejectsAndKeepsModel({ type: "removeAutomationPoint", lane: FAKE_ID, id: FAKE_ID }, "no such automation lane");
+
+    await b.apply({ type: "addAutomationPoint", target: volume, tick: 0, value: 1, curve: "step" });
+    const l = (await lane(volume))!;
+    await rejectsAndKeepsModel({ type: "removeAutomationPoint", lane: l.id, id: FAKE_ID }, "no such automation point");
+    await rejectsAndKeepsModel({ type: "updateAutomationPoint", lane: l.id, point: { ...l.points[0], id: FAKE_ID } }, "no such automation point");
+    await rejectsAndKeepsModel({ type: "updateAutomationPoint", lane: FAKE_ID, point: l.points[0] }, "no such automation lane");
+    await rejectsAndKeepsModel({ type: "updateAutomationPoint", lane: l.id, point: { ...l.points[0], tick: -1 } }, "invalid value");
+    await rejectsAndKeepsModel({ type: "updateAutomationPoint", lane: l.id, point: { ...l.points[0], value: Number.NaN } }, "invalid value");
+  });
+
+  it("holds every value inside its target's range, like the fader it writes to", async () => {
+    const { melody } = await ids();
+    const drawn = async (target: AutoTarget, value: number) => {
+      await b.apply({ type: "addAutomationPoint", target, tick: 0, value, curve: "step" });
+      return (await lane(target))!.points[0].value;
+    };
+    expect(await drawn({ track: [melody, "volume"] }, 9)).toBe(1.5);
+    expect(await drawn({ track: [melody, "pan"] }, -9)).toBe(-1);
+    expect(await drawn({ track: [melody, "tone"] }, 0)).toBe(200);
+    expect(await drawn({ track: [melody, "reverbSend"] }, 2)).toBe(1);
+    expect(await drawn(MASTER_GAIN, 2)).toBe(1.5);
+    // A plugin parameter's range belongs to the plugin, so the host leaves it alone.
+    expect(await drawn({ trackPlugin: [melody, 7] }, 42)).toBe(42);
+    expect(await drawn({ insert: ["master", FAKE_ID, 3] }, 42)).toBe(42);
+  });
+
+  it("drops the lanes of a deleted track and keeps everyone else's", async () => {
+    const { melody, drums } = await ids();
+    for (const target of [
+      { track: [melody, "volume"] } as AutoTarget,
+      { trackPlugin: [melody, 7] } as AutoTarget,
+      { insert: [{ track: melody }, FAKE_ID, 3] } as AutoTarget,
+      { track: [drums, "pan"] } as AutoTarget,
+      MASTER_GAIN,
+    ]) {
+      await b.apply({ type: "addAutomationPoint", target, tick: 0, value: 0.5, curve: "step" });
+    }
+    expect((await model()).automation).toHaveLength(5);
+    await b.apply({ type: "deleteTrack", id: melody });
+    const left = (await model()).automation!;
+    expect(left).toHaveLength(2);
+    expect(await lane({ track: [drums, "pan"] })).toBeDefined();
+    expect(await lane(MASTER_GAIN)).toBeDefined();
   });
 });

@@ -1246,3 +1246,90 @@ fn loading_drops_unusable_inserts_and_caps_the_chain() {
         );
     }
 }
+
+#[test]
+fn automation_lanes_round_trip() {
+    let mut model = ProjectModel::starter();
+    let track = model.tracks[0].id;
+    let mut fade = AutomationLane::new(AutoTarget::Track(track, TrackParam::Volume));
+    fade.points = vec![
+        Breakpoint::new(0, 1.0, Curve::Step),
+        Breakpoint::new(32 * BEAT, 0.0, Curve::Ramp),
+    ];
+    let mut sweep = AutomationLane::new(AutoTarget::Track(track, TrackParam::Pan));
+    sweep.points = vec![Breakpoint::new(8 * BEAT, -0.75, Curve::Ramp)];
+    let mut master = AutomationLane::new(AutoTarget::Master(MasterParam::Gain));
+    master.points = vec![Breakpoint::new(0, 0.8, Curve::Step)];
+    // Carried but not yet resolved by the engine: a file written here has to come back the
+    // same on a build that does play it, or plugin automation would need a second format move.
+    let mut plugin = AutomationLane::new(AutoTarget::TrackPlugin(track, 42));
+    plugin.points = vec![Breakpoint::new(4 * BEAT, 0.33, Curve::Ramp)];
+    let insert_id = uuid::Uuid::new_v4();
+    let mut insert = AutomationLane::new(AutoTarget::Insert(InsertTarget::Master, insert_id, 7));
+    insert.points = vec![Breakpoint::new(0, 0.5, Curve::Step)];
+    model.automation = vec![fade, sweep, master, plugin, insert];
+
+    let decoded = ProjectModel::from_json(&model.to_json().unwrap()).unwrap();
+    assert_eq!(decoded, model);
+    assert_eq!(decoded.schema_version, SCHEMA_VERSION);
+    // The same fade has to come back out of the flattened sequence, not just out of the model.
+    let seq = Sequence::from_song(&decoded);
+    let volume = seq.tracks[0]
+        .automation
+        .volume
+        .as_ref()
+        .expect("the volume lane survived the round trip");
+    assert_eq!(volume.value_at(0.0), 1.0);
+    assert_eq!(volume.value_at(32.0 * BEAT as f64), 0.0);
+    assert_eq!(
+        seq.master_automation
+            .gain
+            .as_ref()
+            .map(|c| c.value_at(0.0)),
+        Some(0.8)
+    );
+}
+
+#[test]
+fn a_project_with_no_automation_writes_no_automation_key() {
+    // The field defaults and skips when empty, which is what keeps it off the schema version:
+    // a project that automates nothing is byte-identical to what schema 10 already wrote.
+    let model = ProjectModel::starter();
+    assert!(!model.to_json().unwrap().contains("automation"));
+    assert_eq!(model.schema_version, SCHEMA_VERSION);
+}
+
+#[test]
+fn loading_tidies_automation_and_drops_orphaned_lanes() {
+    let mut m = ProjectModel::starter();
+    let track = m.tracks[0].id;
+    let gone = uuid::Uuid::new_v4();
+    let mut messy = AutomationLane::new(AutoTarget::Track(track, TrackParam::Volume));
+    // Out of order, out of range, one negative tick and two points on the same tick: all
+    // reachable by hand-editing a file, none of them a function of time.
+    messy.points = vec![
+        Breakpoint::new(16 * BEAT, 9.0, Curve::Step),
+        Breakpoint::new(-4, 0.5, Curve::Step),
+        Breakpoint::new(0, 0.25, Curve::Step),
+        Breakpoint::new(16 * BEAT, 0.6, Curve::Ramp),
+    ];
+    let orphan = AutomationLane::new(AutoTarget::Track(gone, TrackParam::Pan));
+    let empty = AutomationLane::new(AutoTarget::Track(track, TrackParam::Tone));
+    let mut duplicate = AutomationLane::new(AutoTarget::Track(track, TrackParam::Volume));
+    duplicate.points = vec![Breakpoint::new(0, 1.0, Curve::Step)];
+    m.automation = vec![messy, orphan, empty, duplicate];
+
+    let loaded = ProjectModel::from_json(&m.to_json().unwrap()).unwrap();
+    assert_eq!(loaded.automation.len(), 1, "one lane per target should survive");
+    let lane = &loaded.automation[0];
+    assert_eq!(lane.target, AutoTarget::Track(track, TrackParam::Volume));
+    let shape: Vec<(i64, f64, Curve)> = lane
+        .points
+        .iter()
+        .map(|p| (p.tick, p.value, p.curve))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![(0, 0.25, Curve::Step), (16 * BEAT, 0.6, Curve::Ramp)]
+    );
+}

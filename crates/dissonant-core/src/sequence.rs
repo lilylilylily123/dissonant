@@ -3,7 +3,9 @@
 //! or the whole arrangement (song mode). The engine never looks at `ProjectModel` directly.
 
 use crate::arrangement::Arrangement;
+use crate::automation::{AutoTarget, AutomationCurve, Breakpoint, Curve, MasterParam};
 use crate::chord_track::ChordTrack;
+use crate::document::TrackParam;
 use crate::model::{AmpRig, NoteEvent, ProjectModel, Track, TrackPlugin};
 use crate::sound::{ResolvedPad, SynthPatch};
 use crate::tempo::TempoMap;
@@ -31,10 +33,103 @@ pub struct SequenceTrack {
     pub synth: SynthPatch,
     /// The drum kit with each pad's sound looked up (empty on synth tracks).
     pub drum_pads: Vec<ResolvedPad>,
+    /// The lanes that move this track's strip, already on this timeline's ticks. Carried on
+    /// the track rather than in one list on the [`Sequence`] so the engine can reach a
+    /// channel's curves by the index it already has, with no lookup on the audio thread.
+    pub automation: TrackAutomation,
+}
+
+/// The automation for one track's channel strip, flattened onto the timeline being played.
+/// `None` on a parameter means no lane: the track's own static value stands.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TrackAutomation {
+    pub volume: Option<AutomationCurve>,
+    pub pan: Option<AutomationCurve>,
+    pub tone: Option<AutomationCurve>,
+    pub reverb_send: Option<AutomationCurve>,
+}
+
+impl TrackAutomation {
+    fn for_track(model: &ProjectModel, track_id: &Uuid, offset_ticks: i64) -> Self {
+        let curve = |param: TrackParam| {
+            lane_for(model, AutoTarget::Track(*track_id, param), offset_ticks)
+        };
+        TrackAutomation {
+            volume: curve(TrackParam::Volume),
+            pan: curve(TrackParam::Pan),
+            tone: curve(TrackParam::Tone),
+            reverb_send: curve(TrackParam::ReverbSend),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.volume.is_none()
+            && self.pan.is_none()
+            && self.tone.is_none()
+            && self.reverb_send.is_none()
+    }
+}
+
+/// The automation for the master bus, flattened like [`TrackAutomation`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MasterAutomation {
+    pub gain: Option<AutomationCurve>,
+}
+
+impl MasterAutomation {
+    fn for_model(model: &ProjectModel, offset_ticks: i64) -> Self {
+        MasterAutomation {
+            gain: lane_for(model, AutoTarget::Master(MasterParam::Gain), offset_ticks),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gain.is_none()
+    }
+}
+
+/// `target`'s lane moved onto a timeline that starts at song tick `offset_ticks`.
+///
+/// Song mode plays from tick 0, so the lane is used as it is. Pattern mode hears the pattern
+/// where it sits in the song (the same idea as `chord_offset_ticks`), so everything before the
+/// window collapses into a single point at tick 0 holding the value in force there and the
+/// rest shifts back. The pattern loops, so its slice of the automation loops with it: a fade
+/// written across the whole song is heard as the one move that crosses this pattern.
+///
+/// Plugin and insert targets resolve to nothing: they are in the file format already (see
+/// [`AutoTarget`]) but the CLAP event plumbing is not built, so a lane on one is carried
+/// through save and open and is silent.
+fn lane_for(model: &ProjectModel, target: AutoTarget, offset_ticks: i64) -> Option<AutomationCurve> {
+    let lane = model.automation.iter().find(|l| l.target == target)?;
+    if offset_ticks <= 0 {
+        return AutomationCurve::new(lane.points.clone());
+    }
+    let entering = lane.value_at(offset_ticks as f64)?;
+    let mut points = Vec::with_capacity(lane.points.len() + 1);
+    points.push(Breakpoint {
+        // Derived, not random: two builds of the same sequence have to compare equal.
+        id: Uuid::new_v5(&lane.id, b"window"),
+        tick: 0,
+        value: entering,
+        curve: Curve::Step,
+    });
+    points.extend(lane.points.iter().filter(|p| p.tick > offset_ticks).map(|p| {
+        Breakpoint {
+            tick: p.tick - offset_ticks,
+            ..p.clone()
+        }
+    }));
+    AutomationCurve::new(points)
 }
 
 impl SequenceTrack {
-    fn from_track(model: &ProjectModel, track: &Track, notes: Vec<NoteEvent>) -> Self {
+    /// `offset_ticks` is where the timeline being built starts in the song; see [`lane_for`].
+    fn from_track(
+        model: &ProjectModel,
+        track: &Track,
+        notes: Vec<NoteEvent>,
+        offset_ticks: i64,
+    ) -> Self {
         let drum_pads = if track.is_drum {
             track
                 .drum_pads
@@ -60,6 +155,7 @@ impl SequenceTrack {
             notes,
             synth: model.resolve_synth(&track.voice),
             drum_pads,
+            automation: TrackAutomation::for_track(model, &track.id, offset_ticks),
         }
     }
 
@@ -87,6 +183,9 @@ pub struct Sequence {
     pub bar_ticks: i64,
     /// Ticks ⇄ seconds. Constant at `tempo_bpm` in pattern mode; the song's map in song mode.
     pub tempo_map: TempoMap,
+    /// The master bus's lanes, flattened onto this timeline alongside `tempo_map`. The track
+    /// lanes ride on each [`SequenceTrack`].
+    pub master_automation: MasterAutomation,
     /// Audio placed on the song timeline, in seconds. Empty in pattern mode.
     pub audio: Vec<SequenceAudioClip>,
 }
@@ -117,36 +216,27 @@ impl Sequence {
         let pattern = model.pattern(pattern_id)?;
         let length = pattern.length_ticks.max(TICKS_PER_BEAT);
         let offset = chord_offset_ticks.max(0);
-        let tracks = model
-            .tracks
-            .iter()
-            .map(|t| {
-                SequenceTrack::from_track(
-                    model,
-                    t,
-                    if t.id == pattern.track_id {
-                        pattern.notes.clone()
-                    } else {
-                        vec![]
-                    },
-                )
-            })
-            .collect();
-        Some(Sequence {
-            tracks,
-            chords: ChordTrack::window(model.chords.chords(), offset, length),
-            length_ticks: length,
-            ..Self::silent(model, length)
-        })
+        let mut seq = Sequence::windowed_silent(model, length, offset);
+        if let Some(track) = seq.tracks.iter_mut().find(|t| t.id == pattern.track_id) {
+            track.notes = pattern.notes.clone();
+        }
+        seq.chords = ChordTrack::window(model.chords.chords(), offset, length);
+        Some(seq)
     }
 
     /// Every track with no notes and no chords, for pattern mode with nothing to edit.
     pub fn silent(model: &ProjectModel, length_ticks: i64) -> Self {
+        Sequence::windowed_silent(model, length_ticks, 0)
+    }
+
+    /// [`Sequence::silent`] with its automation taken from song tick `offset_ticks` on, which
+    /// is where the pattern being edited sits in the song. See [`lane_for`].
+    fn windowed_silent(model: &ProjectModel, length_ticks: i64, offset_ticks: i64) -> Self {
         Sequence {
             tracks: model
                 .tracks
                 .iter()
-                .map(|t| SequenceTrack::from_track(model, t, vec![]))
+                .map(|t| SequenceTrack::from_track(model, t, vec![], offset_ticks))
                 .collect(),
             chords: ChordTrack::default(),
             length_ticks: length_ticks.max(TICKS_PER_BEAT),
@@ -155,6 +245,7 @@ impl Sequence {
             swing_grid_ticks: model.swing_grid_ticks,
             bar_ticks: bar_ticks(model.time_signature),
             tempo_map: TempoMap::constant(model.tempo),
+            master_automation: MasterAutomation::for_model(model, offset_ticks),
             // Audio clips live on the song timeline; pattern mode is a notes-only loop.
             audio: vec![],
         }
@@ -237,6 +328,7 @@ impl Sequence {
                     model,
                     t,
                     Arrangement::flattened_notes(&t.id, &model.patterns, &model.clips),
+                    0,
                 )
             })
             .collect();
@@ -281,6 +373,7 @@ impl Sequence {
             swing_grid_ticks: model.swing_grid_ticks,
             bar_ticks: bar_ticks(model.time_signature),
             tempo_map: map,
+            master_automation: MasterAutomation::for_model(model, 0),
             audio,
         }
     }

@@ -9,7 +9,8 @@ use std::f64::consts::PI;
 use std::sync::Arc;
 
 use dissonant_core::{
-    Clip, MasterSettings, NoteEvent, ProjectModel, Sequence, SongPattern, TICKS_PER_BEAT,
+    AutoTarget, AutomationLane, Breakpoint, Clip, Curve, MasterParam, MasterSettings, NoteEvent,
+    ProjectModel, Sequence, SongPattern, TrackParam, TICKS_PER_BEAT,
 };
 use dissonant_engine::channel::Master;
 use dissonant_engine::engine::{Engine, EngineCommand, Shared};
@@ -1258,5 +1259,249 @@ fn meter_release_does_not_depend_on_the_buffer_size() {
     assert!(
         max - min < 0.15,
         "meter release swings with the buffer size: {lit:?} seconds for 128/512/4096 frames"
+    );
+}
+
+// ─── automation ──────────────────────────────────────────────────────────────────────────────
+
+/// A sustained low note, long enough to measure an envelope across.
+fn held_note_model(beats: i64) -> ProjectModel {
+    let mut m = model("sine", beats * B);
+    set_notes(&mut m, 0, vec![NoteEvent::new(0, beats * B, 48)]);
+    m
+}
+
+/// Put one lane on the model, replacing any lane already on that target.
+fn automate(m: &mut ProjectModel, target: AutoTarget, points: Vec<Breakpoint>) {
+    m.automation.retain(|l| l.target != target);
+    let mut lane = AutomationLane::new(target);
+    lane.points = points;
+    lane.tidy();
+    m.automation.push(lane);
+}
+
+/// Level of the window `[from, to)` seconds of a live (not offline) engine pass.
+fn window_rms(x: &[f32], from: f64, to: f64) -> f64 {
+    rms(&x[secs(from).min(x.len())..secs(to).min(x.len())])
+}
+
+/// Drawing a fade on a track's volume lane has to be heard: the same sequence rendered with and
+/// without the lane must start at the same level and end far quieter with it.
+#[test]
+fn a_volume_lane_fades_the_track_through_the_engine() {
+    let plain = held_note_model(8);
+    let mut faded = plain.clone();
+    let track = faded.tracks[0].id;
+    automate(
+        &mut faded,
+        AutoTarget::Track(track, TrackParam::Volume),
+        vec![
+            Breakpoint::new(0, 1.0, Curve::Step),
+            Breakpoint::new(8 * B, 0.0, Curve::Ramp),
+        ],
+    );
+
+    let pass = |m: &ProjectModel| {
+        let (mut e, _) = engine_with(m);
+        e.handle(EngineCommand::SetLooping(false));
+        e.handle(EngineCommand::Play);
+        run(&mut e, secs(4.0), 512).0
+    };
+    let (dry, wet) = (pass(&plain), pass(&faded));
+
+    // 8 beats at 120 bpm is 4 seconds, so the lane spans the whole pass.
+    let head = (window_rms(&dry, 0.1, 0.4), window_rms(&wet, 0.1, 0.4));
+    let tail = (window_rms(&dry, 3.4, 3.9), window_rms(&wet, 3.4, 3.9));
+    assert!(
+        (head.1 - head.0).abs() < head.0 * 0.15,
+        "the lane starts at unity, so the opening should match: dry {:.4} vs lane {:.4}",
+        head.0,
+        head.1
+    );
+    assert!(
+        tail.1 < tail.0 * 0.2 && tail.0 > 1e-4,
+        "the fade should have taken the tail down: dry {:.4} vs lane {:.4}",
+        tail.0,
+        tail.1
+    );
+    assert!(
+        wet.iter().all(|s| s.is_finite()),
+        "a fade must not produce non-finite samples"
+    );
+}
+
+/// The two curve kinds are the lane's whole vocabulary: a ramp interpolates between its
+/// neighbours, a step holds the previous value until its own tick and then jumps.
+#[test]
+fn a_ramp_interpolates_where_a_step_holds() {
+    let level = |curve: Curve| {
+        let mut m = held_note_model(8);
+        let t = m.tracks[0].id;
+        automate(
+            &mut m,
+            AutoTarget::Track(t, TrackParam::Volume),
+            vec![
+                Breakpoint::new(0, 1.0, Curve::Step),
+                Breakpoint::new(8 * B, 0.1, curve),
+            ],
+        );
+        let (mut e, _) = engine_with(&m);
+        e.handle(EngineCommand::SetLooping(false));
+        e.handle(EngineCommand::Play);
+        let out = run(&mut e, secs(4.0), 512).0;
+        // Halfway through the span: a ramp is at 0.55, a step is still at 1.0.
+        window_rms(&out, 1.9, 2.1)
+    };
+    let (ramped, stepped) = (level(Curve::Ramp), level(Curve::Step));
+    assert!(
+        ramped < stepped * 0.75,
+        "a ramp should already be halfway down where a step still holds: {ramped:.4} vs {stepped:.4}"
+    );
+}
+
+/// A parameter that moves must move per sample, not per buffer. A steep fade stepped once per
+/// block puts a jump of a tenth of full scale into the signal; ramped inside the block the
+/// largest sample-to-sample step stays the one the note itself makes.
+#[test]
+fn a_moving_volume_lane_does_not_zipper_at_block_boundaries() {
+    let mut m = held_note_model(8);
+    let t = m.tracks[0].id;
+    let plain = m.clone();
+    // Down to silence inside a tenth of a second: at 512 frames that is ~9 blocks, so a
+    // per-block step would be over a tenth of the gain range each time.
+    automate(
+        &mut m,
+        AutoTarget::Track(t, TrackParam::Volume),
+        vec![
+            Breakpoint::new(0, 1.0, Curve::Step),
+            Breakpoint::new(B / 20, 0.0, Curve::Ramp),
+        ],
+    );
+    let pass = |m: &ProjectModel| {
+        let (mut e, _) = engine_with(m);
+        e.handle(EngineCommand::SetLooping(false));
+        e.handle(EngineCommand::Play);
+        run(&mut e, secs(0.5), 512).0
+    };
+    let (dry, faded) = (pass(&plain), pass(&m));
+    let (dry_slew, fade_slew) = (max_slew(&dry), max_slew(&faded));
+    assert!(
+        fade_slew <= dry_slew * 1.05,
+        "the fade adds steps of its own: {fade_slew:.5} against the note's own {dry_slew:.5}"
+    );
+}
+
+/// The master gain lane rides the whole mix, after the tracks and the master inserts.
+#[test]
+fn a_master_gain_lane_rides_the_whole_mix() {
+    let plain = held_note_model(8);
+    let mut faded = plain.clone();
+    automate(
+        &mut faded,
+        AutoTarget::Master(MasterParam::Gain),
+        vec![
+            Breakpoint::new(0, 1.0, Curve::Step),
+            Breakpoint::new(8 * B, 0.0, Curve::Ramp),
+        ],
+    );
+    let pass = |m: &ProjectModel| {
+        let (mut e, _) = engine_with(m);
+        e.handle(EngineCommand::SetLooping(false));
+        e.handle(EngineCommand::Play);
+        run(&mut e, secs(4.0), 512).0
+    };
+    let (dry, wet) = (pass(&plain), pass(&faded));
+    assert!(
+        window_rms(&wet, 3.4, 3.9) < window_rms(&dry, 3.4, 3.9) * 0.2,
+        "the master lane should have faded the mix out"
+    );
+    assert!(
+        (window_rms(&wet, 0.1, 0.4) - window_rms(&dry, 0.1, 0.4)).abs()
+            < window_rms(&dry, 0.1, 0.4) * 0.15,
+        "the master lane starts at unity, so the opening should match"
+    );
+}
+
+/// Phase 1's promise is that the export is the mix. A lane that fades the track live has to
+/// fade it in the offline bounce too, through the same `Sequence`.
+#[test]
+fn the_offline_bounce_honours_the_same_volume_lane() {
+    let plain = held_note_model(8);
+    let mut faded = plain.clone();
+    let t = faded.tracks[0].id;
+    automate(
+        &mut faded,
+        AutoTarget::Track(t, TrackParam::Volume),
+        vec![
+            Breakpoint::new(0, 1.0, Curve::Step),
+            Breakpoint::new(8 * B, 0.0, Curve::Ramp),
+        ],
+    );
+    let (dry, _) = render(&plain, 0.0);
+    let (wet, _) = render(&faded, 0.0);
+    assert!(
+        window_rms(&wet, 3.4, 3.9) < window_rms(&dry, 3.4, 3.9) * 0.2,
+        "the exported WAV did not fade: {:.4} against {:.4}",
+        window_rms(&wet, 3.4, 3.9),
+        window_rms(&dry, 3.4, 3.9)
+    );
+    assert!(
+        (window_rms(&wet, 0.1, 0.4) - window_rms(&dry, 0.1, 0.4)).abs()
+            < window_rms(&dry, 0.1, 0.4) * 0.15,
+        "the export should open at the same level as the dry mix"
+    );
+}
+
+/// Pan, tone and reverb send are automatable on the same footing as volume.
+#[test]
+fn pan_tone_and_send_lanes_all_reach_the_strip() {
+    let base = held_note_model(4);
+    let t = base.tracks[0].id;
+
+    let mut panned = base.clone();
+    automate(
+        &mut panned,
+        AutoTarget::Track(t, TrackParam::Pan),
+        vec![Breakpoint::new(0, -1.0, Curve::Step)],
+    );
+    let (l, r) = render(&panned, 0.0);
+    assert!(
+        rms(&l) > rms(&r) * 4.0,
+        "a pan lane pinned hard left should leave the right side near silent"
+    );
+
+    // A 220 Hz saw, like the static tone test: fundamental well under the cutoff, 8th harmonic
+    // well over it, so a closed lane is a lowpass and not a volume change.
+    let mut saw = model("saw", 2 * B);
+    set_notes(&mut saw, 0, vec![NoteEvent::new(0, B, 57)]);
+    let harmonic = |m: &ProjectModel| {
+        let l = render(m, 0.5).0;
+        tone_amplitude(&l[secs(0.10)..secs(0.40)], 1760.0)
+    };
+    let mut toned = saw.clone();
+    let saw_track = saw.tracks[0].id;
+    automate(
+        &mut toned,
+        AutoTarget::Track(saw_track, TrackParam::Tone),
+        vec![Breakpoint::new(0, 300.0, Curve::Step)],
+    );
+    assert!(
+        harmonic(&toned) < harmonic(&saw) * 0.1,
+        "a tone lane closed to 300 Hz left {:.1}% of the 1760 Hz energy",
+        100.0 * harmonic(&toned) / harmonic(&saw)
+    );
+
+    let mut sent = base.clone();
+    automate(
+        &mut sent,
+        AutoTarget::Track(t, TrackParam::ReverbSend),
+        vec![Breakpoint::new(0, 1.0, Curve::Step)],
+    );
+    // The send's tail is what a reverb adds: measure after the note has stopped.
+    let wet_tail = window_rms(&render(&sent, 2.0).0, 2.1, 2.9);
+    let dry_tail = window_rms(&render(&base, 2.0).0, 2.1, 2.9);
+    assert!(
+        wet_tail > dry_tail * 2.0,
+        "a send lane should leave a tail: {wet_tail:.5} against {dry_tail:.5}"
     );
 }

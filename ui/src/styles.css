@@ -2327,6 +2327,36 @@ select {
   flex: none;
 }
 
+/* A track's automation sub-lane (SONG mode): the same lane, indented under the track's row. */
+.tempolane.autolane {
+  background: var(--bg-0);
+}
+.tempolane.autolane .head {
+  gap: 6px;
+  padding-left: 22px;
+}
+.tempolane.autolane .head .cap {
+  color: var(--text-4b);
+}
+.tempolane.autolane .head .chip.tiny {
+  margin-left: auto;
+}
+/* The picker that opens it, in the track head beside M/S. */
+.thead .autosel {
+  flex: none;
+  width: 44px;
+  height: 15px;
+  padding: 0 14px 0 3px;
+  font-size: 9px;
+  border: 0;
+  color: var(--text-4);
+  background-color: var(--bg-control-2);
+  background-position: calc(100% - 8px) 5px, calc(100% - 4px) 5px;
+}
+.thead .autosel.on {
+  color: var(--accent);
+}
+
 /* ─── Plugin editor window ──────────────────────────────────────────────────────────────────
    Its own window, so it owns the whole viewport. Rows rather than knobs: at Dexed's 156
    controls you scan for a name, and names only line up in a column. */

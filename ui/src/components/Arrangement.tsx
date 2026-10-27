@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { barTicks, beatsPerBar, dbText, useStore } from "../store";
 import type { DrumPad } from "../sound";
-import { songLength, trackColor, trackKind, TICKS_PER_BEAT, type Clip, type NoteEvent, type Section, type SongPattern, type Track } from "../types";
+import { automationLane, automationValueAt, autoTargetRange, songLength, trackColor, trackKind, TICKS_PER_BEAT, type AutoTarget, type Clip, type NoteEvent, type Section, type SongPattern, type Track, type TrackParam } from "../types";
 import { noteName } from "../theory";
 import { VMeter } from "./Meter";
 import { ChordLane, GUTTER } from "./ChordLane";
 import { SECTION_COLORS, SectionEditor } from "./SectionEditor";
-import { TempoLane } from "./TempoLane";
+import { BreakpointLane, TempoLane } from "./TempoLane";
+import { hz, panText, pct } from "./Knob";
 import { keys } from "../platform";
 import { clipsInBox, dropAt, duplicateClips, groupMoveDelta, moveClips, pasteClips, snapGrid, snapTo, toggleId, toggleMuted, trimClip, type ArrSnap } from "../clipEditing";
 import { usePanelSize } from "../panels";
@@ -15,6 +16,8 @@ import { Splitter } from "./Splitter";
 /** Lane height; the marquee maps y to a lane with it, so rows take it inline rather than from CSS. */
 const ROW_H = 56;
 const CLIP_H = ROW_H - 5;
+/** An open automation sub-lane's height; the marquee counts it in, so it is inline too. */
+const AUTO_H = 44;
 /** A press that travels less than this is a click, not a drag. */
 const DRAG_PX = 3;
 /** The ruler's top strip, where section markers live. */
@@ -30,6 +33,14 @@ const SNAP_OPTIONS: [string, ArrSnap][] = [
   ["1/8", TICKS_PER_BEAT / 2],
   ["1/16", TICKS_PER_BEAT / 4],
   ["off", "off"],
+];
+
+/** The track parameters an automation sub-lane can draw, in the track head's picker order. */
+const AUTO_PARAMS: [TrackParam, string][] = [
+  ["volume", "vol"],
+  ["pan", "pan"],
+  ["tone", "tone"],
+  ["reverbSend", "send"],
 ];
 
 /**
@@ -119,6 +130,20 @@ export function Arrangement() {
   const trackOfPattern = new Map(model.patterns.map((p) => [p.id, p.trackId]));
   const laneOfTrack = new Map(model.tracks.map((t, i) => [t.id, i]));
   const laneOf = (clip: Clip) => laneOfTrack.get(trackOfPattern.get(clip.patternId) ?? "") ?? -1;
+
+  // Which track shows an automation sub-lane, and for which parameter. A view choice: it never
+  // leaves this screen, so it lives here rather than in the model or the store.
+  const [autoShown, setAutoShown] = useState<{ trackId: string; param: TrackParam } | null>(null);
+  /** Lane-space y → track index, over the row heights: an open sub-lane pushes the rest down. */
+  const trackAtY = (y: number) => {
+    if (y < 0) return -1;
+    let bottom = 0;
+    for (let i = 0; i < model.tracks.length; i++) {
+      bottom += ROW_H + (model.tracks[i].id === autoShown?.trackId ? AUTO_H : 0);
+      if (y < bottom) return i;
+    }
+    return model.tracks.length;
+  };
 
   // ── Drop target for patterns dragged out of the tree ───────────────────────────────────
   /** The snapped start tick under a viewport point, or null when it isn't over the song's timeline. */
@@ -250,7 +275,7 @@ export function Arrangement() {
       if (!d.moved && Math.hypot(p.x - d.x0, p.y - d.y0) <= DRAG_PX) return;
       d.moved = true;
       setBox({ x0: d.x0, y0: d.y0, x1: p.x, y1: p.y });
-      const hit = clipsInBox(model.clips, laneOf, Math.floor(d.y0 / ROW_H), Math.floor(p.y / ROW_H), d.x0 / pxPerTick, p.x / pxPerTick);
+      const hit = clipsInBox(model.clips, laneOf, trackAtY(d.y0), trackAtY(p.y), d.x0 / pxPerTick, p.x / pxPerTick);
       s.selectClips([...d.base, ...hit]);
       return;
     }
@@ -678,6 +703,8 @@ export function Arrangement() {
                 endX={endX}
                 pxPerBar={pxPerBar}
                 bpb={bpb}
+                autoParam={autoShown?.trackId === track.id ? autoShown.param : null}
+                onAutoParam={(param) => setAutoShown(param ? { trackId: track.id, param } : null)}
                 onLaneDown={(e) => onLaneDown(e, track)}
               >
                 {track.isAudio
@@ -892,6 +919,8 @@ function TrackRow({
   endX,
   pxPerBar,
   bpb,
+  autoParam,
+  onAutoParam,
   onLaneDown,
   children,
 }: {
@@ -905,6 +934,9 @@ function TrackRow({
   endX: number;
   pxPerBar: number;
   bpb: number;
+  /** The parameter whose sub-lane is open under this row, or null when it is closed. */
+  autoParam: TrackParam | null;
+  onAutoParam: (param: TrackParam | null) => void;
   onLaneDown: (e: React.PointerEvent) => void;
   children: React.ReactNode;
 }) {
@@ -927,46 +959,118 @@ function TrackRow({
   };
 
   return (
-    <div className={`trow${selected ? " on" : ""}`} style={{ width: headW + timelineW + 12, height: ROW_H }}>
-      <div className={`thead${selected ? " on" : ""}`} style={{ height: ROW_H }} onClick={() => selectTrack(track.id)}>
-        <div className="strip" style={{ background: color }} />
-        <div className="body">
-          <div className="l1">
-            <span className="num">{String(index + 1).padStart(2, "0")}</span>
-            <span className={`name${track.muted ? " muted" : ""}`}>{track.name}</span>
-            <span className="type">{trackKind(track)}</span>
-          </div>
-          <div className="l2" onClick={(e) => e.stopPropagation()}>
-            <button className={`msr m${track.muted ? " on" : ""}`} onClick={() => dispatch({ type: "setTrackMuted", id: track.id, muted: !track.muted })}>M</button>
-            <button className={`msr s${track.soloed ? " on" : ""}`} onClick={() => dispatch({ type: "setTrackSoloed", id: track.id, soloed: !track.soloed })}>S</button>
-            <div
-              className="minislider"
-              ref={sliderRef}
-              onPointerDown={(e) => {
-                (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-                setVolumeFromEvent(e);
-              }}
-              onPointerMove={(e) => e.buttons === 1 && setVolumeFromEvent(e)}
-              onPointerUp={() => void commitGesture()}
-              onDoubleClick={() => void dispatch({ type: "setTrackParam", id: track.id, param: "volume", value: 1 })}
-              title="volume · double-click resets"
-            >
-              <div className="fill" style={{ width: `${volPct}%` }} />
-              <div className="handle" style={{ left: `${volPct}%` }} />
+    <>
+      <div className={`trow${selected ? " on" : ""}`} style={{ width: headW + timelineW + 12, height: ROW_H }}>
+        <div className={`thead${selected ? " on" : ""}`} style={{ height: ROW_H }} onClick={() => selectTrack(track.id)}>
+          <div className="strip" style={{ background: color }} />
+          <div className="body">
+            <div className="l1">
+              <span className="num">{String(index + 1).padStart(2, "0")}</span>
+              <span className={`name${track.muted ? " muted" : ""}`}>{track.name}</span>
+              <span className="type">{trackKind(track)}</span>
             </div>
-            <span className="db">{dbText(track.volume)}</span>
+            <div className="l2" onClick={(e) => e.stopPropagation()}>
+              <button className={`msr m${track.muted ? " on" : ""}`} onClick={() => dispatch({ type: "setTrackMuted", id: track.id, muted: !track.muted })}>M</button>
+              <button className={`msr s${track.soloed ? " on" : ""}`} onClick={() => dispatch({ type: "setTrackSoloed", id: track.id, soloed: !track.soloed })}>S</button>
+              <select
+                className={`autosel${autoParam ? " on" : ""}`}
+                value={autoParam ?? ""}
+                onChange={(e) => onAutoParam((e.target.value || null) as TrackParam | null)}
+                title="automation: the parameter drawn in a lane under this track"
+              >
+                <option value="">auto</option>
+                {AUTO_PARAMS.map(([param, label]) => (
+                  <option key={param} value={param}>{label}</option>
+                ))}
+              </select>
+              <div
+                className="minislider"
+                ref={sliderRef}
+                onPointerDown={(e) => {
+                  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                  setVolumeFromEvent(e);
+                }}
+                onPointerMove={(e) => e.buttons === 1 && setVolumeFromEvent(e)}
+                onPointerUp={() => void commitGesture()}
+                onDoubleClick={() => void dispatch({ type: "setTrackParam", id: track.id, param: "volume", value: 1 })}
+                title="volume · double-click resets"
+              >
+                <div className="fill" style={{ width: `${volPct}%` }} />
+                <div className="handle" style={{ left: `${volPct}%` }} />
+              </div>
+              <span className="db">{dbText(track.volume)}</span>
+            </div>
+          </div>
+          <div className="meters">
+            <VMeter peak={peak} height={ROW_H - 12} />
+            <VMeter peak={peak} height={ROW_H - 12} />
           </div>
         </div>
-        <div className="meters">
-          <VMeter peak={peak} height={ROW_H - 12} />
-          <VMeter peak={peak} height={ROW_H - 12} />
+        <div className={`lane${selected ? " on" : ""}`} style={{ width: timelineW, height: ROW_H, ...gridBg }} onPointerDown={onLaneDown}>
+          <div className="oob" style={{ left: endX }} />
+          {children}
         </div>
       </div>
-      <div className={`lane${selected ? " on" : ""}`} style={{ width: timelineW, height: ROW_H, ...gridBg }} onPointerDown={onLaneDown}>
-        <div className="oob" style={{ left: endX }} />
-        {children}
-      </div>
-    </div>
+      {autoParam && <AutomationRow track={track} param={autoParam} headW={headW} timelineW={timelineW} pxPerBeat={pxPerBar / bpb} bpb={bpb} />}
+    </>
+  );
+}
+
+/**
+ * A track's automation sub-lane, under its clips: one parameter's breakpoints over the same
+ * timeline. With no lane yet it sits flat at the track's own value, which is where a
+ * double-click starts one.
+ */
+function AutomationRow({ track, param, headW, timelineW, pxPerBeat, bpb }: { track: Track; param: TrackParam; headW: number; timelineW: number; pxPerBeat: number; bpb: number }) {
+  const model = useStore((s) => s.snapshot!.model);
+  const dispatch = useStore((s) => s.dispatch);
+  const commitGesture = useStore((s) => s.commitGesture);
+  const target: AutoTarget = { track: [track.id, param] };
+  const lane = automationLane(model, target);
+  const points = lane?.points ?? [];
+  // A track parameter always has a range; only plugin and insert targets lack one.
+  const [lo, hi] = autoTargetRange(target)!;
+  const format = param === "volume" ? dbText : param === "pan" ? panText : param === "tone" ? hz : pct;
+
+  return (
+    <BreakpointLane
+      className="autolane"
+      headW={headW}
+      timelineW={timelineW}
+      pxPerBeat={pxPerBeat}
+      bpb={bpb}
+      height={AUTO_H}
+      points={points}
+      range={() => [lo, hi]}
+      valueAt={(tick, shown) => automationValueAt(shown, tick) ?? track[param]}
+      format={format}
+      unit={param === "volume" ? "dB" : param === "tone" ? "Hz" : undefined}
+      quantize={(v, fine) => {
+        // A hundred steps across the range, ten times that with ⇧.
+        const step = (hi - lo) / (fine ? 1000 : 100);
+        return Math.min(hi, Math.max(lo, Math.round(v / step) * step));
+      }}
+      caption={AUTO_PARAMS.find(([p]) => p === param)?.[1] ?? param}
+      status={points.length ? `${points.length} point${points.length === 1 ? "" : "s"}` : "double-click to add"}
+      flat={points.length === 0}
+      headExtra={
+        lane && (
+          <button className="chip tiny" onClick={() => void dispatch({ type: "clearAutomation", target })} title="remove every point in this lane">
+            clear
+          </button>
+        )
+      }
+      onAdd={(tick, value) => void dispatch({ type: "addAutomationPoint", target, tick, value, curve: "ramp" })}
+      onUpdate={(point, kind) =>
+        void dispatch(
+          { type: "updateAutomationPoint", lane: lane!.id, point },
+          kind === "drag",
+          kind === "drag" ? "move automation" : point.curve === "ramp" ? "ramp automation" : "step automation",
+        )
+      }
+      onRemove={(id) => void dispatch({ type: "removeAutomationPoint", lane: lane!.id, id })}
+      onCommit={() => void commitGesture()}
+    />
   );
 }
 

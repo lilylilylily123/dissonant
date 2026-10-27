@@ -5,6 +5,7 @@
 //! continuous controls (sliders) send `transient` commands which coalesce into one undo step
 //! per gesture.
 
+use crate::automation::{AutoTarget, AutomationLane, Breakpoint, Curve};
 use crate::midi_file::ImportedTrack;
 use crate::model::{
     AmpRig, AudioClip, AudioSource, ChordEvent, Clip, Insert, KeyState, MasterSettings, NoteEvent,
@@ -249,6 +250,28 @@ pub enum Command {
     RemoveTempoPoint {
         id: Uuid,
     },
+    /// A breakpoint on `target`'s lane, creating the lane if this is its first point and
+    /// replacing any point already on that tick. Sent `transient` while drawing, so a freehand
+    /// drag is one undo step like a knob's.
+    AddAutomationPoint {
+        target: AutoTarget,
+        tick: i64,
+        value: f64,
+        curve: Curve,
+    },
+    /// Move / retune / re-curve a point (matched by id inside `lane`).
+    UpdateAutomationPoint {
+        lane: Uuid,
+        point: Breakpoint,
+    },
+    RemoveAutomationPoint {
+        lane: Uuid,
+        id: Uuid,
+    },
+    /// Drop the whole lane for `target`: the parameter goes back to its static control.
+    ClearAutomation {
+        target: AutoTarget,
+    },
     /// A track that holds audio and a guitar rig instead of notes.
     AddAudioTrack {
         name: String,
@@ -297,6 +320,10 @@ pub enum EditError {
     NoSuchSection,
     #[error("no such tempo point")]
     NoSuchTempoPoint,
+    #[error("no such automation lane")]
+    NoSuchAutomationLane,
+    #[error("no such automation point")]
+    NoSuchAutomationPoint,
     #[error("no such audio clip")]
     NoSuchAudioClip,
     #[error("no such audio source")]
@@ -585,6 +612,10 @@ impl Command {
             AddTempoPoint { .. } => "add tempo change",
             UpdateTempoPoint { .. } => "edit tempo change",
             RemoveTempoPoint { .. } => "remove tempo change",
+            AddAutomationPoint { .. } => "add automation point",
+            UpdateAutomationPoint { .. } => "move automation point",
+            RemoveAutomationPoint { .. } => "remove automation point",
+            ClearAutomation { .. } => "clear automation",
             AddAudioTrack { .. } => "add audio track",
             SetTrackAmp { .. } => "edit rig",
             AddAudioTake { .. } => "add audio",
@@ -667,6 +698,17 @@ fn chain_mut(m: &mut ProjectModel, target: InsertTarget) -> Result<&mut Vec<Inse
     }
 }
 
+/// Reject a lane whose target names a track that is not in the project. Insert and plugin
+/// parameter ids are not checked: a plugin can be missing on this machine and still be the
+/// right thing to automate on the machine that has it, so those lanes survive like the insert
+/// entries themselves do.
+fn check_auto_target(m: &ProjectModel, target: AutoTarget) -> Result<(), EditError> {
+    match target.track_id() {
+        Some(id) if m.track(&id).is_none() => Err(EditError::NoSuchTrack),
+        _ => Ok(()),
+    }
+}
+
 fn insert_mut(
     m: &mut ProjectModel,
     target: InsertTarget,
@@ -711,6 +753,7 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             m.patterns.retain(|p| p.track_id != id);
             m.clips.retain(|c| !gone.contains(&c.pattern_id));
             m.audio_clips.retain(|c| c.track_id != id);
+            m.automation.retain(|l| l.target.track_id() != Some(id));
             m.prune_sounds();
         }
         RenameTrack { id, name } => {
@@ -782,11 +825,13 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 return Err(EditError::InvalidValue);
             }
             let t = m.track_mut(&id).ok_or(EditError::NoSuchTrack)?;
+            let (lo, hi) = crate::automation::track_param_range(param);
+            let value = value.clamp(lo, hi);
             match param {
-                TrackParam::Volume => t.volume = value.clamp(0.0, 1.5),
-                TrackParam::ReverbSend => t.reverb_send = value.clamp(0.0, 1.0),
-                TrackParam::Tone => t.tone = value.clamp(200.0, 20_000.0),
-                TrackParam::Pan => t.pan = value.clamp(-1.0, 1.0),
+                TrackParam::Volume => t.volume = value,
+                TrackParam::ReverbSend => t.reverb_send = value,
+                TrackParam::Tone => t.tone = value,
+                TrackParam::Pan => t.pan = value,
             }
         }
         SetTrackColor { id, color } => {
@@ -1104,6 +1149,74 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
             m.tempo_points.retain(|p| p.id != id);
             if m.tempo_points.len() == before {
                 return Err(EditError::NoSuchTempoPoint);
+            }
+        }
+        AddAutomationPoint {
+            target,
+            tick,
+            value,
+            curve,
+        } => {
+            if tick < 0 || !value.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            check_auto_target(m, target)?;
+            let lane = match m.automation.iter_mut().position(|l| l.target == target) {
+                Some(i) => &mut m.automation[i],
+                None => {
+                    m.automation.push(AutomationLane::new(target));
+                    m.automation.last_mut().expect("just pushed")
+                }
+            };
+            lane.points.retain(|p| p.tick != tick);
+            lane.points
+                .push(Breakpoint::new(tick, target.clamp(value), curve));
+            lane.tidy();
+        }
+        UpdateAutomationPoint { lane, point } => {
+            if point.tick < 0 || !point.value.is_finite() {
+                return Err(EditError::InvalidValue);
+            }
+            let lane = m
+                .automation
+                .iter_mut()
+                .find(|l| l.id == lane)
+                .ok_or(EditError::NoSuchAutomationLane)?;
+            let slot = lane
+                .points
+                .iter_mut()
+                .find(|p| p.id == point.id)
+                .ok_or(EditError::NoSuchAutomationPoint)?;
+            let id = slot.id;
+            *slot = Breakpoint { id, ..point };
+            // Keep one point per tick: dragging a point onto a neighbour swallows it, exactly
+            // as the tempo lane does, so a drag can never leave two values on one tick.
+            let tick = slot.tick;
+            lane.points.retain(|p| p.id == id || p.tick != tick);
+            lane.tidy();
+        }
+        RemoveAutomationPoint { lane, id } => {
+            let i = m
+                .automation
+                .iter()
+                .position(|l| l.id == lane)
+                .ok_or(EditError::NoSuchAutomationLane)?;
+            let before = m.automation[i].points.len();
+            m.automation[i].points.retain(|p| p.id != id);
+            if m.automation[i].points.len() == before {
+                return Err(EditError::NoSuchAutomationPoint);
+            }
+            // An empty lane is no automation at all; leaving it behind would make the file
+            // grow and the sequence carry a curve with nothing to say.
+            if m.automation[i].points.is_empty() {
+                m.automation.remove(i);
+            }
+        }
+        ClearAutomation { target } => {
+            let before = m.automation.len();
+            m.automation.retain(|l| l.target != target);
+            if m.automation.len() == before {
+                return Err(EditError::NoSuchAutomationLane);
             }
         }
         SetSwing { swing, grid_ticks } => {

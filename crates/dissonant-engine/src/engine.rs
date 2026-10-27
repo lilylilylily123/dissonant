@@ -2,14 +2,15 @@
 
 use crate::audio::{AudioPool, BlockContext};
 use crate::channel::{
-    chain_is_silent, run_inserts, Channel, InsertSlot, Instrument, Master, SYNTH_POLYPHONY,
+    chain_is_silent, run_inserts, Channel, ChannelAuto, InsertSlot, Instrument, Master,
+    SYNTH_POLYPHONY,
 };
 use crate::drums::{DrumBank, DrumKit, RenderedDrum};
 use crate::dsp::pan_gains;
 use crate::synth::PolySynth;
 use dissonant_core::{
-    factory_sound, swing_warp_ticks, InsertTarget, MasterSettings, NoteEvent, Sequence, SoundPatch,
-    SynthPatch, Tempo, MAX_INSERTS, TICKS_PER_BEAT,
+    factory_sound, swing_warp_ticks, AutomationCurve, InsertTarget, MasterSettings, NoteEvent,
+    Sequence, SoundPatch, SynthPatch, Tempo, TrackAutomation, MAX_INSERTS, TICKS_PER_BEAT,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -484,6 +485,26 @@ struct Audition {
     track_id: Uuid,
     pitch: u8,
     samples_left: usize,
+}
+
+/// One track's automation sampled at the two ends of a sub-block.
+///
+/// Hot: called once per channel per sub-block on the audio thread, so it allocates nothing and
+/// leaves early for the overwhelmingly common track with no lanes at all.
+fn channel_auto(auto: &TrackAutomation, from: f64, to: f64) -> ChannelAuto {
+    if auto.is_empty() {
+        return ChannelAuto::default();
+    }
+    let ramp = |c: &Option<AutomationCurve>| {
+        c.as_ref()
+            .map(|c| (c.value_at(from) as f32, c.value_at(to) as f32))
+    };
+    ChannelAuto {
+        volume: ramp(&auto.volume),
+        pan: ramp(&auto.pan),
+        reverb_send: ramp(&auto.reverb_send),
+        tone_hz: auto.tone.as_ref().map(|c| c.value_at(from) as f32),
+    }
 }
 
 pub struct Engine {
@@ -1149,6 +1170,16 @@ impl Engine {
         }
 
         self.render_preview(frames);
+        // The master lane spans the whole block: nothing between the tracks and the master is
+        // cut on an event boundary, so there are no sub-blocks to follow here.
+        let (master_from, master_to) = self.auto_span(0, frames);
+        let master_gain = self
+            .sequence
+            .master_automation
+            .gain
+            .as_ref()
+            .map(|c| (c.value_at(master_from) as f32, c.value_at(master_to) as f32));
+        self.master.set_auto_gain(master_gain);
         let (l, r) = (&mut self.mix_l[..frames], &mut self.mix_r[..frames]);
         // The master's own inserts hear the mixed bus exactly as it leaves the tracks, ahead of
         // the low cut / EQ / reverb / gain the master settings describe.
@@ -1332,6 +1363,21 @@ impl Engine {
             .fetch_add(written, Ordering::Relaxed);
     }
 
+    /// The song ticks at the first and last frame of the sub-block `[from, to)`, for reading
+    /// automation. A stopped transport holds its position, so every lane holds with it.
+    fn auto_span(&self, from: usize, to: usize) -> (f64, f64) {
+        if !self.playing {
+            return (self.position, self.position);
+        }
+        let map = &self.sequence.tempo_map;
+        let base = map.seconds_at_tick(self.position);
+        let sr = self.sample_rate as f64;
+        (
+            map.tick_at_seconds(base + from as f64 / sr),
+            map.tick_at_seconds(base + to as f64 / sr),
+        )
+    }
+
     fn render_range(&mut self, from: usize, to: usize) {
         // `seconds_at_tick` is exact and `advance` moves the transport by exactly `frames/sr`
         // seconds, so the block's start time needs no extra state of its own.
@@ -1343,9 +1389,13 @@ impl Engine {
             clips: &self.sequence.audio,
             input: &self.input_block[from..to],
         };
+        // Automation is read at the two ends of this sub-block, so a moving parameter is
+        // continuous from one sub-block (and one block) to the next instead of stepping.
+        let (auto_from, auto_to) = self.auto_span(from, to);
         let (l, r) = (&mut self.mix_l[from..to], &mut self.mix_r[from..to]);
         let any_solo = self.sequence.any_solo();
         for (ch, track) in self.channels.iter_mut().zip(self.sequence.tracks.iter()) {
+            ch.set_auto(channel_auto(&track.automation, auto_from, auto_to));
             // A muted track whose insert is still ringing keeps rendering: the chain's own tail
             // is as real as an instrument's release.
             if track.audible(any_solo)

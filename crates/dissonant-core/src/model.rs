@@ -1585,6 +1585,15 @@ pub struct ProjectModel {
     /// The master effect chain, in order, ahead of the master bus processing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub master_inserts: Vec<Insert>,
+    /// Parameters that move along the song timeline, one lane per target.
+    ///
+    /// No schema bump: `default` lets every older file open with no lanes, and skipping an
+    /// empty vector keeps a project that automates nothing byte-identical to what schema 10
+    /// already wrote — the two things a schema version exists to signal. A reader of this
+    /// version that meets a lane it cannot resolve (a plugin parameter) ignores it rather than
+    /// failing, so the format does not have to move again when those land either.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<crate::automation::AutomationLane>,
     /// Copies of the non-factory sounds the tracks use, so the project plays anywhere.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sounds: Vec<crate::sound::Sound>,
@@ -1710,6 +1719,7 @@ impl ProjectModel {
             song_length_ticks: default_song_length(),
             loop_region: None,
             master_inserts: vec![],
+            automation: vec![],
             sounds: vec![],
             legacy_swing_grid: None,
         }
@@ -1960,6 +1970,25 @@ impl ProjectModel {
             sanitize_inserts(&mut t.inserts);
         }
         sanitize_inserts(&mut self.master_inserts);
+        // A lane of a deleted track is invisible and never played, but would survive every
+        // save; the same rule patterns get. One lane per target, so the UI never has two
+        // drawings of one parameter fighting.
+        self.automation.retain(|l| match l.target.track_id() {
+            Some(id) => track_ids.contains(&id),
+            None => true,
+        });
+        for lane in &mut self.automation {
+            lane.tidy();
+        }
+        self.automation.retain(|l| !l.points.is_empty());
+        let mut seen: Vec<crate::automation::AutoTarget> = Vec::new();
+        self.automation.retain(|l| {
+            let fresh = !seen.contains(&l.target);
+            if fresh {
+                seen.push(l.target);
+            }
+            fresh
+        });
         let audio_track_ids: Vec<Uuid> = self
             .tracks
             .iter()

@@ -9,6 +9,7 @@
 //! depends on nothing platform-specific, so it also compiles to WASM if the UI ever wants it.
 
 pub mod arrangement;
+pub mod automation;
 pub mod chord_track;
 pub mod document;
 pub mod midi_file;
@@ -21,6 +22,9 @@ pub mod ticks;
 pub mod vibes;
 
 pub use arrangement::Arrangement;
+pub use automation::{
+    track_param_range, AutoTarget, AutomationCurve, AutomationLane, Breakpoint, Curve, MasterParam,
+};
 pub use chord_track::ChordTrack;
 pub use document::{Command, Document, EditError, InsertTarget, TrackParam};
 pub use midi_file::{ImportedMidi, ImportedTrack, MidiError, MidiScope};
@@ -31,7 +35,7 @@ pub use model::{
     TrackKind, TrackPlugin, DEFAULT_SONG_BARS, MAX_CLIP_GAIN, MAX_FADE_SECONDS, MAX_INSERTS,
     MAX_PEDALS, MAX_SHIFT_TICKS, MIN_NOTE_TICKS, SCHEMA_VERSION,
 };
-pub use sequence::{Sequence, SequenceAudioClip, SequenceTrack};
+pub use sequence::{MasterAutomation, Sequence, SequenceAudioClip, SequenceTrack, TrackAutomation};
 pub use sound::{
     default_kit, factory_sound, factory_sounds, DrumPad, DrumPatch, ResolvedPad, Sound, SoundPatch, SynthPatch, MAX_DRUM_PADS,
 };

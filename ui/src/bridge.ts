@@ -8,6 +8,9 @@ import type {
   AudioImportProgress,
   AudioStatus,
   AudioStatusEvent,
+  AutomationLane,
+  AutoTarget,
+  Breakpoint,
   CatalogEntry,
   ChordEvent,
   Clip,
@@ -42,6 +45,8 @@ import type {
   VibeInfo,
 } from "./types";
 import {
+  autoTargetRange,
+  autoTrackId,
   beatsPerBar,
   beatsToTicks,
   defaultAmpRig,
@@ -55,6 +60,7 @@ import {
   MAX_PEDALS,
   MIC_MODELS,
   MIN_NOTE_TICKS,
+  sameAutoTarget,
   TICKS_PER_BEAT,
   uuid,
   withDefaults,
@@ -500,6 +506,8 @@ const NOT_AN_AUDIO_TRACK = "not an audio track";
 const NO_SUCH_INSERT = "no such insert";
 const TOO_MANY_INSERTS = `an insert chain holds at most ${MAX_INSERTS} effects`;
 const PAST_SONG_END = "that is past the end of the song";
+const NO_SUCH_AUTOMATION_LANE = "no such automation lane";
+const NO_SUCH_AUTOMATION_POINT = "no such automation point";
 /** `ProjectModel` decoding refuses a schema it cannot migrate with this text. */
 export const OLD_SCHEMA = "This project was made with an older version of dissonant and can't be opened.";
 
@@ -563,6 +571,27 @@ const TRACK_PARAM_RANGE: Record<TrackParam, [number, number]> = {
   tone: [200, 20_000],
   pan: [-1, 1],
 };
+
+/**
+ * `AutomationLane::tidy` — drop points that are not a position in time, hold each value inside
+ * its target's range, sort by tick and keep only the last point on any tick (the later edit is
+ * the one the user just made).
+ */
+function tidyLane(lane: AutomationLane): void {
+  const range = autoTargetRange(lane.target);
+  const byTick = new Map<number, Breakpoint>();
+  for (const p of lane.points) {
+    if (p.tick < 0 || !Number.isFinite(p.value)) continue;
+    byTick.set(p.tick, range ? { ...p, value: clamp(p.value, range[0], range[1]) } : { ...p });
+  }
+  lane.points = [...byTick.values()].sort((a, b) => a.tick - b.tick);
+}
+
+/** `document.rs::check_auto_target` — a lane may only name a track the project still has. */
+function checkAutoTarget(m: ProjectModel, target: AutoTarget): void {
+  const id = autoTrackId(target);
+  if (id !== null && !m.tracks.some((t) => t.id === id)) fail(NO_SUCH_TRACK);
+}
 
 function newTrack(isDrum: boolean, name: string): Track {
   return {
@@ -1228,6 +1257,28 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   // and filling it in would put `"inserts": []` on every track of every saved file.
   for (const t of m.tracks) if (t.inserts) t.inserts = sanitizeInserts(t.inserts);
   if (m.masterInserts) m.masterInserts = sanitizeInserts(m.masterInserts);
+  // A lane of a deleted track is invisible and never played, but would survive every save;
+  // the same rule patterns get. One lane per target, so the UI never has two drawings of one
+  // parameter fighting.
+  if (m.automation) {
+    const lanes = m.automation.filter((l) => {
+      const id = autoTrackId(l.target);
+      return id === null || trackIds.has(id);
+    });
+    for (const l of lanes) {
+      l.id ??= uuid();
+      l.points ??= [];
+      tidyLane(l);
+    }
+    const seen: AutoTarget[] = [];
+    const kept = lanes.filter((l) => {
+      if (l.points.length === 0 || seen.some((t) => sameAutoTarget(t, l.target))) return false;
+      seen.push(l.target);
+      return true;
+    });
+    if (kept.length) m.automation = kept;
+    else delete m.automation;
+  }
   return m;
 }
 
@@ -1302,6 +1353,9 @@ function reduce(m: ProjectModel, c: Command): void {
       m.patterns = m.patterns.filter((p) => !gone.has(p.id));
       m.clips = m.clips.filter((cl) => !gone.has(cl.patternId));
       m.audioClips = (m.audioClips ?? []).filter((a) => a.trackId !== c.id);
+      const lanes = (m.automation ?? []).filter((l) => autoTrackId(l.target) !== c.id);
+      if (lanes.length) m.automation = lanes;
+      else delete m.automation;
       pruneSounds(m);
       break;
     }
@@ -1626,6 +1680,62 @@ function reduce(m: ProjectModel, c: Command): void {
     case "removeTempoPoint":
       m.tempoPoints = (m.tempoPoints ?? []).filter((p) => p.id !== c.id);
       break;
+    case "addAutomationPoint": {
+      if (c.tick < 0 || !allFinite(c.value)) fail(INVALID_VALUE);
+      checkAutoTarget(m, c.target);
+      const lanes = (m.automation ??= []);
+      let lane = lanes.find((l) => sameAutoTarget(l.target, c.target));
+      if (!lane) {
+        lane = { id: uuid(), target: c.target, points: [] };
+        lanes.push(lane);
+      }
+      const range = autoTargetRange(c.target);
+      lane.points = lane.points.filter((p) => p.tick !== c.tick);
+      lane.points.push({
+        id: uuid(),
+        tick: c.tick,
+        value: range ? clamp(c.value, range[0], range[1]) : c.value,
+        curve: c.curve,
+      });
+      tidyLane(lane);
+      break;
+    }
+    case "updateAutomationPoint": {
+      if (c.point.tick < 0 || !allFinite(c.point.value)) fail(INVALID_VALUE);
+      const lane =
+        (m.automation ?? []).find((l) => l.id === c.lane) ??
+        fail(NO_SUCH_AUTOMATION_LANE);
+      const at = lane.points.findIndex((p) => p.id === c.point.id);
+      if (at < 0) fail(NO_SUCH_AUTOMATION_POINT);
+      lane.points[at] = { ...c.point, id: lane.points[at].id };
+      // Keep one point per tick: dragging a point onto a neighbour swallows it.
+      lane.points = lane.points.filter(
+        (p) => p.id === c.point.id || p.tick !== c.point.tick,
+      );
+      tidyLane(lane);
+      break;
+    }
+    case "removeAutomationPoint": {
+      const lanes = m.automation ?? [];
+      const i = lanes.findIndex((l) => l.id === c.lane);
+      if (i < 0) fail(NO_SUCH_AUTOMATION_LANE);
+      const before = lanes[i].points.length;
+      lanes[i].points = lanes[i].points.filter((p) => p.id !== c.id);
+      if (lanes[i].points.length === before) fail(NO_SUCH_AUTOMATION_POINT);
+      // An empty lane is no automation at all; leaving it behind would make the file grow and
+      // the sequence carry a curve with nothing to say.
+      if (lanes[i].points.length === 0) lanes.splice(i, 1);
+      if (lanes.length === 0) delete m.automation;
+      break;
+    }
+    case "clearAutomation": {
+      const lanes = m.automation ?? [];
+      const kept = lanes.filter((l) => !sameAutoTarget(l.target, c.target));
+      if (kept.length === lanes.length) fail(NO_SUCH_AUTOMATION_LANE);
+      if (kept.length) m.automation = kept;
+      else delete m.automation;
+      break;
+    }
     case "addAudioTrack":
       m.tracks.push(newAudioTrack(c.name.trim() === "" ? "audio" : c.name));
       break;
@@ -2477,6 +2587,8 @@ function mockBridge(): Bridge {
         return c.on ? "enable insert" : "bypass insert";
       case "setInsertState":
         return "insert settings";
+      case "updateAutomationPoint":
+        return "move automation point";
       default:
         return c.type
           .replace(/([A-Z])/g, " $1")

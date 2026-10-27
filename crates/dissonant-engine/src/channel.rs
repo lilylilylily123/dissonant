@@ -177,6 +177,22 @@ pub fn chain_is_silent(chain: &[InsertSlot]) -> bool {
     chain.iter().all(InsertSlot::is_silent)
 }
 
+/// One sub-block's worth of automation for a channel strip: the parameter's value at the first
+/// and last frame, so the strip can ramp between them instead of stepping once per block.
+/// `None` means the track has no lane for that parameter and its static value stands.
+///
+/// `tone_hz` carries one value, not a pair: it is a filter cutoff, and re-deriving biquad
+/// coefficients per sample would cost more than the whole strip. Stepping the coefficients
+/// does not click — the filter's state carries across the change, only its response moves —
+/// so a sub-block is fine enough granularity for it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelAuto {
+    pub volume: Option<(f32, f32)>,
+    pub pan: Option<(f32, f32)>,
+    pub reverb_send: Option<(f32, f32)>,
+    pub tone_hz: Option<f32>,
+}
+
 /// Not `Clone`: a hosted plugin instance cannot be duplicated, and nothing copies a live
 /// channel — the engine moves them between sequences instead.
 #[derive(Debug)]
@@ -193,6 +209,12 @@ pub struct Channel {
     reverb: Reverb,
     gain: f32,
     pan: (f32, f32),
+    /// This sub-block's automation ramps, already in strip units: a gain pair, a pair of
+    /// pan gain pairs and a reverb-send pair. Set before every render, so a lane that goes
+    /// away simply stops being written here.
+    auto_gain: Option<(f32, f32)>,
+    auto_pan: Option<((f32, f32), (f32, f32))>,
+    auto_wet: Option<(f32, f32)>,
     sample_rate: f32,
     /// Stereo scratch: the instrument renders here, then the channel strip runs over it.
     stereo: (Vec<f32>, Vec<f32>),
@@ -218,6 +240,9 @@ impl Channel {
             reverb: Reverb::new(sample_rate),
             gain: 1.0,
             pan: pan_gains(0.0),
+            auto_gain: None,
+            auto_pan: None,
+            auto_wet: None,
             sample_rate,
             stereo: (vec![0.0; 8192], vec![0.0; 8192]),
             inserts: Vec::new(),
@@ -277,6 +302,27 @@ impl Channel {
         self.reverb.wet = track.reverb_send.clamp(0.0, 1.0) as f32;
         self.gain = track.volume.clamp(0.0, 1.5) as f32;
         self.pan = pan_gains(track.pan as f32);
+    }
+
+    /// Hand the strip this sub-block's automation. Called once per sub-block per channel, so
+    /// it stays free of allocation and of anything that could block.
+    pub fn set_auto(&mut self, auto: ChannelAuto) {
+        self.auto_gain = auto.volume;
+        self.auto_pan = auto
+            .pan
+            .map(|(a, b)| (pan_gains(a.clamp(-1.0, 1.0)), pan_gains(b.clamp(-1.0, 1.0))));
+        self.auto_wet = auto.reverb_send.map(|(a, b)| (a.clamp(0.0, 1.0), b.clamp(0.0, 1.0)));
+        if let Some(hz) = auto.tone_hz {
+            let hz = hz.clamp(200.0, 20_000.0);
+            // The same 0.5 Hz deadband `apply` uses: re-deriving coefficients is the expensive
+            // part, and a cutoff that has not really moved does not need new ones.
+            if (hz - self.tone_hz).abs() > 0.5 {
+                self.tone
+                    .configure(|b| b.lowpass(self.sample_rate, hz, 0.707));
+                self.tone_hz = hz;
+                self.instrument.set_tone_hz(hz);
+            }
+        }
     }
 
     /// Render `frames` samples and add them into the stereo mix buffers.
@@ -352,20 +398,43 @@ impl Channel {
     /// The rest of the channel strip over whatever is in the scratch: inserts → gain → pan →
     /// reverb send → meter, added into the mix. Inserts sit here, pre-fader, which is what an
     /// insert means in every other DAW: the chain hears the instrument at its own level.
+    ///
+    /// Gain, pan and send walk from their value at the first frame to their value at the last
+    /// one rather than stepping. With no automation the two ends are equal and the increments
+    /// are zero, so there is one loop and no branch per sample; with automation the parameter
+    /// is continuous across sub-block and block boundaries alike, which is the difference
+    /// between a fade and a staircase of clicks.
     fn strip(&mut self, frames: usize, mix_l: &mut [f32], mix_r: &mut [f32]) {
         let peak = {
-            let (gl, gr) = self.pan;
-            let gain = self.gain;
+            let (g0, g1) = self.auto_gain.unwrap_or((self.gain, self.gain));
+            let ((l0, r0), (l1, r1)) = self.auto_pan.unwrap_or((self.pan, self.pan));
+            let (w0, w1) = self.auto_wet.unwrap_or((self.reverb.wet, self.reverb.wet));
+            let step = 1.0 / frames.max(1) as f32;
+            let (dg, dl, dr, dw) = (
+                (g1 - g0) * step,
+                (l1 - l0) * step,
+                (r1 - r0) * step,
+                (w1 - w0) * step,
+            );
+            let (mut gain, mut gl, mut gr, mut wet) = (g0, l0, r0, w0);
             let (sl, sr) = (&mut self.stereo.0[..frames], &mut self.stereo.1[..frames]);
             run_inserts(&mut self.inserts, sl, sr);
             let reverb = &mut self.reverb;
             let mut peak = 0.0f32;
             for i in 0..frames {
+                reverb.wet = wet;
                 let (l, r) = reverb.process(sl[i] * gain * gl, sr[i] * gain * gr);
                 mix_l[i] += l;
                 mix_r[i] += r;
                 peak = peak.max(l.abs().max(r.abs()));
+                gain += dg;
+                gl += dl;
+                gr += dr;
+                wet += dw;
             }
+            // The send level the silence check reads has to be where the ramp ended, not where
+            // it started, or a lane that just faded a send in would be ignored next block.
+            reverb.wet = w1;
             peak
         };
         self.hold_peak(peak, frames);
@@ -494,6 +563,8 @@ pub struct Master {
     /// `settings.ceiling_db` as linear amplitude.
     ceiling: f32,
     gain: f32,
+    /// This block's gain ramp from the master gain lane, overriding `gain` while it is set.
+    auto_gain: Option<(f32, f32)>,
     sample_rate: f32,
     settings: MasterSettings,
     pub peak_l: f32,
@@ -515,6 +586,7 @@ impl Master {
             limiter: Limiter::new(sample_rate),
             ceiling: 1.0,
             gain: 1.0,
+            auto_gain: None,
             sample_rate,
             settings: MasterSettings {
                 gain: f64::NAN,
@@ -559,9 +631,20 @@ impl Master {
         }
     }
 
+    /// Hand the master this block's gain ramp (first frame, last frame), or `None` to go back
+    /// to the gain the master settings carry. Set once per block by the engine.
+    pub fn set_auto_gain(&mut self, ramp: Option<(f32, f32)>) {
+        self.auto_gain = ramp;
+    }
+
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         let (mut pl, mut pr) = (0.0f32, 0.0f32);
         let (ceiling, limiting) = (self.ceiling, self.settings.limiter);
+        // Ramped across the block for the same reason the track strip ramps: a lane stepping
+        // the whole mix's gain once per buffer is audible as a click on every boundary.
+        let (g0, g1) = self.auto_gain.unwrap_or((self.gain, self.gain));
+        let mut gain = g0;
+        let dg = (g1 - g0) / l.len().max(1) as f32;
         self.over = false;
         for i in 0..l.len() {
             let (mut a, mut b) = self.low_cut.process(l[i], r[i]);
@@ -570,8 +653,8 @@ impl Master {
             (a, b) = self.eq_high.process(a, b);
             (a, b) = self.high_cut.process(a, b);
             (a, b) = self.reverb.process(a, b);
-            a *= self.gain;
-            b *= self.gain;
+            a *= gain;
+            b *= gain;
             // Metered before the limiter: a mix driven 6 dB over has to read 6 dB over, not sit
             // pinned at the ceiling looking fine.
             let peak = a.abs().max(b.abs());
@@ -585,6 +668,7 @@ impl Master {
                 a = a.clamp(-1.0, 1.0);
                 b = b.clamp(-1.0, 1.0);
             }
+            gain += dg;
             l[i] = a;
             r[i] = b;
         }

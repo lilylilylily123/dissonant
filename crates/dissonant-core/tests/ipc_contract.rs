@@ -4,7 +4,8 @@
 
 use dissonant_core::document::{Command, InsertTarget, TrackParam};
 use dissonant_core::{
-    AmpModel, AudioClip, CabModel, Cabinet, DrumPad, EqModel, Insert, MicModel, Pedal, TrackPlugin,
+    AmpModel, AudioClip, AutoTarget, CabModel, Cabinet, Curve, DrumPad, EqModel, Insert,
+    MasterParam, MicModel, Pedal, TrackPlugin,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -549,6 +550,79 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
     assert_eq!(
         parse(json!({"type": "removeTempoPoint", "id": point_id})),
         Command::RemoveTempoPoint { id: point_id }
+    );
+
+    // ---- automation lanes
+
+    let track_id = Uuid::new_v4();
+    let lane_id = Uuid::new_v4();
+    let bp_id = Uuid::new_v4();
+    assert_eq!(
+        parse(json!({"type": "addAutomationPoint", "target": {"track": [track_id, "reverbSend"]},
+                     "tick": 3_840, "value": 0.4, "curve": "ramp"})),
+        Command::AddAutomationPoint {
+            target: AutoTarget::Track(track_id, TrackParam::ReverbSend),
+            tick: 3_840,
+            value: 0.4,
+            curve: Curve::Ramp
+        }
+    );
+    assert_eq!(
+        parse(json!({"type": "addAutomationPoint", "target": {"master": "gain"},
+                     "tick": 0, "value": 1.0, "curve": "step"})),
+        Command::AddAutomationPoint {
+            target: AutoTarget::Master(MasterParam::Gain),
+            tick: 0,
+            value: 1.0,
+            curve: Curve::Step
+        }
+    );
+    // The plugin and insert targets are on the wire from the start even though nothing
+    // resolves them yet, so plugin automation will not need a second wire change.
+    assert_eq!(
+        parse(json!({"type": "addAutomationPoint", "target": {"trackPlugin": [track_id, 17]},
+                     "tick": 0, "value": 0.25, "curve": "step"})),
+        Command::AddAutomationPoint {
+            target: AutoTarget::TrackPlugin(track_id, 17),
+            tick: 0,
+            value: 0.25,
+            curve: Curve::Step
+        }
+    );
+    assert_eq!(
+        parse(json!({"type": "addAutomationPoint",
+                     "target": {"insert": [{"track": track_id}, lane_id, 3]},
+                     "tick": 0, "value": 0.25, "curve": "step"})),
+        Command::AddAutomationPoint {
+            target: AutoTarget::Insert(InsertTarget::Track(track_id), lane_id, 3),
+            tick: 0,
+            value: 0.25,
+            curve: Curve::Step
+        }
+    );
+    match parse(json!({"type": "updateAutomationPoint", "lane": lane_id,
+                       "point": {"id": bp_id, "tick": 1_920, "value": 0.6, "curve": "ramp"}})) {
+        Command::UpdateAutomationPoint { lane, point } => {
+            assert_eq!(lane, lane_id);
+            assert_eq!(
+                (point.id, point.tick, point.value, point.curve),
+                (bp_id, 1_920, 0.6, Curve::Ramp)
+            );
+        }
+        other => panic!("expected UpdateAutomationPoint, got {other:?}"),
+    }
+    assert_eq!(
+        parse(json!({"type": "removeAutomationPoint", "lane": lane_id, "id": bp_id})),
+        Command::RemoveAutomationPoint {
+            lane: lane_id,
+            id: bp_id
+        }
+    );
+    assert_eq!(
+        parse(json!({"type": "clearAutomation", "target": {"track": [track_id, "volume"]}})),
+        Command::ClearAutomation {
+            target: AutoTarget::Track(track_id, TrackParam::Volume)
+        }
     );
 
     // ---- audio tracks, clips and the guitar rig
