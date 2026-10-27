@@ -8,7 +8,7 @@ import { ChordLane, GUTTER } from "./ChordLane";
 import { SECTION_COLORS, SectionEditor } from "./SectionEditor";
 import { TempoLane } from "./TempoLane";
 import { keys } from "../platform";
-import { clipsInBox, dropBar, groupMoveDelta, moveClips, toggleId, trimClip } from "../clipEditing";
+import { clipsInBox, dropAt, duplicateClips, groupMoveDelta, moveClips, pasteClips, snapGrid, snapTo, toggleId, toggleMuted, trimClip, type ArrSnap } from "../clipEditing";
 import { usePanelSize } from "../panels";
 import { Splitter } from "./Splitter";
 
@@ -19,6 +19,24 @@ const CLIP_H = ROW_H - 5;
 const DRAG_PX = 3;
 /** The ruler's top strip, where section markers live. */
 const MARKER_H = 16;
+/** The strip under the markers, where the loop brace is drawn and dragged. */
+const LOOP_H = 10;
+
+/** The song view's snap choices, coarse to fine; the labels match the roll's grid select. */
+const SNAP_OPTIONS: [string, ArrSnap][] = [
+  ["bar", "bar"],
+  ["1/2", TICKS_PER_BEAT * 2],
+  ["1/4", TICKS_PER_BEAT],
+  ["1/8", TICKS_PER_BEAT / 2],
+  ["1/16", TICKS_PER_BEAT / 4],
+  ["off", "off"],
+];
+
+/**
+ * Clips cut or copied in the song view. Module-level rather than in the store: unlike notes,
+ * which travel between the roll and the drum grid, nothing outside this screen pastes clips.
+ */
+let clipboard: Clip[] = [];
 
 type Drag =
   | { kind: "move"; anchor: Clip; group: Clip[]; x0: number; dup: boolean; moved: boolean; collapseTo: string | null }
@@ -45,9 +63,12 @@ function isTyping(target: EventTarget | null): boolean {
  *
  * Clips: click selects, shift-click toggles, drag across empty lane space to marquee-select over
  * lanes. Drag moves the whole selection along its own lanes (horizontal only), the right edge trims
- * or loop-extends one clip, ⌥-drag copies, Delete/Backspace removes, right-click opens a menu,
- * double-click opens the pattern at that clip. Patterns arrive by dragging them in from the tree.
+ * or loop-extends one clip, ⌥-drag copies, ⇧ ignores the snap grid, Delete/Backspace removes,
+ * ⌘A/⌘C/⌘X/⌘V/⌘D select / copy / cut / paste at the playhead / duplicate, 0 mutes, right-click
+ * opens a menu, double-click opens the pattern at that clip. Patterns arrive by dragging them in
+ * from the tree.
  * Sections: double-click the marker strip to add, drag to move, click to edit, right-click to remove.
+ * Loop: drag the strip under the markers to set the song's loop brace, right-click it to clear.
  */
 export function Arrangement() {
   const model = useStore((s) => s.snapshot!.model);
@@ -63,6 +84,10 @@ export function Arrangement() {
   const patternDrag = useStore((s) => s.patternDrag);
   const hearChords = useStore((s) => s.hearChords);
   const trackPeaks = useStore((s) => s.trackPeaks);
+  const arrSnap = useStore((s) => s.arrSnap);
+  const follow = useStore((s) => s.follow);
+  const playing = useStore((s) => s.playing);
+  const looping = useStore((s) => s.looping);
   const bpb = useStore(beatsPerBar);
   const barTick = useStore(barTicks);
   const s = useStore();
@@ -88,20 +113,21 @@ export function Arrangement() {
   const bars = Math.max(Math.ceil((viewW - HEAD_W - 12) / pxPerBar), Math.ceil(songEnd / barTick) + 8);
   const timelineW = bars * pxPerBar;
   const rowW = HEAD_W + timelineW + 12;
-  const snapBar = (tick: number) => Math.max(0, Math.round(tick / barTick) * barTick);
+  // The grid every gesture lands on. ⇧ bypasses it for one drag, the way ⌥ does in the roll.
+  const grid = snapGrid(arrSnap, barTick);
 
   const trackOfPattern = new Map(model.patterns.map((p) => [p.id, p.trackId]));
   const laneOfTrack = new Map(model.tracks.map((t, i) => [t.id, i]));
   const laneOf = (clip: Clip) => laneOfTrack.get(trackOfPattern.get(clip.patternId) ?? "") ?? -1;
 
   // ── Drop target for patterns dragged out of the tree ───────────────────────────────────
-  /** The bar's start tick under a viewport point, or null when it isn't over the song's timeline. */
+  /** The snapped start tick under a viewport point, or null when it isn't over the song's timeline. */
   const barAt = (clientX: number, clientY: number): number | null => {
     const el = scrollerRef.current;
     if (!el) return null;
     const r = el.getBoundingClientRect();
     if (clientX < r.left + HEAD_W || clientX > r.left + el.clientWidth || clientY < r.top || clientY > r.top + el.clientHeight) return null;
-    return dropBar((clientX - r.left - HEAD_W + el.scrollLeft) / pxPerTick, barTick, songEnd);
+    return dropAt((clientX - r.left - HEAD_W + el.scrollLeft) / pxPerTick, grid, songEnd);
   };
   const barAtRef = useRef(barAt);
   barAtRef.current = barAt;
@@ -168,6 +194,9 @@ export function Arrangement() {
     await st.commitGesture();
     if (made.length) st.selectClips(made);
   };
+  // The key handler below is registered once; it reaches the current closure through this.
+  const addCopiesRef = useRef(addCopies);
+  addCopiesRef.current = addCopies;
 
   const onClipDown = (e: React.PointerEvent, clip: Clip, edge: boolean) => {
     e.stopPropagation();
@@ -226,13 +255,15 @@ export function Arrangement() {
       return;
     }
     const dx = e.clientX - d.x0;
+    // ⇧ drops to whole ticks for this drag, whatever the snap select says.
+    const g = snapGrid(arrSnap, barTick, e.shiftKey);
     if (d.kind === "move") {
       if (!d.moved && Math.abs(dx) <= DRAG_PX) return;
       d.moved = true;
       // Horizontal only: a clip never leaves its own track's lane.
-      setPreview(moveClips(d.group, groupMoveDelta(d.anchor, d.group, dx / pxPerTick, barTick, songEnd)));
+      setPreview(moveClips(d.group, groupMoveDelta(d.anchor, d.group, dx / pxPerTick, g, songEnd)));
     } else {
-      setPreview([trimClip(d.clip, d.clip.lengthTicks + dx / pxPerTick, e.shiftKey ? TICKS_PER_BEAT : barTick, songEnd)]);
+      setPreview([trimClip(d.clip, d.clip.lengthTicks + dx / pxPerTick, g, songEnd)]);
     }
   };
 
@@ -293,7 +324,7 @@ export function Arrangement() {
     const d = sectionDrag.current;
     if (!d) return;
     const dTicks = (e.clientX - d.x0) / pxPerTick;
-    if (Math.abs(e.clientX - d.x0) > DRAG_PX) setSectionPreview({ ...d.section, startTick: snapBar(d.section.startTick + dTicks) });
+    if (Math.abs(e.clientX - d.x0) > DRAG_PX) setSectionPreview({ ...d.section, startTick: Math.max(0, snapTo(d.section.startTick + dTicks, grid)) });
   };
   const onSectionUp = (e: React.PointerEvent) => {
     const d = sectionDrag.current;
@@ -305,9 +336,42 @@ export function Arrangement() {
     else if (Math.abs(e.clientX - d.x0) <= DRAG_PX) setEditingSection(editingSection === d.section.id ? null : d.section.id);
   };
 
-  // Delete/Backspace removes the selected clips; Escape closes the menu or clears the selection.
-  // App binds neither and the roll isn't mounted in SONG, so a window listener is safe here; it
-  // still stands down for text fields, open dialogs and the other screens.
+  // ── Loop brace ─────────────────────────────────────────────────────────────────────────
+  // The song's brace is saved with the project, so a drag is an edit: it goes in on release as
+  // one undo step, and this holds the rubber band meanwhile.
+  const loopDrag = useRef<{ anchor: number } | null>(null);
+  const [loopPreview, setLoopPreview] = useState<[number, number] | null>(null);
+  const songLoop = loopPreview ?? model.loopRegion ?? null;
+
+  const onLoopDown = (e: React.PointerEvent) => {
+    const x = e.clientX - e.currentTarget.getBoundingClientRect().left;
+    if (e.button === 2) {
+      void s.setSongLoop(null);
+      return;
+    }
+    if (e.button !== 0) return;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    loopDrag.current = { anchor: Math.max(0, Math.min(songEnd, snapTo(x / pxPerTick, snapGrid(arrSnap, barTick, e.shiftKey)))) };
+  };
+  const onLoopMove = (e: React.PointerEvent) => {
+    const d = loopDrag.current;
+    if (!d) return;
+    const x = e.clientX - e.currentTarget.getBoundingClientRect().left;
+    const tick = Math.max(0, Math.min(songEnd, snapTo(x / pxPerTick, snapGrid(arrSnap, barTick, e.shiftKey))));
+    setLoopPreview(tick === d.anchor ? null : [Math.min(d.anchor, tick), Math.max(d.anchor, tick)]);
+  };
+  const onLoopUp = () => {
+    if (!loopDrag.current) return;
+    loopDrag.current = null;
+    const region = loopPreview;
+    setLoopPreview(null);
+    // A press that never moved leaves the brace alone; clearing is the right-click.
+    if (region) void s.setSongLoop(region);
+  };
+
+  // The song view's own editing keys. App binds none of these and the roll isn't mounted in
+  // SONG, so a window listener is safe here; it still stands down for text fields, open dialogs
+  // and the other screens.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTyping(e.target)) return;
@@ -318,8 +382,53 @@ export function Arrangement() {
         if (st.selectedClipIds.length) st.selectClips([]);
         return;
       }
-      if ((e.key !== "Delete" && e.key !== "Backspace") || e.metaKey || e.ctrlKey || e.altKey) return;
+      const m = st.snapshot!.model;
+      const end = songLength(m);
       const ids = st.selectedClipIds;
+      const chosen = m.clips.filter((c) => ids.includes(c.id));
+      const mod = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
+      if (mod && !e.altKey) {
+        if (k === "a") {
+          e.preventDefault();
+          setMenu(null);
+          st.selectClips(m.clips.map((c) => c.id));
+        } else if (k === "c") {
+          if (chosen.length) clipboard = chosen;
+        } else if (k === "x") {
+          if (!chosen.length) return;
+          clipboard = chosen;
+          setMenu(null);
+          void st.dispatch({ type: "removeClips", ids }, false, chosen.length > 1 ? "cut clips" : "cut clip");
+        } else if (k === "v") {
+          // At the playhead, each copy back on its own pattern's track. The grid is read here
+          // rather than captured: this listener is registered once, for the screen's lifetime.
+          const g = snapGrid(st.arrSnap, barTicks(st));
+          const at = pasteClips(clipboard, Math.floor(st.playhead / g) * g, end);
+          if (!at.length) return;
+          e.preventDefault();
+          setMenu(null);
+          void addCopiesRef.current(at, at.length > 1 ? "paste clips" : "paste clip");
+        } else if (k === "d") {
+          const at = duplicateClips(chosen, end);
+          if (!at.length) return;
+          e.preventDefault();
+          setMenu(null);
+          void addCopiesRef.current(at, at.length > 1 ? "duplicate clips" : "duplicate clip");
+        }
+        return;
+      }
+      if (e.altKey || mod) return;
+      if (e.key === "0") {
+        // Same key as the roll's note mute, on the same kind of selection.
+        if (!chosen.length) return;
+        e.preventDefault();
+        setMenu(null);
+        const next = toggleMuted(chosen);
+        void st.dispatch({ type: "updateClips", clips: next }, false, `${next[0].muted ? "mute" : "unmute"} ${next.length > 1 ? "clips" : "clip"}`);
+        return;
+      }
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
       if (!ids.length) return;
       e.preventDefault();
       setMenu(null);
@@ -328,6 +437,41 @@ export function Arrangement() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // ── Follow ─────────────────────────────────────────────────────────────────────────────
+  // Page the view when the playhead leaves it, the way the roll does. Two things stand it
+  // down: a gesture in progress (the view must not move under the clip being dragged) and a
+  // hand scroll, which parks following until the playhead comes back into view by itself.
+  const autoScrolledTo = useRef<number | null>(null);
+  const lastLeft = useRef(0);
+  const parked = useRef(false);
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (menu) setMenu(null);
+    const left = e.currentTarget.scrollLeft;
+    const mine = autoScrolledTo.current !== null && Math.abs(left - autoScrolledTo.current) < 1;
+    // Scrolling the lanes vertically is not walking away from the playhead, so only a sideways
+    // move the follow effect did not make parks it.
+    if (!mine && left !== lastLeft.current) parked.current = true;
+    if (mine) autoScrolledTo.current = null;
+    lastLeft.current = left;
+  };
+  useEffect(() => {
+    // A fresh press of play always follows again, however far the view had wandered.
+    if (playing) parked.current = false;
+  }, [playing]);
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || !follow || !playing || drag.current || loopDrag.current || sectionDrag.current) return;
+    const px = HEAD_W + playhead * pxPerTick;
+    if (px >= el.scrollLeft + HEAD_W && px <= el.scrollLeft + el.clientWidth - 24) {
+      parked.current = false;
+      return;
+    }
+    if (parked.current) return;
+    const to = Math.max(0, px - HEAD_W - 16);
+    autoScrolledTo.current = to;
+    el.scrollLeft = to;
+  }, [playhead, follow, playing, pxPerTick, HEAD_W]);
 
   // ── What's drawn ───────────────────────────────────────────────────────────────────────
   const dup = drag.current?.kind === "move" && drag.current.dup;
@@ -343,14 +487,60 @@ export function Arrangement() {
   const sectionsShown = model.sections.map((x) => (sectionPreview && x.id === sectionPreview.id ? sectionPreview : x));
 
   const menuClip = menu ? model.clips.find((c) => c.id === menu.clipId) : undefined;
+  // The menu acts on the whole selection when the clicked clip is part of it, else on that clip
+  // alone — the same rule the right-click itself follows when it opens.
+  const menuTargets = menuClip ? (selectedIds.has(menuClip.id) ? model.clips.filter((c) => selectedIds.has(c.id)) : [menuClip]) : [];
   const playX = HEAD_W + playhead * pxPerTick;
 
   return (
     <div className="arr song" style={{ "--head-w": `${HEAD_W}px` } as React.CSSProperties}>
+      {/* Above the track column's drag handle, which stretches the full height of this box:
+          the handle belongs to the lanes below, not to the controls. */}
+      <div className="toolbar" style={{ position: "relative", zIndex: 7 }}>
+        <div className="opt">
+          <span className="k">snap</span>
+          <select
+            value={String(arrSnap)}
+            onChange={(e) => s.setArrSnap(SNAP_OPTIONS.find(([, v]) => String(v) === e.target.value)?.[1] ?? "bar")}
+            title={keys("the grid clips move, trim and drop on · ⇧ while dragging ignores it")}
+          >
+            {SNAP_OPTIONS.map(([label, v]) => (
+              <option key={label} value={String(v)}>{label}</option>
+            ))}
+          </select>
+        </div>
+        <button className={`chip${follow ? " on" : ""}`} onClick={() => s.toggleFollow()} title="follow: keep the playhead in view while playing">follow</button>
+        <div className="vdiv" />
+        {/* The transport owns the loop on/off switch; this says what is braced, in bars. */}
+        <span
+          className="mono"
+          style={{ fontSize: 9.5, color: looping ? "var(--text-4)" : "var(--text-6)" }}
+          title={keys("drag the strip under the ruler's markers to set this · right-click it to clear · L loops")}
+        >
+          loop {songLoop ? `${+(songLoop[0] / barTick + 1).toFixed(2)} → ${+(songLoop[1] / barTick + 1).toFixed(2)}` : "whole song"}
+          {looping ? "" : " (off)"}
+        </span>
+        {songLoop && (
+          <button className="chip tiny" onClick={() => void s.setSongLoop(null)} title="clear the loop brace">clear</button>
+        )}
+        <span className="spacer" />
+        <span className="mono" style={{ fontSize: 9.5, color: "var(--text-4)" }}>
+          {model.clips.length} clips{selectedClipIds.length ? ` · ${selectedClipIds.length} sel` : ""}
+        </span>
+        <span
+          className="chip"
+          style={{ cursor: "help" }}
+          title={keys(
+            "click a clip to select · ⇧-click toggles · drag empty lane space to marquee\ndrag: move · right edge: trim or loop-extend · ⌥-drag: copy · ⇧: ignore the snap grid\n⌘A ⌘C ⌘X ⌘V (at the playhead) ⌘D · 0 mute · ⌫ delete · right-click: more\nruler: click to seek · drag the strip under the markers to set the loop · right-click it to clear",
+          )}
+        >
+          ?
+        </span>
+      </div>
       <div className="headseam" style={{ left: HEAD_W }}>
         <Splitter panel="songHead" label="the track column" />
       </div>
-      <div className="scroller" ref={scrollerRef} onScroll={() => menu && setMenu(null)}>
+      <div className="scroller" ref={scrollerRef} onScroll={onScroll}>
         <div className="ruler" style={{ width: rowW }}>
           <div className="corner">
             <div className="r">
@@ -375,15 +565,27 @@ export function Arrangement() {
             style={{ width: timelineW }}
             onPointerDown={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              if (e.clientY - rect.top < MARKER_H) return; // marker strip
+              const y = e.clientY - rect.top;
+              if (y < MARKER_H) return; // marker strip
+              if (y < MARKER_H + LOOP_H) {
+                onLoopDown(e);
+                return;
+              }
+              if (e.button !== 0) return;
               s.seek(Math.min(songEnd, Math.max(0, (e.clientX - rect.left) / pxPerTick)));
+            }}
+            onPointerMove={onLoopMove}
+            onPointerUp={onLoopUp}
+            onPointerCancel={() => {
+              loopDrag.current = null;
+              setLoopPreview(null);
             }}
             onDoubleClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               if (e.clientY - rect.top >= MARKER_H) return;
-              void dispatch({ type: "addSection", name: "", startTick: snapBar((e.clientX - rect.left) / pxPerTick) });
+              void dispatch({ type: "addSection", name: "", startTick: Math.max(0, snapTo((e.clientX - rect.left) / pxPerTick, grid)) });
             }}
-            title="click to seek · double-click the top strip to add a section"
+            title="click to seek · drag the strip under the markers to loop · double-click the top strip to add a section"
           >
             <div className="oob" style={{ left: endX }} />
             {sectionsShown.map((sec, i) => {
@@ -416,6 +618,25 @@ export function Arrangement() {
                 {pxPerBar >= 22 || i % 4 === 0 ? i + 1 : ""}
               </div>
             ))}
+            {/* The brace strip: a faint bed the whole width so the gesture is discoverable,
+                with the region itself drawn over it in the accent colour. */}
+            <div style={{ position: "absolute", left: 0, top: MARKER_H + 2, width: endX, height: LOOP_H - 4, background: "var(--line-1)", opacity: 0.5, borderRadius: 3, pointerEvents: "none" }} />
+            {songLoop && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: songLoop[0] * pxPerTick,
+                  top: MARKER_H + 2,
+                  width: Math.max(2, (songLoop[1] - songLoop[0]) * pxPerTick),
+                  height: LOOP_H - 4,
+                  background: "var(--accent)",
+                  // Off, the brace is still where it was, but nothing is looping to it.
+                  opacity: looping ? 0.85 : 0.3,
+                  borderRadius: 3,
+                  pointerEvents: "none",
+                }}
+              />
+            )}
             <div className="songend" style={{ left: endX }} title="the song ends here: change its length in SETUP">
               end
             </div>
@@ -551,8 +772,9 @@ export function Arrangement() {
         <ClipMenu
           x={menu.x}
           y={menu.y}
-          count={selectedIds.has(menuClip.id) ? selectedIds.size : 1}
-          canDuplicate={menuClip.startTick + menuClip.lengthTicks < songEnd}
+          count={menuTargets.length}
+          canDuplicate={duplicateClips(menuTargets, songEnd).length > 0}
+          muted={menuTargets.every((c) => c.muted)}
           onClose={() => setMenu(null)}
           onMakeUnique={async () => {
             setMenu(null);
@@ -564,13 +786,22 @@ export function Arrangement() {
               s.selectClips([forked.id]);
             }
           }}
+          onToggleMute={() => {
+            setMenu(null);
+            const next = toggleMuted(menuTargets);
+            void dispatch({ type: "updateClips", clips: next }, false, `${next[0].muted ? "mute" : "unmute"} ${next.length > 1 ? "clips" : "clip"}`);
+          }}
+          onCopy={() => {
+            setMenu(null);
+            clipboard = menuTargets;
+          }}
           onDuplicate={() => {
             setMenu(null);
-            void addCopies([{ src: menuClip, startTick: menuClip.startTick + menuClip.lengthTicks }], "duplicate clip");
+            void addCopies(duplicateClips(menuTargets, songEnd), menuTargets.length > 1 ? "duplicate clips" : "duplicate clip");
           }}
           onDelete={() => {
             setMenu(null);
-            const ids = selectedIds.has(menuClip.id) ? [...selectedIds] : [menuClip.id];
+            const ids = menuTargets.map((c) => c.id);
             void dispatch({ type: "removeClips", ids }, false, ids.length > 1 ? "delete clips" : "delete clip");
           }}
         />
@@ -585,8 +816,11 @@ function ClipMenu({
   y,
   count,
   canDuplicate,
+  muted,
   onClose,
   onMakeUnique,
+  onToggleMute,
+  onCopy,
   onDuplicate,
   onDelete,
 }: {
@@ -594,8 +828,12 @@ function ClipMenu({
   y: number;
   count: number;
   canDuplicate: boolean;
+  /** True when every clip the menu acts on is already muted. */
+  muted: boolean;
   onClose: () => void;
   onMakeUnique: () => void;
+  onToggleMute: () => void;
+  onCopy: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
@@ -616,14 +854,24 @@ function ClipMenu({
   }, []);
   // Keep it on screen near the window's right and bottom edges.
   const left = Math.min(x, window.innerWidth - 200);
-  const top = Math.min(y, window.innerHeight - 110);
+  const top = Math.min(y, window.innerHeight - 170);
+  const what = count > 1 ? `${count} clips` : "clip";
   return (
     <div className="dropdown clipmenu" ref={ref} style={{ left, top }}>
       <div className="item" onClick={onMakeUnique} title="copy this clip's pattern into a new one on the same track, so editing it changes only this clip">
         make unique
       </div>
+      <div className="item" onClick={onToggleMute} title="a muted clip stays on the timeline and is drawn faint, but plays nothing">
+        <span>{muted ? `unmute ${what}` : `mute ${what}`}</span>
+        <span className="k">0</span>
+      </div>
+      <div className="item" onClick={onCopy}>
+        <span>copy</span>
+        <span className="k">{keys("⌘C")}</span>
+      </div>
       <div className={`item${canDuplicate ? "" : " disabled"}`} onClick={canDuplicate ? onDuplicate : undefined}>
-        duplicate after
+        <span>duplicate after</span>
+        <span className="k">{keys("⌘D")}</span>
       </div>
       <div className="item danger" onClick={onDelete}>
         <span>{count > 1 ? `delete ${count} clips` : "delete"}</span>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { barTicks, beatsPerBar, effectiveKey, selectedPattern, selectedTrack, selectedTrackIndex, usePatternChords, useStore } from "../store";
+import { barTicks, beatsPerBar, effectiveKey, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, usePatternChords, useStore } from "../store";
 import { chordAt, explainNote, midiName, tierMap } from "../theory";
 import {
   duplicateBySpan,
@@ -128,8 +128,6 @@ type Drag =
   | { kind: "marquee"; x0: number; y0: number; x1: number; y1: number; baseSelection: Set<string> }
   | { kind: "lane"; ids: Set<string>; prop: NoteProp; anchorId: string; startY: number; base: NoteEvent[] };
 
-let clipboard: NoteEvent[] = [];
-
 /**
  * The piano roll. Modeless direct manipulation, FL-style:
  *  - click empty = place a note (and keep dragging to move it) · brush on (or ⌥ in "paint"
@@ -161,6 +159,8 @@ export function PianoRoll() {
   const seek = useStore((s) => s.seek);
   const setZoom = useStore((s) => s.setZoom);
   const setSelectedNoteIds = useStore((s) => s.setSelectedNoteIds);
+  const clipboard = useStore((s) => s.noteClipboard);
+  const setClipboard = useStore((s) => s.setNoteClipboard);
   const bpb = useStore(beatsPerBar);
   const ticksPerBar = useStore(barTicks);
   const loopRegion = useStore((s) => s.loopRegion);
@@ -596,7 +596,7 @@ export function PianoRoll() {
     ctx.fillRect(0, RULER_H - 1, GUTTER, 1);
     ctx.fillStyle = C.text5;
     ctx.font = mono(400, 9);
-    const gl = gridLabelFor(noteLength);
+    const gl = gridLabel(noteLength);
     ctx.fillText(gl, (GUTTER - ctx.measureText(gl).width) / 2, RULER_H / 2);
 
     // Playhead
@@ -1101,9 +1101,9 @@ export function PianoRoll() {
     } else if (mod && k.toLowerCase() === "a") {
       setSelection(new Set(notes.map((n) => n.id)));
     } else if (mod && k.toLowerCase() === "c") {
-      clipboard = notes.filter((n) => selection.has(n.id));
+      setClipboard(notes.filter((n) => selection.has(n.id)));
     } else if (mod && k.toLowerCase() === "x") {
-      clipboard = notes.filter((n) => selection.has(n.id));
+      setClipboard(notes.filter((n) => selection.has(n.id)));
       if (selection.size) commit(removeNotes(notes, selection), "cut notes");
     } else if (mod && k.toLowerCase() === "v") {
       if (!clipboard.length) return;
@@ -1240,11 +1240,6 @@ function dragLabel(d: Drag, before: NoteEvent[], after: NoteEvent[]): string {
     case "marquee":
       return "edit notes";
   }
-}
-
-function gridLabelFor(ticks: number): string {
-  const map: Record<string, string> = { "120": "1/32", "240": "1/16", "480": "1/8", "960": "1/4", "1920": "1/2", "3840": "1" };
-  return map[String(ticks)] ?? `${ticks}`;
 }
 
 /**

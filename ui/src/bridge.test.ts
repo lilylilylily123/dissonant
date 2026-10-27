@@ -576,6 +576,34 @@ describe("setSongLength", () => {
   });
 });
 
+describe("setLoopRegion", () => {
+  it("sets, clears and undoes the song's loop brace", async () => {
+    await b.apply({ type: "setLoopRegion", region: [16 * TICKS_PER_BEAT, 32 * TICKS_PER_BEAT] });
+    expect((await model()).loopRegion).toEqual([16 * TICKS_PER_BEAT, 32 * TICKS_PER_BEAT]);
+    await b.apply({ type: "setLoopRegion", region: null });
+    expect((await model()).loopRegion).toBeNull();
+    expect((await b.undo()).model.loopRegion).toEqual([16 * TICKS_PER_BEAT, 32 * TICKS_PER_BEAT]);
+  });
+
+  it("holds the brace inside the song and refuses an empty or inverted one", async () => {
+    const end = (await model()).songLengthTicks;
+    await b.apply({ type: "setLoopRegion", region: [8 * TICKS_PER_BEAT, end + 400] });
+    expect((await model()).loopRegion).toEqual([8 * TICKS_PER_BEAT, end]);
+    await rejectsAndKeepsModel({ type: "setLoopRegion", region: [4 * TICKS_PER_BEAT, 4 * TICKS_PER_BEAT] }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setLoopRegion", region: [32 * TICKS_PER_BEAT, 16 * TICKS_PER_BEAT] }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setLoopRegion", region: [-TICKS_PER_BEAT, 4 * TICKS_PER_BEAT] }, "invalid value");
+    await rejectsAndKeepsModel({ type: "setLoopRegion", region: [end, end + 960] }, "invalid value");
+  });
+
+  it("is pulled back inside a shortened song", async () => {
+    await b.apply({ type: "setLoopRegion", region: [16 * TICKS_PER_BEAT, 48 * TICKS_PER_BEAT] });
+    await b.apply({ type: "setSongLength", ticks: 32 * TICKS_PER_BEAT });
+    expect((await model()).loopRegion).toEqual([16 * TICKS_PER_BEAT, 32 * TICKS_PER_BEAT]);
+    await b.apply({ type: "setSongLength", ticks: 8 * TICKS_PER_BEAT });
+    expect((await model()).loopRegion).toBeNull();
+  });
+});
+
 describe("setMaster", () => {
   const master = (over: Partial<MasterSettings> = {}): MasterSettings => ({
     gain: 1,

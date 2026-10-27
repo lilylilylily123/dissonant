@@ -1574,6 +1574,14 @@ pub struct ProjectModel {
     /// The hard end of the song, at least one bar. Clips never reach past it.
     #[serde(default = "default_song_length")]
     pub song_length_ticks: i64,
+    /// The song's loop brace in song ticks, `(start, end)` with `end > start`; `None` loops the
+    /// whole song. It lives on the model, not in UI state, because it marks a place in the
+    /// *music* — "the chorus" — and the project file is the only thing that outlives a session:
+    /// there is no per-project UI sidecar, and inventing one to hold a pair of ticks would be a
+    /// second place a song can live. `#[serde(default)]` lets older files open, and skipping
+    /// `None` keeps a project without a loop byte-identical, so the schema does not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_region: Option<(i64, i64)>,
     /// The master effect chain, in order, ahead of the master bus processing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub master_inserts: Vec<Insert>,
@@ -1596,6 +1604,14 @@ impl Default for ProjectModel {
     fn default() -> Self {
         ProjectModel::empty()
     }
+}
+
+/// A loop brace held inside `[0, song_end]`, or `None` when nothing is left of it. One rule for
+/// both the editing command and the file fixups, so a hand-edited file and a drag agree.
+pub(crate) fn clamp_loop(start: i64, end: i64, song_end: i64) -> Option<(i64, i64)> {
+    let start = start.clamp(0, song_end);
+    let end = end.clamp(0, song_end);
+    (end > start).then_some((start, end))
 }
 
 /// Clean up a chord progression: drop chords with a bad position or length, fold the pitch
@@ -1692,6 +1708,7 @@ impl ProjectModel {
             tempo_points: vec![],
             chords: Default::default(),
             song_length_ticks: default_song_length(),
+            loop_region: None,
             master_inserts: vec![],
             sounds: vec![],
             legacy_swing_grid: None,
@@ -1801,7 +1818,9 @@ impl ProjectModel {
             .filter(move |p| &p.track_id == track_id)
     }
 
-    /// Hold the song's hard end: clips starting at or after it go, clips crossing it are cut.
+    /// Hold the song's hard end: clips starting at or after it go, clips crossing it are cut,
+    /// and the loop brace is pulled back inside (a brace left hanging past the end would loop
+    /// over silence).
     pub(crate) fn fit_clips_to_song(&mut self) {
         let end = self.song_length_ticks;
         self.clips.retain(|c| c.start_tick < end);
@@ -1810,6 +1829,7 @@ impl ProjectModel {
                 c.length_ticks = end - c.start_tick;
             }
         }
+        self.loop_region = self.loop_region.and_then(|(s, e)| clamp_loop(s, e, end));
     }
 
     /// The section containing `tick` (the last one starting at or before it).

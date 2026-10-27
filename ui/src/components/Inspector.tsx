@@ -7,7 +7,7 @@ import { padName } from "../drumKit";
 import { useMediaQuery } from "../uiScale";
 import { hz, Knob, lin, log, panText, pct } from "./Knob";
 import { InstrumentPicker, PluginParams } from "./PluginBrowser";
-import { barLabel } from "./Editor";
+import { barLabel, PatternBars } from "./Editor";
 import { SoundPicker } from "./SoundPicker";
 import { Splitter } from "./Splitter";
 import { usePanelSize } from "../panels";
@@ -156,7 +156,7 @@ export function Inspector() {
               ))}
             </select>
           </div>
-          <div className="field">
+          <div className="field" title="length in bars: the chips are the usual four, the field is every other number">
             <span className="flabel">length</span>
             <div className="row" style={{ gap: 3 }}>
               {[1, 2, 4, 8].map((bars) => (
@@ -164,6 +164,7 @@ export function Inspector() {
                   {bars}
                 </button>
               ))}
+              <PatternBars pattern={pattern} barTick={bticks} />
             </div>
           </div>
           <div className="field">
@@ -395,6 +396,12 @@ function TransformGrid() {
   const track = useStore(selectedTrack);
   const key = useStore(effectiveKey);
   const chords = usePatternChords();
+  // Quantize at 100% is a machine; the dial is how much of the grid's opinion to take, and the
+  // humanize amounts are the same question asked the other way round. They are view state (a
+  // feel you dial in while writing), so they live with the panel, not in the project.
+  const [strength, setStrength] = useState(1);
+  const [drift, setDrift] = useState(0.15);
+  const [velDrift, setVelDrift] = useState(12);
   if (!pattern || !track) return null;
   const notes = pattern.notes;
   const ids = new Set(s.selectedNoteIds);
@@ -402,8 +409,8 @@ function TransformGrid() {
   const tierOf = (n: { pitch: number; startTick: number }) => tierMap(n.startTick, chords, key)[((n.pitch % 12) + 12) % 12];
   const apply = (next: typeof notes, label: string) => void s.dispatch({ type: "setNotes", patternId: pattern.id, notes: next }, false, label);
   const tools: [string, string, () => void][] = [
-    ["quantize", "snap starts and lengths to the grid", () => apply(quantizeNotes(notes, ids, grid), "quantize")],
-    ["humanize", "loosen timing and velocity; chord tones stay tighter", () => apply(humanizeNotes(notes, ids, { timing: grid * 0.15, velocity: 12 }, tierOf), "humanize")],
+    ["quantize", `pull starts and lengths toward the grid, ${Math.round(strength * 100)}% of the way`, () => apply(quantizeNotes(notes, ids, grid, strength), "quantize")],
+    ["humanize", `loosen timing by up to ${Math.round(drift * 100)}% of the grid and velocity by ±${velDrift}; chord tones stay tighter`, () => apply(humanizeNotes(notes, ids, { timing: grid * drift, velocity: velDrift }, tierOf), "humanize")],
     ["legato", "extend each note to the next one", () => apply(legatoNotes(notes, ids), "legato")],
     ["arp ↑", "spread stacked notes into rising grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "up"), "arpeggiate")],
     ["arp ↓", "spread stacked notes into falling grid steps", () => apply(arpeggiateNotes(notes, ids, grid, "down"), "arpeggiate")],
@@ -417,12 +424,28 @@ function TransformGrid() {
     ["invert", "mirror pitches around the selection's middle", () => apply(invertNotes(notes, ids, { min: 24, max: 96 }), "invert notes")],
   ];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>
-      {tools.map(([label, title, fn]) => (
-        <button key={label} title={title} onClick={fn} disabled={notes.length === 0} style={{ background: "var(--bg-2)", color: "var(--text-2)" }}>
-          {label}
-        </button>
-      ))}
+    <>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>
+        {tools.map(([label, title, fn]) => (
+          <button key={label} title={title} onClick={fn} disabled={notes.length === 0} style={{ background: "var(--bg-2)", color: "var(--text-2)" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <DialRow label="strength" title="how far quantize pulls a note to the grid: 100% is dead on it, less keeps the hand that played it" value={strength} min={0} max={1} step={0.05} text={`${Math.round(strength * 100)}%`} onChange={setStrength} />
+      <DialRow label="drift" title={`how far humanize moves a start, as a share of the ${gridLabel(grid)} grid`} value={drift} min={0} max={0.5} step={0.01} text={`${Math.round(drift * 100)}%`} onChange={setDrift} />
+      <DialRow label="vel ±" title="how far humanize moves a velocity" value={velDrift} min={0} max={48} step={1} text={`${velDrift}`} onChange={setVelDrift} />
+    </>
+  );
+}
+
+/** One slider of the transform panel: a label, the slider and the value it reads as. */
+function DialRow({ label, title, value, min, max, step, text, onChange }: { label: string; title: string; value: number; min: number; max: number; step: number; text: string; onChange: (v: number) => void }) {
+  return (
+    <div className="field" title={title}>
+      <span className="flabel">{label}</span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} style={{ flex: 1, minWidth: 0 }} />
+      <span className="val mono" style={{ fontSize: 9.5, minWidth: 28, textAlign: "right" }}>{text}</span>
     </div>
   );
 }

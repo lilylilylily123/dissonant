@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { barTicks, GRID_OPTIONS, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
-import { songLength, ticksToBeats, trackColor, type SongPattern } from "../types";
+import { songLength, TICKS_PER_BEAT, ticksToBeats, trackColor, type SongPattern } from "../types";
 import { BASE_BEAT_W, GUTTER, ChordLane } from "./ChordLane";
 import { DrumGrid } from "./DrumGrid";
 import { PianoRoll } from "./PianoRoll";
@@ -10,6 +11,60 @@ export function barLabel(tick: number, ticksPerBar: number): string {
   const bar = Math.floor(tick / ticksPerBar);
   const inBar = tick - bar * ticksPerBar;
   return inBar === 0 ? `bar ${bar + 1}` : `bar ${bar + 1}.${Math.floor(ticksToBeats(inBar)) + 1}`;
+}
+
+/** The bars field's own look: the inspector and the tree both place it beside the length chips. */
+const barsFieldStyle: React.CSSProperties = {
+  width: 46,
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  padding: "2px 4px",
+  background: "var(--bg-control)",
+  color: "var(--text-1)",
+  border: "1px solid var(--line-1)",
+  borderRadius: 3,
+};
+
+/** Longest pattern the field will set: past this a "pattern" is a song, and the song view is that. */
+const MAX_PATTERN_BARS = 64;
+
+/**
+ * A pattern's length in bars, typed. The chips cover 1, 2, 4 and 8; a 3-bar loop, a 6-bar
+ * turnaround and a 16-bar build are just as ordinary, and `setPatternLength` has always taken
+ * any tick count — only the UI was rounding the music down to powers of two. The engine's floor
+ * is one beat, so that is the floor here.
+ */
+export function PatternBars({ pattern, barTick }: { pattern: SongPattern; barTick: number }) {
+  const dispatch = useStore((s) => s.dispatch);
+  const [draft, setDraft] = useState<string | null>(null);
+  const bars = +(pattern.lengthTicks / barTick).toFixed(3);
+  const commit = (text: string) => {
+    setDraft(null);
+    const typed = parseFloat(text);
+    if (!Number.isFinite(typed)) return;
+    const ticks = Math.max(TICKS_PER_BEAT, Math.round(Math.min(MAX_PATTERN_BARS, typed) * barTick));
+    if (ticks !== pattern.lengthTicks) void dispatch({ type: "setPatternLength", id: pattern.id, ticks });
+  };
+  return (
+    <input
+      type="number"
+      style={barsFieldStyle}
+      min={TICKS_PER_BEAT / barTick}
+      max={MAX_PATTERN_BARS}
+      step={1}
+      value={draft ?? bars}
+      title="length in bars: any number, so 3- and 16-bar patterns are as easy as 4"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={(e) => commit(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        if (e.key === "Escape") {
+          setDraft(null);
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+    />
+  );
 }
 
 /**
@@ -81,9 +136,15 @@ export function Editor() {
       <div className="toolbar">
         <div className="opt">
           <span className="k">snap</span>
-          <select value={s.noteLength} onChange={(e) => s.setNoteLength(parseInt(e.target.value, 10))}>
-            {GRID_OPTIONS.map(([l, v]) => (
-              <option key={l} value={v}>{l}</option>
+          {/* Grouped so the triplet and dotted snaps read as what they are rather than as odd
+              numbers among the binary ones. */}
+          <select value={s.noteLength} onChange={(e) => s.setNoteLength(parseInt(e.target.value, 10))} title="the grid notes snap to: straight, triplet (T) or dotted (.)">
+            {([["straight", ""], ["triplet", "T"], ["dotted", "."]] as const).map(([group, suffix]) => (
+              <optgroup key={group} label={group}>
+                {GRID_OPTIONS.filter(([l]) => (l.endsWith("T") ? "T" : l.endsWith(".") ? "." : "") === suffix).map(([l, v]) => (
+                  <option key={l} value={v}>{l}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </div>

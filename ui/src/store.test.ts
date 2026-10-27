@@ -209,3 +209,55 @@ describe("pattern drag", () => {
     expect(st().patternDropHandler).toBeNull();
   });
 });
+
+describe("grid options", () => {
+  it("are whole ticks, in order, with exact triplets and dotted values", () => {
+    const byLabel = new Map(S.GRID_OPTIONS);
+    for (const [, ticks] of S.GRID_OPTIONS) expect(Number.isInteger(ticks)).toBe(true);
+    const values = S.GRID_OPTIONS.map(([, v]) => v);
+    expect([...values].sort((a, b) => a - b)).toEqual(values);
+    expect(new Set(values).size).toBe(values.length);
+    // A triplet is two thirds of the straight value, a dot adds half of it — and at 960 PPQ
+    // every one of those lands on a whole tick, which is the point of counting in ticks.
+    for (const straight of ["1/16", "1/8", "1/4", "1/2"]) {
+      const base = byLabel.get(straight)!;
+      expect(byLabel.get(`${straight}T`)).toBe((base * 2) / 3);
+      expect(byLabel.get(`${straight}.`)).toBe((base * 3) / 2);
+    }
+    expect(byLabel.get("1/8T")).toBe(320);
+    expect(byLabel.get("1/16T")).toBe(160);
+  });
+
+  it("labels a tick value, and says so plainly when it is off the list", () => {
+    expect(S.gridLabel(320)).toBe("1/8T");
+    expect(S.gridLabel(720)).toBe("1/8.");
+    expect(S.gridLabel(7)).toBe("7");
+  });
+});
+
+describe("zoom memory", () => {
+  // The reload is the point of these: `import` after `resetModules` is a relaunch, which is
+  // where a plain piece of store state used to lose the zoom.
+  it("keeps every zoom across a reload", async () => {
+    st().setZoom(2.5);
+    st().setArrZoom(80);
+    S.setStoredZoom("setup", 12);
+    vi.resetModules();
+    const reloaded = await import("./store");
+    expect(reloaded.useStore.getState().zoom).toBe(2.5);
+    expect(reloaded.useStore.getState().arrZoom).toBe(80);
+    expect(reloaded.storedZoom("setup")).toBe(12);
+  });
+
+  it("holds a zoom inside its range and remembers SETUP's fit", async () => {
+    st().setZoom(99);
+    expect(st().zoom).toBe(3);
+    st().setArrZoom(1);
+    expect(st().arrZoom).toBe(12);
+    S.setStoredZoom("setup", null);
+    vi.resetModules();
+    const reloaded = await import("./store");
+    expect(reloaded.storedZoom("setup")).toBeNull();
+    expect(reloaded.useStore.getState().zoom).toBe(3);
+  });
+});

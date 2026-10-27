@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { barTicks, beatsPerBar, useStore } from "../store";
+import { barTicks, beatsPerBar, setStoredZoom, storedZoom, useStore } from "../store";
 import { chordName, diatonicChords, keyName, noteName, NOTE_NAMES, startersFor, progression } from "../theory";
 import { DEFAULT_SWING_GRID_TICKS, keyAt, replaceChordWindow, songLength, tempoMap, TICKS_PER_BEAT, TIME_SIGNATURES, uuid, type ChordEvent, type ScaleType, type Section } from "../types";
 import {
@@ -49,8 +49,12 @@ export function Setup() {
     return () => ro.disconnect();
   }, []);
 
-  // Zoom: null fits the whole song in view; otherwise px per beat.
-  const [zoom, setZoom] = useState<number | null>(null);
+  // Zoom: null fits the whole song in view; otherwise px per beat. Remembered per machine, so
+  // leaving the page and coming back lands on the same view of the song.
+  const [zoom, setZoom] = useState<number | null>(storedZoom("setup"));
+  useEffect(() => {
+    setStoredZoom("setup", zoom);
+  }, [zoom]);
   const fitW = Math.max(4, (width - HEAD - 24) / Math.max(1, songTicks / TICKS_PER_BEAT));
   const beatW = zoom ?? fitW;
   const pxPerTick = beatW / TICKS_PER_BEAT;

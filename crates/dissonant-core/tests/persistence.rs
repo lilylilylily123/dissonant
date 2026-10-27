@@ -18,6 +18,7 @@ fn round_trip_preserves_all_state() {
     ];
     model.sections = vec![Section::new("intro", 0)];
     model.song_length_ticks = 48 * BEAT;
+    model.loop_region = Some((16 * BEAT, 32 * BEAT));
 
     let json = model.to_json().unwrap();
     let decoded = ProjectModel::from_json(&json).unwrap();
@@ -82,6 +83,39 @@ fn a_project_with_no_audio_writes_no_audio_keys() {
         !json.contains("audioSources"),
         "empty audio sources were written:\n{json}"
     );
+}
+
+#[test]
+fn the_song_loop_survives_a_save_and_open_round_trip() {
+    let mut model = ProjectModel::starter();
+    model.loop_region = Some((32 * BEAT, 64 * BEAT));
+    let json = model.to_json().unwrap();
+    assert!(json.contains("loopRegion"), "no loop key written:\n{json}");
+    let decoded = ProjectModel::from_json(&json).unwrap();
+    assert_eq!(decoded.loop_region, Some((32 * BEAT, 64 * BEAT)));
+}
+
+#[test]
+fn a_project_with_no_loop_writes_no_loop_key() {
+    // A pair of ticks is a `#[serde(default)]` addition, not a schema bump: an unlooped project
+    // has to come back out of the writer exactly as it went in.
+    let json = ProjectModel::starter().to_json().unwrap();
+    assert!(!json.contains("loopRegion"), "an empty loop was written:\n{json}");
+    assert_eq!(ProjectModel::from_json(&json).unwrap().loop_region, None);
+}
+
+#[test]
+fn a_loop_saved_past_the_song_end_opens_held_inside_it() {
+    let mut model = ProjectModel::starter();
+    model.song_length_ticks = 32 * BEAT;
+    // Hand-edited (or written before the song was shortened): the brace cannot outlive the song.
+    model.loop_region = Some((16 * BEAT, 400 * BEAT));
+    let decoded = ProjectModel::from_json(&model.to_json().unwrap()).unwrap();
+    assert_eq!(decoded.loop_region, Some((16 * BEAT, 32 * BEAT)));
+
+    model.loop_region = Some((900 * BEAT, 950 * BEAT));
+    let decoded = ProjectModel::from_json(&model.to_json().unwrap()).unwrap();
+    assert_eq!(decoded.loop_region, None, "a brace entirely past the end is dropped");
 }
 
 #[test]

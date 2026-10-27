@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipsInBox, dropBar, groupMoveDelta, moveClips, snapTo, toggleId, trimClip } from "./clipEditing";
+import { clipsInBox, dropAt, duplicateClips, groupMoveDelta, moveClips, pasteClips, snapGrid, snapTo, toggleId, toggleMuted, trimClip } from "./clipEditing";
 import type { Clip } from "./types";
 import { TICKS_PER_BEAT as B } from "./types";
 
@@ -44,12 +44,16 @@ describe("trim", () => {
 });
 
 describe("drop", () => {
-  it("lands on the bar under the pointer, inside the song only", () => {
-    expect(dropBar(9.9 * B, 4 * B, 64 * B)).toBe(8 * B);
-    expect(dropBar(0, 4 * B, 64 * B)).toBe(0);
-    expect(dropBar(63.9 * B, 4 * B, 64 * B)).toBe(60 * B);
-    expect(dropBar(64 * B, 4 * B, 64 * B)).toBeNull();
-    expect(dropBar(-B, 4 * B, 64 * B)).toBeNull();
+  it("lands on the grid slot under the pointer, inside the song only", () => {
+    expect(dropAt(9.9 * B, 4 * B, 64 * B)).toBe(8 * B);
+    expect(dropAt(0, 4 * B, 64 * B)).toBe(0);
+    expect(dropAt(63.9 * B, 4 * B, 64 * B)).toBe(60 * B);
+    expect(dropAt(64 * B, 4 * B, 64 * B)).toBeNull();
+    expect(dropAt(-B, 4 * B, 64 * B)).toBeNull();
+  });
+
+  it("drops on the exact tick when snap is off", () => {
+    expect(dropAt(9.9 * B, snapGrid("off", 4 * B), 64 * B)).toBe(Math.floor(9.9 * B));
   });
 });
 
@@ -71,5 +75,67 @@ describe("snap", () => {
   it("rounds to the grid", () => {
     expect(snapTo(5.9 * B, 4 * B)).toBe(4 * B);
     expect(snapTo(6.1 * B, 4 * B)).toBe(8 * B);
+  });
+
+  it("resolves the setting against the project's bar", () => {
+    expect(snapGrid("bar", 3 * B)).toBe(3 * B);
+    expect(snapGrid(B / 2, 4 * B)).toBe(B / 2);
+    expect(snapGrid("off", 4 * B)).toBe(1);
+    expect(snapGrid("bar", 4 * B, true)).toBe(1); // ⇧ bypasses whatever is set
+  });
+
+  it("snapping to one tick leaves a position alone", () => {
+    const grid = snapGrid("off", 4 * B);
+    expect(snapTo(1234.4, grid)).toBe(1234);
+    const a = c("a", 4, 4);
+    expect(groupMoveDelta(a, [a], 101.2, grid, 64 * B)).toBe(101);
+  });
+});
+
+describe("mute", () => {
+  it("silences a mixed selection, then brings it all back", () => {
+    const group = [c("a", 0, 4), { ...c("b", 8, 4), muted: true }];
+    const muted = toggleMuted(group);
+    expect(muted.map((x) => x.muted)).toEqual([true, true]);
+    expect(toggleMuted(muted).map((x) => x.muted)).toEqual([false, false]);
+  });
+
+  it("is empty for an empty group", () => {
+    expect(toggleMuted([])).toEqual([]);
+  });
+});
+
+describe("clipboard", () => {
+  it("pastes the group with its shape, earliest clip at the playhead", () => {
+    const group = [c("a", 8, 4, "x"), c("b", 12, 4, "y")];
+    expect(pasteClips(group, 32 * B, 64 * B)).toEqual([
+      { src: group[0], startTick: 32 * B },
+      { src: group[1], startTick: 36 * B },
+    ]);
+  });
+
+  it("keeps each clip on its own pattern, so copies stay on their tracks", () => {
+    const group = [c("a", 0, 4, "x"), c("b", 0, 4, "y")];
+    expect(pasteClips(group, 16 * B, 64 * B).map((x) => x.src.patternId)).toEqual(["x", "y"]);
+  });
+
+  it("drops copies that would land outside the song, and pastes nothing from nothing", () => {
+    const group = [c("a", 0, 4), c("b", 40, 4)];
+    expect(pasteClips(group, 32 * B, 64 * B).map((x) => x.startTick)).toEqual([32 * B]);
+    expect(pasteClips(group, -99 * B, 64 * B).map((x) => x.startTick)).toEqual([0, 40 * B]);
+    expect(pasteClips([], 0, 64 * B)).toEqual([]);
+  });
+
+  it("duplicates one group-span later so repeats march along", () => {
+    const group = [c("a", 0, 4), c("b", 4, 4)];
+    const once = duplicateClips(group, 64 * B);
+    expect(once.map((x) => x.startTick)).toEqual([8 * B, 12 * B]);
+    const twice = duplicateClips(once.map((x, i) => ({ ...x.src, id: `n${i}`, startTick: x.startTick })), 64 * B);
+    expect(twice.map((x) => x.startTick)).toEqual([16 * B, 20 * B]);
+  });
+
+  it("duplicates nothing past the song end", () => {
+    expect(duplicateClips([c("a", 60, 4)], 64 * B)).toEqual([]);
+    expect(duplicateClips([], 64 * B)).toEqual([]);
   });
 });

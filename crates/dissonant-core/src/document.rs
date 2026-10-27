@@ -204,6 +204,11 @@ pub enum Command {
     SetSongLength {
         ticks: i64,
     },
+    /// The song's loop brace as `[start, end]` in song ticks, or `None` to clear it. It is an
+    /// edit like any other so that setting the chorus loop is undoable and saved with the song.
+    SetLoopRegion {
+        region: Option<(i64, i64)>,
+    },
     AddSection {
         name: String,
         start_tick: i64,
@@ -568,6 +573,8 @@ impl Command {
             RemoveClips { .. } => "remove clips",
             MakeClipUnique { .. } => "make clip unique",
             SetSongLength { .. } => "set song length",
+            SetLoopRegion { region: Some(_) } => "set loop",
+            SetLoopRegion { .. } => "clear loop",
             AddSection { .. } => "add section",
             UpdateSection { .. } => "edit section",
             RemoveSection { .. } => "remove section",
@@ -965,6 +972,22 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
         SetSongLength { ticks } => {
             m.song_length_ticks = ticks.max(m.bar_ticks());
             m.fit_clips_to_song();
+        }
+        SetLoopRegion { region } => {
+            m.loop_region = match region {
+                None => None,
+                Some((start, end)) => {
+                    // An inverted or empty brace is a bug in the caller, not a way to clear:
+                    // clearing says so with `None`.
+                    if start < 0 || end <= start {
+                        return Err(EditError::InvalidValue);
+                    }
+                    Some(
+                        crate::model::clamp_loop(start, end, m.song_length_ticks)
+                            .ok_or(EditError::InvalidValue)?,
+                    )
+                }
+            };
         }
         RemoveClip { id } => {
             let before = m.clips.len();
@@ -1718,6 +1741,80 @@ mod tests {
         d.undo();
         d.undo();
         assert_eq!(d.model().clips.len(), 4, "undo brings removed clips back");
+    }
+
+    #[test]
+    fn set_loop_region_sets_clears_and_stays_inside_the_song() {
+        let mut d = doc();
+        d.apply(
+            Command::SetLoopRegion {
+                region: Some((16 * BEAT, 32 * BEAT)),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(d.model().loop_region, Some((16 * BEAT, 32 * BEAT)));
+        assert_eq!(d.undo_label(), Some("set loop"));
+
+        // Past the end: held back to it rather than refused, like a clip.
+        let end = d.model().song_length_ticks;
+        d.apply(
+            Command::SetLoopRegion {
+                region: Some((8 * BEAT, end + 100 * BEAT)),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(d.model().loop_region, Some((8 * BEAT, end)));
+
+        for bad in [(8 * BEAT, 8 * BEAT), (32 * BEAT, 16 * BEAT), (-BEAT, 4 * BEAT)] {
+            assert_eq!(
+                d.apply(
+                    Command::SetLoopRegion {
+                        region: Some(bad)
+                    },
+                    false
+                ),
+                Err(EditError::InvalidValue),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            d.apply(
+                Command::SetLoopRegion {
+                    region: Some((end, end + BEAT))
+                },
+                false
+            ),
+            Err(EditError::InvalidValue),
+            "a brace entirely past the song end has nothing left to loop"
+        );
+        assert_eq!(d.model().loop_region, Some((8 * BEAT, end)), "refused edits change nothing");
+
+        d.apply(Command::SetLoopRegion { region: None }, false)
+            .unwrap();
+        assert_eq!(d.model().loop_region, None);
+        assert_eq!(d.undo_label(), Some("clear loop"));
+        d.undo();
+        assert_eq!(d.model().loop_region, Some((8 * BEAT, end)), "undo brings the loop back");
+    }
+
+    #[test]
+    fn shortening_the_song_pulls_the_loop_back_inside_it() {
+        let mut d = doc();
+        d.apply(
+            Command::SetLoopRegion {
+                region: Some((16 * BEAT, 48 * BEAT)),
+            },
+            false,
+        )
+        .unwrap();
+        d.apply(Command::SetSongLength { ticks: 32 * BEAT }, false)
+            .unwrap();
+        assert_eq!(d.model().loop_region, Some((16 * BEAT, 32 * BEAT)));
+        d.apply(Command::SetSongLength { ticks: 8 * BEAT }, false)
+            .unwrap();
+        assert_eq!(d.model().loop_region, None, "nothing of it is left inside the song");
     }
 
     #[test]

@@ -1,16 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
+import { barTicks, gridLabel, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { padName } from "../drumKit";
 import { NOTE_PROPS, noteProp, TICKS_PER_BEAT, trackColor, type NoteEvent, type NoteProp, uuid } from "../types";
 import {
   clearRow,
   euclideanRow,
   fillEverySteps,
+  hitsInSteps,
+  moveHitsByRow,
+  moveNotes,
+  pasteNotes,
   quantizeNoteProp,
   rampNoteProp,
   randomizeRow,
+  removeNotes,
   rotateRow,
   seededRng,
+  selectionBounds,
   setNoteProp,
   stepIndexOf,
   tileGhost,
@@ -18,6 +24,7 @@ import {
 } from "../noteEditing";
 import { BASE_BEAT_W } from "./ChordLane";
 import { AddPadPicker, SwapPadPicker } from "./AddPadPicker";
+import { keys } from "../platform";
 
 /** Geometry shared with the CSS: `.drumrow .dname` width, `.drumcells` gap and left padding. */
 const GUTTER = 64;
@@ -65,6 +72,10 @@ export function DrumGrid() {
   const setLaneProp = useStore((s) => s.setLaneProp);
   const defaultVelocity = useStore((s) => s.settings.editing.defaultVelocity);
   const ghostPatternId = useStore((s) => s.ghostPatternId);
+  const ticksPerBar = useStore(barTicks);
+  const clipboard = useStore((s) => s.noteClipboard);
+  const setClipboard = useStore((s) => s.setNoteClipboard);
+  const setSelectedNoteIds = useStore((s) => s.setSelectedNoteIds);
   const ghostPattern = useStore((s) => s.snapshot?.model.patterns.find((p) => p.id === ghostPatternId) ?? null);
   const ghostTrack = useStore((s) => (ghostPattern ? (s.snapshot?.model.tracks.find((t) => t.id === ghostPattern.trackId) ?? null) : null));
   const ghostIdx = useStore((s) => (ghostTrack ? (s.snapshot?.model.tracks.indexOf(ghostTrack) ?? 0) : 0));
@@ -75,6 +86,14 @@ export function DrumGrid() {
   const [rowPitch, setRowPitch] = useState<number | null>(null);
   const [euclid, setEuclid] = useState({ onsets: 5, rotation: 0 });
   const graphRef = useRef<HTMLCanvasElement>(null);
+  /** Hits picked with a marquee (⇧/⌘-drag): what copy, cut, nudge and delete act on. */
+  const [selection, setSelection] = useState<Set<string>>(() => new Set());
+  /** Where the next paste lands: the last cell the pointer touched. */
+  const [anchorStep, setAnchorStep] = useState(0);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const rowEls = useRef(new Map<number, HTMLDivElement>());
+  const marquee = useRef<{ x0: number; y0: number; add: boolean; base: Set<string> } | null>(null);
+  const [marqueeBox, setMarqueeBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const graphDrag = useRef<{ base: NoteEvent[]; ramp: boolean; anchor: { step: number; value: number } } | null>(null);
   /** Names the pending gesture in the Edit menu; one gesture, one undo step. */
   const commitLabel = useRef("edit drum steps");
@@ -83,10 +102,12 @@ export function DrumGrid() {
   const committed = (pattern ? pattern.notes : undefined) ?? NO_NOTES;
   const notes = working ?? committed;
   const pxPerTick = (BASE_BEAT_W * zoom) / TICKS_PER_BEAT;
-  const stepTicks = Math.min(TICKS_PER_BEAT / 2, Math.max(TICKS_PER_BEAT / 8, noteLength));
-  /** The grid spans the whole pattern: one step per `stepTicks`. */
+  // The step is the snap, whatever the snap is: a 1/8T step grid is what writing a triplet
+  // shuffle needs, and a step never falls outside the pattern.
   const totalTicks = pattern?.lengthTicks ?? 4 * TICKS_PER_BEAT;
-  const steps = Math.max(1, Math.round(totalTicks / stepTicks));
+  const stepTicks = Math.max(1, Math.min(totalTicks, Math.round(noteLength)));
+  /** The grid spans the whole pattern: one step per `stepTicks`, the last one short if it must be. */
+  const steps = Math.max(1, Math.ceil(totalTicks / stepTicks));
   const cellW = stepTicks * pxPerTick - 2;
   const pitchW = cellW + CELL_GAP;
   const currentStep = Math.floor((playhead % totalTicks) / stepTicks);
@@ -173,6 +194,15 @@ export function DrumGrid() {
     [ghostPattern, pattern?.id, totalTicks],
   );
 
+  // The marquee's pick lives here, but the status bar and the inspector read the selection from
+  // the store — the same arrangement the piano roll has. A different pattern starts empty.
+  useEffect(() => {
+    setSelectedNoteIds([...selection]);
+  }, [selection, setSelectedNoteIds]);
+  useEffect(() => {
+    setSelection(new Set());
+  }, [pattern?.id]);
+
   if (!pattern || !track) return null;
   const ghostColor = ghostTrack ? trackColor(ghostTrack, ghostIdx) : "var(--text-4)";
   const selectedPad = track.drumPads.find((p) => p.pitch === padPitch) ?? track.drumPads[0];
@@ -194,6 +224,8 @@ export function DrumGrid() {
     }
     dragMode.current = null;
     graphDrag.current = null;
+    marquee.current = null;
+    setMarqueeBox(null);
   };
 
   /** One-shot step tool: a whole new row in a single command, so it is a single undo step. */
@@ -210,11 +242,145 @@ export function DrumGrid() {
       const existing = find(cur, pitch, step);
       if (mode === "add" && !existing) {
         audition(pitch);
-        return [...cur, { id: uuid(), startTick: step * stepTicks, lengthTicks: stepTicks, pitch, velocity: defaultVelocity }];
+        // The last step of an odd grid (a dotted or triplet snap under a 4-bar pattern) is
+        // short: its hit ends with the pattern rather than hanging past the loop.
+        return [...cur, { id: uuid(), startTick: step * stepTicks, lengthTicks: Math.min(stepTicks, totalTicks - step * stepTicks), pitch, velocity: defaultVelocity }];
       }
       if (mode === "remove" && existing) return cur.filter((n) => n !== existing);
       return cur;
     });
+  };
+
+  // ─── Selection, clipboard, nudges ───────────────────────────────────────────────────────
+  // Writing drums is repetition: bar 1's hits belong on bar 3 too. The marquee picks them and
+  // every command below is a pure helper from `noteEditing`, so a copy or a nudge means the
+  // same thing here as in the piano roll — and the clipboard is the roll's, so hits carry over.
+
+  const padPitches = track.drumPads.map((p) => p.pitch);
+
+  /** Pointer rectangle (client px) → the hits it covers, row by row. */
+  const hitsUnder = (x0: number, y0: number, x1: number, y1: number): Set<string> => {
+    const top = Math.min(y0, y1);
+    const bottom = Math.max(y0, y1);
+    const covered: number[] = [];
+    let cellsLeft: number | null = null;
+    for (const pitch of padPitches) {
+      const el = rowEls.current.get(pitch);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (cellsLeft === null) cellsLeft = r.left + GUTTER + CELL_PAD;
+      if (r.bottom >= top && r.top <= bottom) covered.push(pitch);
+    }
+    if (cellsLeft === null || !covered.length) return new Set();
+    const first = Math.floor((Math.min(x0, x1) - cellsLeft) / pitchW);
+    const last = Math.floor((Math.max(x0, x1) - cellsLeft) / pitchW);
+    return hitsInSteps(notes, covered, stepTicks, Math.max(0, first), Math.min(steps - 1, last));
+  };
+
+  /** The marquee rectangle in the grid's own (scrolled) coordinates, for drawing it. */
+  const boxOf = (x0: number, y0: number, x1: number, y1: number) => {
+    const el = gridRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      left: Math.min(x0, x1) - r.left + el.scrollLeft,
+      top: Math.min(y0, y1) - r.top + el.scrollTop,
+      width: Math.abs(x1 - x0),
+      height: Math.abs(y1 - y0),
+    };
+  };
+
+  const startMarquee = (e: React.PointerEvent, add: boolean) => {
+    gridRef.current?.setPointerCapture(e.pointerId);
+    const base = add ? new Set(selection) : new Set<string>();
+    marquee.current = { x0: e.clientX, y0: e.clientY, add, base };
+    setSelection(base);
+    setMarqueeBox(boxOf(e.clientX, e.clientY, e.clientX, e.clientY));
+  };
+
+  const dragMarquee = (e: React.PointerEvent) => {
+    const m = marquee.current;
+    if (!m) return;
+    setMarqueeBox(boxOf(m.x0, m.y0, e.clientX, e.clientY));
+    const picked = hitsUnder(m.x0, m.y0, e.clientX, e.clientY);
+    setSelection(m.add ? new Set([...m.base, ...picked]) : picked);
+  };
+
+  const copySelection = (cut: boolean) => {
+    const picked = notes.filter((n) => selection.has(n.id));
+    if (!picked.length) return;
+    setClipboard(picked);
+    if (cut) {
+      run(removeNotes(notes, selection), "cut hits");
+      setSelection(new Set());
+    }
+  };
+
+  /** Paste the clipboard so its first hit lands on `step`; copies past the pattern are dropped. */
+  const pasteAt = (step: number) => {
+    if (!clipboard.length) return;
+    const { notes: next, newIds } = pasteNotes(notes, clipboard, Math.max(0, Math.min(steps - 1, step)) * stepTicks, totalTicks);
+    if (next === notes) return;
+    run(next, "paste hits");
+    setSelection(newIds);
+  };
+
+  /** The selection again, one selection-span later: the bar-1-to-bar-2 move, in one key. */
+  const duplicateSelection = () => {
+    const bounds = selectionBounds(notes, selection);
+    if (!bounds) return;
+    const span = Math.max(stepTicks, Math.ceil((bounds.end - bounds.start) / stepTicks) * stepTicks);
+    const { notes: next, newIds } = pasteNotes(notes, notes.filter((n) => selection.has(n.id)), bounds.start + span, totalTicks);
+    if (next === notes) return;
+    run(next, "duplicate hits");
+    setSelection(newIds);
+  };
+
+  const deleteSelection = () => {
+    if (!selection.size) return;
+    run(removeNotes(notes, selection), "delete hits");
+    setSelection(new Set());
+  };
+
+  const nudge = (deltaTicks: number) => {
+    if (!selection.size) return;
+    run(moveNotes(notes, selection, deltaTicks, 0, { min: 0, max: 127 }, totalTicks), "nudge hits");
+  };
+
+  /** Up and down move hits between kit rows, which are a list of pads, not a run of pitches. */
+  const moveRows = (delta: number) => {
+    if (!selection.size) return;
+    run(moveHitsByRow(notes, selection, padPitches, delta), "move hits to another pad");
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const mod = e.metaKey || e.ctrlKey;
+    const k = e.key;
+    // ⌥ belongs to the window manager here: the grid has no alt chord of its own.
+    if (e.altKey) return;
+    if (k === "Backspace" || k === "Delete") {
+      deleteSelection();
+    } else if (mod && k.toLowerCase() === "a") {
+      const rows = new Set(padPitches);
+      setSelection(new Set(notes.filter((n) => rows.has(n.pitch)).map((n) => n.id)));
+    } else if (mod && k.toLowerCase() === "c") {
+      copySelection(false);
+    } else if (mod && k.toLowerCase() === "x") {
+      copySelection(true);
+    } else if (mod && k.toLowerCase() === "v") {
+      pasteAt(anchorStep);
+    } else if (mod && k.toLowerCase() === "d") {
+      duplicateSelection();
+    } else if (k === "Escape") {
+      setSelection(new Set());
+    } else if (k === "ArrowLeft" || k === "ArrowRight") {
+      nudge((k === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? ticksPerBar : stepTicks));
+    } else if (k === "ArrowUp" || k === "ArrowDown") {
+      moveRows(k === "ArrowUp" ? -1 : 1);
+    } else {
+      return;
+    }
+    e.preventDefault();
   };
 
   // ─── Graph interaction ──────────────────────────────────────────────────────────────────
@@ -268,7 +434,31 @@ export function DrumGrid() {
 
   return (
     // Past eight pads the rows tighten so a full 16-pad kit mostly fits; the grid scrolls past that.
-    <div className={`drumgrid${track.drumPads.length > 8 ? " dense" : ""}`} onPointerUp={commit} onPointerLeave={commit}>
+    <div
+      className={`drumgrid${track.drumPads.length > 8 ? " dense" : ""}`}
+      ref={gridRef}
+      tabIndex={0}
+      style={{ position: "relative", outline: "none" }}
+      onPointerUp={commit}
+      onPointerLeave={commit}
+      onPointerMove={dragMarquee}
+      onKeyDown={onKeyDown}
+    >
+      {marqueeBox && (
+        <div
+          style={{
+            position: "absolute",
+            left: marqueeBox.left,
+            top: marqueeBox.top,
+            width: marqueeBox.width,
+            height: marqueeBox.height,
+            border: "1px solid var(--text-2)",
+            background: "rgba(255,255,255,.06)",
+            pointerEvents: "none",
+            zIndex: 4,
+          }}
+        />
+      )}
       {ghostPattern && !ghostIsDrum && ghostNotes.length > 0 && (
         <div className="drumrow ghostrow" title={`${ghostPattern.name}: where its notes start · the ghost`}>
           <span className="dname">ghost</span>
@@ -283,7 +473,15 @@ export function DrumGrid() {
       {track.drumPads.map((drum) => {
         const picked = drum.pitch === padPitch;
         return (
-          <div className="drumrow" key={drum.pitch} style={picked ? { background: "rgba(255,255,255,.045)" } : undefined}>
+          <div
+            className="drumrow"
+            key={drum.pitch}
+            ref={(el) => {
+              if (el) rowEls.current.set(drum.pitch, el);
+              else rowEls.current.delete(drum.pitch);
+            }}
+            style={picked ? { background: "rgba(255,255,255,.045)" } : undefined}
+          >
             <span
               className="dname"
               title="the row the graph editor and the step tools act on"
@@ -313,13 +511,27 @@ export function DrumGrid() {
                 // A hit shows how hard it plays, and leans by its shift — at most one cell, so the
                 // slot it sits in still reads as the step it is.
                 const lean = hit ? Math.max(-1, Math.min(1, noteProp(hit, "shiftTicks") / stepTicks)) : 0;
+                const inSelection = !!hit && selection.has(hit.id);
                 return (
                   <div
                     key={step}
                     className={`step${hit ? " on" : ""}${onBeat ? " beat" : ""}${step === currentStep ? " now" : ""}${ghost ? " ghost" : ""}`}
-                    style={{ width: cellW, ...(ghost ? { borderColor: ghostColor } : {}) }}
+                    style={{
+                      width: cellW,
+                      ...(ghost ? { borderColor: ghostColor } : {}),
+                      ...(inSelection ? { boxShadow: "inset 0 0 0 1.5px var(--accent)" } : {}),
+                    }}
                     onPointerDown={(e) => {
                       e.preventDefault();
+                      gridRef.current?.focus();
+                      setAnchorStep(step);
+                      // ⇧/⌘-drag picks hits instead of painting them, as the roll's marquee does;
+                      // ⇧⌘ adds to what is already picked.
+                      if (e.button === 0 && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+                        startMarquee(e, e.shiftKey && (e.metaKey || e.ctrlKey));
+                        return;
+                      }
+                      if (selection.size) setSelection(new Set());
                       commitLabel.current = "edit drum steps";
                       dragMode.current = e.button === 2 ? "remove" : "add";
                       paint(drum.pitch, step);
@@ -415,6 +627,34 @@ export function DrumGrid() {
         />
       </div>
 
+      <div className="steptools" style={{ position: "sticky", left: 0 }}>
+        <span className="lbl" style={{ color }}>picked</span>
+        <span className="mono" style={{ fontSize: 9.5, color: "var(--text-4)" }}>
+          {selection.size ? `${selection.size} hit${selection.size === 1 ? "" : "s"}` : keys("⇧-drag to pick")}
+        </span>
+        <button className="chip tiny" disabled={!selection.size} title={keys("copy the picked hits (⌘C)")} onClick={() => copySelection(false)}>
+          copy
+        </button>
+        <button className="chip tiny" disabled={!selection.size} title={keys("cut the picked hits (⌘X)")} onClick={() => copySelection(true)}>
+          cut
+        </button>
+        <button className="chip tiny" disabled={!clipboard.length} title={keys("paste at the last cell you touched (⌘V)")} onClick={() => pasteAt(anchorStep)}>
+          paste
+        </button>
+        <button className="chip tiny" disabled={!selection.size} title={keys("the picked hits again, one selection later (⌘D)")} onClick={duplicateSelection}>
+          dup
+        </button>
+        <button className="chip tiny" disabled={!selection.size} title="delete the picked hits (⌫)" onClick={deleteSelection}>
+          del
+        </button>
+        <button className="chip tiny" disabled={!selection.size} title="nudge the picked hits one step earlier (←)" onClick={() => nudge(-stepTicks)}>
+          ◀ step
+        </button>
+        <button className="chip tiny" disabled={!selection.size} title="nudge the picked hits one step later (→)" onClick={() => nudge(stepTicks)}>
+          step ▶
+        </button>
+      </div>
+
       <div className="drumgraph" style={{ width: graphW }}>
         <canvas
           ref={graphRef}
@@ -427,8 +667,8 @@ export function DrumGrid() {
       </div>
       {notes.length === 0 && <div className="help emptyline">no hits yet: click a step to add one. kick on 1 and 3, snare on 2 and 4 is a fine place to start.</div>}
       <div className="help">
-        left-click / drag: add hits · right-click / drag: remove · step {stepTicks === TICKS_PER_BEAT / 2 ? "1/8" : stepTicks === TICKS_PER_BEAT / 4 ? "1/16" : "1/32"} follows snap
-        {` · graph: drag to set ${spec.label} on ${selectedPadName}, ⌥-drag to ramp`}
+        left-click / drag: add hits · right-click / drag: remove · {keys("⇧-drag: pick hits (⇧⌘ adds)")} · step {gridLabel(stepTicks)} follows snap
+        {keys(` · ⌘C/⌘X/⌘V/⌘D · ⌫ delete · ← → nudge (⇧ = bar) · ↑ ↓ move pad · graph: drag to set ${spec.label} on ${selectedPadName}, ⌥-drag to ramp`)}
       </div>
     </div>
   );

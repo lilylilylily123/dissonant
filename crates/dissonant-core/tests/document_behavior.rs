@@ -156,6 +156,7 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::RemoveClips { .. } => "RemoveClips",
         Command::MakeClipUnique { .. } => "MakeClipUnique",
         Command::SetSongLength { .. } => "SetSongLength",
+        Command::SetLoopRegion { .. } => "SetLoopRegion",
         Command::AddSection { .. } => "AddSection",
         Command::UpdateSection { .. } => "UpdateSection",
         Command::RemoveSection { .. } => "RemoveSection",
@@ -313,6 +314,9 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
         },
         Command::MakeClipUnique { id: c0.id },
         Command::SetSongLength { ticks: 20 * BEAT },
+        Command::SetLoopRegion {
+            region: Some((4 * BEAT, 12 * BEAT)),
+        },
         Command::ImportTracks {
             tracks: vec![ImportedTrack {
                 name: "piano".into(),

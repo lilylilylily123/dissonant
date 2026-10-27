@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   adjustVelocity,
   duplicateNotes,
+  hitsInSteps,
+  moveHitsByRow,
   moveNotes,
   noteAt,
   notesInRect,
   pasteNotes,
   placeNote,
+  quantizeNotes,
   resizeNotes,
   snapFloor,
   snapRound,
@@ -146,5 +149,83 @@ describe("tileGhost", () => {
     const B = TICKS_PER_BEAT;
     const ghost = [n("a", 0, B, 60), { ...n("m", B, B, 61), muted: true }, n("late", 5 * B, B, 64)];
     expect(tileGhost(ghost, 4 * B, 4 * B).map((x) => x.pitch)).toEqual([60]);
+  });
+});
+
+describe("triplet and dotted snapping", () => {
+  // 960 PPQ makes the odd grids whole numbers: a 1/8 triplet is 320 ticks, a dotted 1/8 is 720.
+  const T8 = 320;
+
+  it("snaps to a triplet grid without drifting off it", () => {
+    expect(snapFloor(500, T8)).toBe(320);
+    expect(snapRound(500, T8)).toBe(640);
+    expect(snapRound(3 * T8 - 1, T8)).toBe(960);
+    // Three of them make the beat, exactly, which is the whole reason to count in ticks.
+    expect(snapRound(TICKS_PER_BEAT, T8)).toBe(TICKS_PER_BEAT);
+  });
+
+  it("quantizes onto a triplet grid, and part of the way there at less than full strength", () => {
+    const notes = [n("a", 300, 480, 60), n("b", 700, 480, 62)];
+    const hard = quantizeNotes(notes, new Set(["a", "b"]), T8);
+    expect(hard.map((x) => x.startTick)).toEqual([320, 640]);
+    // Lengths land on the triplet ladder too: a straight 1/8 (480) is nearest two triplet steps.
+    expect(hard.map((x) => x.lengthTicks)).toEqual([640, 640]);
+
+    // Half strength closes half the distance: 300 → 310, 700 → 670. Feel survives.
+    const soft = quantizeNotes(notes, new Set(["a", "b"]), T8, 0.5);
+    expect(soft.map((x) => x.startTick)).toEqual([310, 670]);
+
+    // Zero strength moves no start at all.
+    expect(quantizeNotes(notes, new Set(["a"]), T8, 0).map((x) => x.startTick)).toEqual([300, 700]);
+  });
+});
+
+describe("step selection", () => {
+  const S = 240; // a 1/16 step
+  // Two bars of a three-pad kit: kick, snare, hat.
+  const hits = [
+    n("k1", 0, S, 36),
+    n("h1", S, S, 42),
+    n("s1", 4 * S, S, 38),
+    n("k2", 16 * S, S, 36),
+    n("h2", 17 * S, S, 42),
+  ];
+  const pads = [36, 38, 42];
+
+  it("picks the hits a step × row rectangle covers", () => {
+    expect([...hitsInSteps(hits, pads, S, 0, 15)].sort()).toEqual(["h1", "k1", "s1"]);
+    expect([...hitsInSteps(hits, [36], S, 0, 15)]).toEqual(["k1"]);
+    expect([...hitsInSteps(hits, pads, S, 16, 31)].sort()).toEqual(["h2", "k2"]);
+    expect(hitsInSteps(hits, [60], S, 0, 31).size).toBe(0);
+  });
+
+  it("catches a hit that leans off its step by the step it starts in", () => {
+    const dragged = [{ ...n("k1", 0, S, 36), shiftTicks: -40 }];
+    expect([...hitsInSteps(dragged, [36], S, 0, 0)]).toEqual(["k1"]);
+  });
+
+  it("copies a bar to another bar through the clipboard, cut to the pattern", () => {
+    const picked = hits.filter((x) => hitsInSteps(hits, pads, S, 0, 15).has(x.id));
+    const { notes: out, newIds } = pasteNotes(hits, picked, 32 * S, 48 * S);
+    expect(newIds.size).toBe(3);
+    expect(out.filter((x) => newIds.has(x.id)).map((x) => x.startTick).sort((a, b) => a - b)).toEqual([32 * S, 33 * S, 36 * S]);
+
+    // A paste that would run past the pattern loses the copies that land outside it and cuts
+    // the one straddling the end, so the grid never grows a step it cannot show.
+    const tight = pasteNotes(hits, picked, 47 * S + 120, 48 * S);
+    expect(tight.newIds.size).toBe(1);
+    expect(tight.notes.at(-1)).toMatchObject({ startTick: 47 * S + 120, lengthTicks: 120 });
+  });
+
+  it("moves hits between kit rows and stops at the ends", () => {
+    const down = moveHitsByRow(hits, new Set(["k1"]), pads, 1);
+    expect(down.find((x) => x.id === "k1")!.pitch).toBe(38);
+    // The whole selection shifts together, so a move that would push one hit off the kit is
+    // refused for all of them: the shape of what was picked survives.
+    expect(moveHitsByRow(hits, new Set(["k1", "h1"]), pads, 1)).toBe(hits);
+    expect(moveHitsByRow(hits, new Set(["k1"]), pads, -1)).toBe(hits);
+    const up = moveHitsByRow(hits, new Set(["h1", "s1"]), pads, -1);
+    expect(up.find((x) => x.id === "h1")!.pitch).toBe(38);
+    expect(up.find((x) => x.id === "s1")!.pitch).toBe(36);
   });
 });

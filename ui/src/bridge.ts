@@ -1210,6 +1210,9 @@ function normalizedModel(m: ProjectModel): ProjectModel {
     .filter((c) => m.patterns.some((p) => p.id === c.patternId))
     .filter((c) => c.startTick < m.songLengthTicks)
     .map((c) => ({ ...c, lengthTicks: Math.min(c.lengthTicks, m.songLengthTicks - c.startTick) }));
+  // A brace left hanging past the end (hand-edited, or saved before the song was shortened)
+  // would loop over silence.
+  m.loopRegion = clampLoop(m.loopRegion, m.songLengthTicks);
   // Unreferenced sources stay: undoing the clip that used one must not force a re-decode.
   m.audioSources ??= [];
   const audioTrackIds = new Set(
@@ -1245,6 +1248,14 @@ function updateClip(m: ProjectModel, clip: Clip): void {
   if (clip.startTick < 0 || clip.lengthTicks <= 0 || clip.offsetTicks < 0) fail(INVALID_VALUE);
   const lengthTicks = clampToSong(m, clip.startTick, clip.lengthTicks);
   m.clips[i] = { ...clip, patternId: m.clips[i].patternId, lengthTicks };
+}
+
+/** Mirrors `clamp_loop`: a brace held inside `[0, songEnd]`, or null when nothing is left of it. */
+function clampLoop(region: [number, number] | null | undefined, songEnd: number): [number, number] | null {
+  if (!region) return null;
+  const start = Math.min(Math.max(region[0], 0), songEnd);
+  const end = Math.min(Math.max(region[1], 0), songEnd);
+  return end > start ? [start, end] : null;
 }
 
 function clone<T>(x: T): T {
@@ -1503,6 +1514,19 @@ function reduce(m: ProjectModel, c: Command): void {
       m.clips = m.clips
         .filter((cl) => cl.startTick < end)
         .map((cl) => (cl.startTick + cl.lengthTicks > end ? { ...cl, lengthTicks: end - cl.startTick } : cl));
+      m.loopRegion = clampLoop(m.loopRegion, end);
+      break;
+    }
+    case "setLoopRegion": {
+      if (c.region === null) {
+        m.loopRegion = null;
+        break;
+      }
+      const [start, end] = c.region;
+      // An inverted or empty brace is a bug in the caller, not a way to clear: clearing says
+      // so with `null`.
+      if (!allFinite(start, end) || start < 0 || end <= start) fail(INVALID_VALUE);
+      m.loopRegion = clampLoop([start, end], m.songLengthTicks) ?? fail(INVALID_VALUE);
       break;
     }
     case "addSection":

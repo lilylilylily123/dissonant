@@ -111,12 +111,23 @@ export function duplicateNotes(notes: NoteEvent[], ids: Set<string>, gridTicks: 
   return { notes: [...notes, ...copies], newIds: new Set(copies.map((c) => c.id)) };
 }
 
-/** Paste `clipboard` so its earliest note lands at `atTick`. */
-export function pasteNotes(notes: NoteEvent[], clipboard: NoteEvent[], atTick: number): { notes: NoteEvent[]; newIds: Set<string> } {
+/**
+ * Paste `clipboard` so its earliest note lands at `atTick`. With `maxTick` (the drum grid
+ * pastes into a pattern of a fixed length) copies that would start past the end are dropped
+ * and the rest are cut to it, so a paste never grows the pattern behind the writer's back.
+ */
+export function pasteNotes(notes: NoteEvent[], clipboard: NoteEvent[], atTick: number, maxTick?: number): { notes: NoteEvent[]; newIds: Set<string> } {
   if (clipboard.length === 0) return { notes, newIds: new Set() };
   const at = Math.round(atTick);
   const start = Math.min(...clipboard.map((n) => n.startTick));
-  const copies = clipboard.map((n) => ({ ...n, id: uuid(), startTick: n.startTick - start + at }));
+  const copies: NoteEvent[] = [];
+  for (const n of clipboard) {
+    const startTick = n.startTick - start + at;
+    if (maxTick !== undefined && startTick >= maxTick) continue;
+    const lengthTicks = maxTick === undefined ? n.lengthTicks : Math.min(n.lengthTicks, maxTick - startTick);
+    copies.push({ ...n, id: uuid(), startTick, lengthTicks });
+  }
+  if (!copies.length) return { notes, newIds: new Set() };
   return { notes: [...notes, ...copies], newIds: new Set(copies.map((c) => c.id)) };
 }
 
@@ -637,6 +648,51 @@ export function euclideanRow(notes: NoteEvent[], grid: StepGrid, onsets: number,
     for (let i = 0; i < grid.steps; i++) if (pattern[(i + turn) % grid.steps]) row[i] = existing[i] ?? newHit(grid, velocity);
   }
   return replaceRow(notes, grid, row);
+}
+
+// ─── Step selection (the drum grid's marquee, clipboard and nudges) ─────────────────────────
+
+/**
+ * Ids of the hits inside a step × row rectangle: those on `pitches` (the kit rows a marquee
+ * covered — a kit is a list, not a scale, so its rows are not contiguous in pitch) that start
+ * within [`step0`, `step1`]. A hit belongs to the step it starts in, so one leaning early by
+ * its shift is still caught by the cell it lives in.
+ */
+export function hitsInSteps(notes: NoteEvent[], pitches: Iterable<number>, stepTicks: number, step0: number, step1: number): Set<string> {
+  const g = gridOf(stepTicks);
+  const rows = new Set(pitches);
+  const [a, b] = step0 <= step1 ? [step0, step1] : [step1, step0];
+  const out = new Set<string>();
+  for (const n of notes) {
+    if (!rows.has(n.pitch)) continue;
+    const step = Math.floor(n.startTick / g);
+    if (step >= a && step <= b) out.add(n.id);
+  }
+  return out;
+}
+
+/**
+ * Move the selection `delta` rows along `pitches` (the kit's own order). The delta is clamped
+ * so no hit falls off either end, which keeps the shape of a selection spanning several pads;
+ * hits on pitches the kit has no row for stay where they are.
+ */
+export function moveHitsByRow(notes: NoteEvent[], ids: Set<string>, pitches: number[], delta: number): NoteEvent[] {
+  const d = Math.round(delta);
+  if (!d || ids.size === 0 || pitches.length === 0) return notes;
+  const rows = new Map(pitches.map((p, i) => [p, i]));
+  const rowsUsed: number[] = [];
+  for (const n of notes) {
+    if (!ids.has(n.id)) continue;
+    const i = rows.get(n.pitch);
+    if (i !== undefined) rowsUsed.push(i);
+  }
+  if (!rowsUsed.length) return notes;
+  const move = Math.max(-Math.min(...rowsUsed), Math.min(pitches.length - 1 - Math.max(...rowsUsed), d));
+  if (!move) return notes;
+  return notes.map((n) => {
+    const i = rows.get(n.pitch);
+    return ids.has(n.id) && i !== undefined ? { ...n, pitch: pitches[i + move] } : n;
+  });
 }
 
 /**

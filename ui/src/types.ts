@@ -489,6 +489,8 @@ export interface ProjectModel {
   chords: ChordEvent[];
   /** The song's hard end in ticks: clips can't start at or run past it. At least one bar. */
   songLengthTicks: number;
+  /** The song's loop brace in song ticks, `[start, end]`; absent / null = loop the whole song. */
+  loopRegion?: [number, number] | null;
   /** Copies of the non-factory sounds the tracks use. Absent when empty. */
   sounds?: Sound[];
 }
@@ -834,6 +836,7 @@ export type Command =
   | { type: "removeClips"; ids: string[] }
   | { type: "makeClipUnique"; id: string }
   | { type: "setSongLength"; ticks: number }
+  | { type: "setLoopRegion"; region: [number, number] | null }
   | { type: "addSection"; name: string; startTick: number }
   | { type: "updateSection"; section: Section }
   | { type: "removeSection"; id: string }

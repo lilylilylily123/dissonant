@@ -457,6 +457,16 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
         parse(json!({"type": "setSongLength", "ticks": 92_160})),
         Command::SetSongLength { ticks: 92_160 }
     );
+    assert_eq!(
+        parse(json!({"type": "setLoopRegion", "region": [15_360, 30_720]})),
+        Command::SetLoopRegion {
+            region: Some((15_360, 30_720))
+        }
+    );
+    assert_eq!(
+        parse(json!({"type": "setLoopRegion", "region": null})),
+        Command::SetLoopRegion { region: None }
+    );
     match parse(json!({
         "type": "importTracks",
         "tracks": [{"name": "piano", "isDrum": false, "notes": []}],

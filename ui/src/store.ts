@@ -46,6 +46,7 @@ import {
 } from "./types";
 import { applyUiScale } from "./uiScale";
 import { FACTORY_SOUNDS, type Sound } from "./sound";
+import type { ArrSnap } from "./clipEditing";
 
 export interface Toast {
   text: string;
@@ -100,10 +101,14 @@ interface State {
   /** Clips selected in the song view. */
   selectedClipIds: string[];
   selectedNoteIds: string[];
+  /** Notes copied out of a roll or a drum grid; one clipboard, so hits carry between them. */
+  noteClipboard: NoteEvent[];
   /** Grid / default note length, in ticks. */
   noteLength: number;
   zoom: number;
   arrZoom: number; // px per bar in the arrangement
+  /** The grid clip gestures land on in the song view ("off" = whole ticks). */
+  arrSnap: ArrSnap;
   showLandscape: boolean;
   highlightRows: boolean;
   hearChords: boolean;
@@ -213,9 +218,11 @@ interface State {
   /** Replace the clip selection, or add to it with `additive`. */
   selectClips(ids: string[], additive?: boolean): void;
   setSelectedNoteIds(ids: string[]): void;
+  setNoteClipboard(notes: NoteEvent[]): void;
   setNoteLength(ticks: number): void;
   setZoom(zoom: number): void;
   setArrZoom(px: number): void;
+  setArrSnap(snap: ArrSnap): void;
   toggleLandscape(): void;
   toggleHighlight(): void;
   toggleHearChords(): void;
@@ -229,7 +236,10 @@ interface State {
   tapTempo(): void;
   /** Preview a pitch. `lengthTicks` defaults to the current grid, so a preview never outlasts the note. */
   audition(pitch: number, velocity?: number, lengthTicks?: number): void;
+  /** The roll's loop brace, in the selected pattern's own ticks. Dropped on a pattern switch. */
   setLoopRegion(region: [number, number] | null): void;
+  /** The song's loop brace, in song ticks: an undoable edit, saved with the project. */
+  setSongLoop(region: [number, number] | null): Promise<void>;
   toggleLooping(): void;
   toggleRecord(): void;
   /** The grid a take snaps to; `null` records it as played. */
@@ -416,6 +426,57 @@ let taps: number[] = [];
 let dialogResolve: ((value: string) => void) | null = null;
 let lastTitle = "";
 
+// ─── Zoom memory ───────────────────────────────────────────────────────────────────────────
+//
+// A zoom is how close the writer wants to stand to the music, not project data, so — like the
+// panel sizes in `panels.ts` — it is remembered per machine in `localStorage` instead of being
+// thrown away on every navigation and relaunch. `setup` is nullable because the song page's
+// "fit" is a real choice, not a number.
+
+export type ZoomId = "pattern" | "song" | "setup";
+
+const ZOOM_RANGE: Record<ZoomId, [number, number]> = {
+  pattern: [0.25, 3], // × the base beat width
+  song: [12, 160], // px per bar
+  setup: [4, 160], // px per beat
+};
+const ZOOM_KEY = "dissonant.zoom";
+const zooms: Record<ZoomId, number | null> = { pattern: 1, song: 30, setup: null };
+
+export function clampZoom(id: ZoomId, value: number): number {
+  const [min, max] = ZOOM_RANGE[id];
+  return Math.min(max, Math.max(min, value));
+}
+
+/** The remembered zoom, or null where the view's default is "fit". */
+export function storedZoom(id: ZoomId): number | null {
+  const v = zooms[id];
+  return v === null ? null : clampZoom(id, v);
+}
+
+export function setStoredZoom(id: ZoomId, value: number | null) {
+  const next = value === null ? null : clampZoom(id, value);
+  if (next === zooms[id]) return;
+  zooms[id] = next;
+  try {
+    localStorage.setItem(ZOOM_KEY, JSON.stringify(zooms));
+  } catch {
+    /* storage off: the zoom just won't outlive the session */
+  }
+}
+
+// Nonsense in the file is ignored rather than thrown over: a bad zoom would blank the editor.
+try {
+  const saved = JSON.parse(localStorage.getItem(ZOOM_KEY) ?? "{}") as Partial<Record<ZoomId, unknown>>;
+  for (const id of Object.keys(ZOOM_RANGE) as ZoomId[]) {
+    const v = saved[id];
+    if (typeof v === "number" && Number.isFinite(v)) zooms[id] = clampZoom(id, v);
+    else if (v === null) zooms[id] = null;
+  }
+} catch {
+  /* unreadable: the defaults stand */
+}
+
 /**
  * Every sound a track could pick, of one kind: factory, then the user library, then any sound
  * embedded in the project that isn't in the library (opened from another machine).
@@ -448,11 +509,27 @@ export function reconcileSelection(m: ProjectModel, trackId: string | null, patt
 }
 
 export const useStore = create<State>((set, get) => {
+  /**
+   * Tell the engine which loop brace is live. The two are in different time bases — the roll's
+   * is in pattern ticks, the song's in song ticks — so only one can ever be loaded, and this is
+   * the single place that picks. PATTERN plays a pattern; every other screen plays the song.
+   */
+  const syncLoop = async () => {
+    const { screen, loopRegion, snapshot } = get();
+    const region = screen === "pattern" ? loopRegion : (snapshot?.model.loopRegion ?? null);
+    const b = await getBridge();
+    if (region) await b.setLoop(region[0], region[1]);
+    else await b.clearLoop();
+  };
+
   const syncPlayback = async () => {
     const b = await getBridge();
     const { screen, selectedPatternId, chordOffsetTicks, ghostPatternId, hearGhost, ghostLevel } = get();
     const ghost = hearGhost && ghostPatternId !== selectedPatternId ? ghostPatternId : null;
     await b.setPlaybackContext(playModeOf(screen), selectedPatternId, chordOffsetTicks, ghost, ghostLevel);
+    // The brace belongs to the sequence that was just loaded, so it travels with it: every
+    // screen or project change goes through here.
+    await syncLoop();
   };
 
   /**
@@ -481,6 +558,11 @@ export const useStore = create<State>((set, get) => {
   const applySnapshot = (snapshot: Snapshot) => {
     const m = snapshot.model;
     const { selectedTrackId, selectedPatternId, selectedClipIds, ghostPatternId } = get();
+    // Opening, undoing and the brace drag itself all arrive as snapshots, so the engine is
+    // re-told from here rather than from each of them.
+    const loopWas = get().snapshot?.model.loopRegion ?? null;
+    const loopNow = m.loopRegion ?? null;
+    const loopChanged = loopWas?.[0] !== loopNow?.[0] || loopWas?.[1] !== loopNow?.[1];
     const next = reconcileSelection(m, selectedTrackId, selectedPatternId);
     const patternLost = next.selectedPatternId !== selectedPatternId;
     const clipIds = new Set(m.clips.map((c) => c.id));
@@ -493,6 +575,7 @@ export const useStore = create<State>((set, get) => {
     const ghostLost = ghostPatternId !== null && get().ghostPatternId === null;
     moveSelection(next);
     if (patternLost || ghostLost) void syncPlayback();
+    if (loopChanged) void syncLoop();
     // OS window title: "song.dissonant • — dissonant"
     const title = `${fileNameOf(snapshot.path)}${snapshot.dirty ? " •" : ""} — dissonant`;
     if (title !== lastTitle) {
@@ -558,9 +641,11 @@ export const useStore = create<State>((set, get) => {
     chordOffsetTicks: 0,
     selectedClipIds: [],
     selectedNoteIds: [],
+    noteClipboard: [],
     noteLength: 240,
-    zoom: 1,
-    arrZoom: 30,
+    zoom: storedZoom("pattern") ?? 1,
+    arrZoom: storedZoom("song") ?? 30,
+    arrSnap: "bar",
     showLandscape: false,
     highlightRows: true,
     hearChords: false,
@@ -790,14 +875,24 @@ export const useStore = create<State>((set, get) => {
     setSelectedNoteIds(ids) {
       set({ selectedNoteIds: ids });
     },
+    setNoteClipboard(notes) {
+      set({ noteClipboard: notes });
+    },
     setNoteLength(ticks) {
       set({ noteLength: ticks });
     },
     setZoom(zoom) {
-      set({ zoom: Math.min(3, Math.max(0.25, zoom)) });
+      const next = clampZoom("pattern", zoom);
+      setStoredZoom("pattern", next);
+      set({ zoom: next });
     },
     setArrZoom(px) {
-      set({ arrZoom: Math.min(160, Math.max(12, px)) });
+      const next = clampZoom("song", px);
+      setStoredZoom("song", next);
+      set({ arrZoom: next });
+    },
+    setArrSnap(snap) {
+      set({ arrSnap: snap });
     },
     toggleLandscape() {
       set((s) => ({ showLandscape: !s.showLandscape }));
@@ -871,9 +966,12 @@ export const useStore = create<State>((set, get) => {
 
     setLoopRegion(region) {
       set({ loopRegion: region });
-      void getBridge().then((b) =>
-        region ? b.setLoop(region[0], region[1]) : b.clearLoop(),
-      );
+      void syncLoop();
+    },
+    async setSongLoop(region) {
+      const was = get().snapshot?.model.loopRegion ?? null;
+      if (region?.[0] === was?.[0] && region?.[1] === was?.[1]) return;
+      await get().dispatch({ type: "setLoopRegion", region });
     },
     toggleLooping() {
       const on = !get().looping;
@@ -1658,12 +1756,25 @@ export function selectedTrackIndex(s: State): number {
   return i < 0 ? 0 : i;
 }
 
+/**
+ * Every snap the writer can pick, smallest first. The tick grid makes the odd ones exact: at
+ * 960 PPQ a triplet of a 1/8 is 320 ticks and a dotted 1/16 is 360, so nothing here rounds.
+ * A `T` suffix is a triplet (two thirds of the straight value), a `.` is dotted (one and a half).
+ */
 export const GRID_OPTIONS: [string, number][] = [
   ["1/32", 120],
+  ["1/16T", 160],
   ["1/16", 240],
+  ["1/8T", 320],
+  ["1/16.", 360],
   ["1/8", 480],
+  ["1/4T", 640],
+  ["1/8.", 720],
   ["1/4", 960],
+  ["1/2T", 1280],
+  ["1/4.", 1440],
   ["1/2", 1920],
+  ["1/2.", 2880],
   ["1", 3840],
 ];
 

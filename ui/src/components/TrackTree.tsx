@@ -8,6 +8,7 @@ import { addedId, dropGap, loadCollapsed, patternKey, reorderMoves, saveCollapse
 import type { TreeRow } from "../trackTree";
 import { usePanelSize } from "../panels";
 import { Splitter } from "./Splitter";
+import { PatternBars } from "./Editor";
 
 /** Pixels the pointer must travel before a press on a row becomes a drag. */
 const DRAG_THRESHOLD = 4;
@@ -495,7 +496,7 @@ export function TrackTree() {
               <span className="cap">length · {pattern.name}</span>
               <span className="tt-count">{+(pattern.lengthTicks / barTick).toFixed(2)} bars</span>
             </div>
-            <div className="chipsrow">
+            <div className="chipsrow" title="length in bars: the chips are the usual four, the field is every other number">
               {[1, 2, 4, 8].map((bars) => (
                 <button
                   key={bars}
@@ -505,6 +506,7 @@ export function TrackTree() {
                   {bars}
                 </button>
               ))}
+              <PatternBars pattern={pattern} barTick={barTick} />
             </div>
           </>
         )}
