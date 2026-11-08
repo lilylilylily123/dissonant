@@ -59,6 +59,7 @@ fn audio_tracks_clips_and_rigs_round_trip() {
         frames: 96_000,
         sample_rate: 48_000,
         channels: 2,
+        origin_url: None,
     };
     let mut clip = AudioClip::new(gid, source.id, 8 * BEAT, 2.0);
     clip.gain = 0.7;
@@ -69,6 +70,78 @@ fn audio_tracks_clips_and_rigs_round_trip() {
 
     let decoded = ProjectModel::from_json(&model.to_json().unwrap()).unwrap();
     assert_eq!(decoded, model);
+}
+
+#[test]
+fn sampler_tracks_their_chops_analysis_and_origin_round_trip() {
+    let mut model = ProjectModel::starter();
+    let source = AudioSource {
+        id: uuid::Uuid::new_v4(),
+        name: "amen break".into(),
+        frames: 8 * 44_100,
+        sample_rate: 44_100,
+        channels: 2,
+        origin_url: Some("https://www.youtube.com/watch?v=abc".into()),
+    };
+    let mut sampler = Sampler::new(source.id, chops_at(&[0.5, 1.25, 3.0], 8.0));
+    sampler.base_pitch = 48;
+    sampler.chops[1].name = "snare".into();
+    sampler.chops[1].mode = ChopMode::Gate;
+    sampler.chops[1].reverse = true;
+    sampler.chops[2].choke = 2;
+    sampler.chops[2].gain = 1.5;
+    sampler.analysis = Some(SampleAnalysis {
+        bpm: Some(136.0),
+        bpm_confidence: 0.8,
+        key_root: Some(2),
+        key_scale: ScaleType::Minor,
+        key_confidence: 0.6,
+        onsets: vec![
+            Onset { seconds: 0.5, strength: 0.9 },
+            Onset { seconds: 1.25, strength: 1.0 },
+        ],
+    });
+    sampler.voice = SamplerVoice::Poly;
+    sampler.region = Some(SampleRegion {
+        start_seconds: 0.5,
+        end_seconds: 4.0,
+    });
+    sampler.chopper = Some(Chopper::Equal { count: 8 });
+    model.tracks.push(Track::sampler("amen", sampler));
+    model.audio_sources = vec![source];
+
+    let decoded = ProjectModel::from_json(&model.to_json().unwrap()).unwrap();
+    assert_eq!(decoded, model);
+    assert_eq!(decoded.tracks.last().unwrap().kind(), TrackKind::Sampler);
+}
+
+#[test]
+fn a_sampler_saved_before_voices_and_regions_opens_mono_over_the_whole_source() {
+    let mut model = ProjectModel::starter();
+    model
+        .tracks
+        .push(Track::sampler("old", Sampler::new(uuid::Uuid::new_v4(), chops_at(&[1.0], 8.0))));
+    let mut file: serde_json::Value = serde_json::from_str(&model.to_json().unwrap()).unwrap();
+    let wire = file["tracks"].as_array_mut().unwrap().last_mut().unwrap()["sampler"]
+        .as_object_mut()
+        .unwrap();
+    assert!(!wire.contains_key("region"));
+    assert!(!wire.contains_key("chopper"));
+    // What a build before mono/poly wrote: no voice at all.
+    assert!(wire.remove("voice").is_some());
+    let old = serde_json::to_string(&file).unwrap();
+    let sampler = ProjectModel::from_json(&old).unwrap().tracks.last().unwrap().sampler.clone().unwrap();
+    assert_eq!(sampler.voice, SamplerVoice::Mono);
+    assert_eq!((sampler.region, sampler.chopper), (None, None));
+}
+
+#[test]
+fn a_track_without_a_sampler_writes_no_sampler_key() {
+    // Additive fields, no schema bump: a project with no sampler must be byte-for-byte what
+    // the build before samplers wrote.
+    let json = ProjectModel::starter().to_json().unwrap();
+    assert!(!json.contains("\"sampler\""));
+    assert!(!json.contains("originUrl"));
 }
 
 #[test]
@@ -213,6 +286,7 @@ fn loading_drops_audio_clips_whose_track_or_source_is_gone() {
         frames: 1_000,
         sample_rate: 48_000,
         channels: 1,
+        origin_url: None,
     };
     let sid = source.id;
     m.audio_sources = vec![source];

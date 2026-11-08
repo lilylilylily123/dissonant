@@ -22,6 +22,7 @@ let P: typeof PanelsModule;
 beforeEach(async () => {
   localStorage.clear();
   win.innerWidth = 1600;
+  win.innerHeight = 1000;
   vi.resetModules();
   // The module reads storage as it loads, so "what a reload sees" can only be exercised by
   // loading it again.
@@ -63,6 +64,19 @@ describe("panel sizes", () => {
     vi.resetModules();
     const reloaded = await import("./panels");
     expect(reloaded.panelSize("tree")).toBe(reloaded.panelDefault("tree"));
+  });
+
+  it("defaults a split to its share of the window until it is dragged, and a reset follows the window again", () => {
+    // The strip takes 40% of what is left after 460 px of everything else.
+    win.innerHeight = 900;
+    expect(P.panelSize("sampleStrip")).toBe(176);
+    win.innerHeight = 700;
+    expect(P.panelSize("sampleStrip")).toBe(96);
+    P.setPanelSize("sampleStrip", 120);
+    win.innerHeight = 900;
+    expect(P.panelSize("sampleStrip")).toBe(120);
+    P.resetPanel("sampleStrip");
+    expect(P.panelSize("sampleStrip")).toBe(176);
   });
 
   it("keeps the same room to shrink at a bigger ui scale", async () => {

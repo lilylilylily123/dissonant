@@ -1,11 +1,12 @@
 //! A track channel (instrument → tone → inserts → reverb/gain/pan) and the master chain
 //! (master inserts → low-cut → 3-band EQ → high-cut → reverb → gain → limiter).
 
-use crate::audio::{AudioLane, BlockContext};
+use crate::audio::{AudioLane, AudioPool, BlockContext};
 use crate::drums::{DrumBank, DrumKit};
 use crate::dsp::{db_to_linear, linear_to_db, pan_gains, Limiter, Reverb, StereoBiquad};
 use crate::effects::NativeEffect;
 use crate::engine::{NoteShape, Slide, VoiceTag};
+use crate::sampler::SamplerInstrument;
 use crate::synth::{Bend, PolySynth};
 use dissonant_core::{MasterSettings, SequenceTrack, SynthPatch};
 use dissonant_plugins::PluginAudioUnit;
@@ -25,6 +26,8 @@ pub enum Instrument {
     /// A hosted plugin. Boxed because it is an order of magnitude larger than the other two and
     /// every `Channel` would otherwise carry that size whether or not it hosts anything.
     Plugin(Box<PluginAudioUnit>),
+    /// A sampler track's chops, read from a source in the audio pool.
+    Sampler(SamplerInstrument),
     /// An audio track has no note source: its sound comes from its [`AudioLane`]. Every note
     /// call is a no-op and it renders nothing of its own.
     Silent,
@@ -37,18 +40,25 @@ impl std::fmt::Debug for Instrument {
             Instrument::Drums(d) => f.debug_tuple("Drums").field(d).finish(),
             // A plugin's innards belong to the plugin; naming it is all a log line needs.
             Instrument::Plugin(_) => f.write_str("Plugin(..)"),
+            Instrument::Sampler(s) => f.debug_tuple("Sampler").field(s).finish(),
             Instrument::Silent => f.write_str("Silent"),
         }
     }
 }
 
 impl Instrument {
-    /// The instrument a track plays, with no plugin involved: an audio track has none, a drum
-    /// track takes its pads' drums from `drums` when they are already rendered there (off the
-    /// audio thread) and renders them here otherwise, and a synth track plays its patch.
+    /// The instrument a track plays, with no plugin involved: an audio track has none, a
+    /// sampler track plays its chops, a drum track takes its pads' drums from `drums` when they
+    /// are already rendered there (off the audio thread) and renders them here otherwise, and a
+    /// synth track plays its patch.
+    ///
+    /// A sampler comes back with no source bound and plays silence until
+    /// [`Instrument::bind_pool`] gives it one; [`Channel::apply`] does that on every sequence.
     pub fn for_track(track: &SequenceTrack, sample_rate: f32, drums: Option<&DrumBank>) -> Self {
         if track.is_audio {
             Instrument::Silent
+        } else if let Some(sampler) = &track.sampler {
+            Instrument::Sampler(SamplerInstrument::new(sampler, sample_rate))
         } else if track.is_drum {
             Instrument::Drums(DrumKit::with_bank(&track.drum_pads, sample_rate, drums))
         } else {
@@ -57,6 +67,14 @@ impl Instrument {
                 sample_rate,
                 SYNTH_POLYPHONY,
             )))
+        }
+    }
+
+    /// Bind a sampler to its source's buffer in `pool`. Run when the sequence or the pool
+    /// changes, never per block: it is a map lookup. Nothing else reads the pool here.
+    pub fn bind_pool(&mut self, pool: &AudioPool) {
+        if let Instrument::Sampler(s) = self {
+            s.bind(pool);
         }
     }
 
@@ -75,6 +93,8 @@ impl Instrument {
                     p.note_tuning(0, id, pitch, f64::from(cents) / 100.0);
                 }
             }
+            // A chop plays at the source's own pitch; the note's shape has nothing to move.
+            Instrument::Sampler(s) => s.note_on(pitch, velocity),
             Instrument::Silent => {}
         }
     }
@@ -109,13 +129,14 @@ impl Instrument {
         match self {
             Instrument::Synth(s) => s.set_tone_hz(hz),
             Instrument::Drums(d) => d.set_tone_hz(hz),
-            Instrument::Plugin(_) | Instrument::Silent => {}
+            Instrument::Plugin(_) | Instrument::Sampler(_) | Instrument::Silent => {}
         }
     }
     pub fn note_off(&mut self, pitch: u8) {
         match self {
             Instrument::Synth(s) => s.note_off(pitch),
             Instrument::Plugin(p) => p.note_off(pitch),
+            Instrument::Sampler(s) => s.note_off(pitch),
             // A drum hit is a one-shot: it has no sustain to release.
             Instrument::Drums(_) | Instrument::Silent => {}
         }
@@ -124,6 +145,7 @@ impl Instrument {
         match self {
             Instrument::Synth(s) => s.all_notes_off(),
             Instrument::Plugin(p) => p.all_notes_off(),
+            Instrument::Sampler(s) => s.all_notes_off(),
             Instrument::Drums(_) | Instrument::Silent => {}
         }
     }
@@ -132,6 +154,7 @@ impl Instrument {
             Instrument::Synth(s) => s.is_silent(),
             Instrument::Drums(d) => d.is_silent(),
             Instrument::Plugin(p) => p.is_silent(),
+            Instrument::Sampler(s) => s.is_silent(),
             Instrument::Silent => true,
         }
     }
@@ -139,6 +162,7 @@ impl Instrument {
         match self {
             Instrument::Synth(s) => s.render_add(out_l, out_r),
             Instrument::Drums(d) => d.render_add(out_l, out_r),
+            Instrument::Sampler(s) => s.render_add(out_l, out_r),
             // A plugin goes through `Channel::render_add`'s own path.
             Instrument::Plugin(_) | Instrument::Silent => {}
         }
@@ -421,7 +445,12 @@ pub struct Channel {
 }
 
 impl Channel {
-    pub fn new(track: &SequenceTrack, sample_rate: f32, drums: Option<&DrumBank>) -> Self {
+    pub fn new(
+        track: &SequenceTrack,
+        sample_rate: f32,
+        drums: Option<&DrumBank>,
+        pool: &AudioPool,
+    ) -> Self {
         let mut c = Channel {
             instrument: Instrument::for_track(track, sample_rate, drums),
             bends: PluginBends::new(),
@@ -444,7 +473,7 @@ impl Channel {
                 .then(|| Box::new(AudioLane::new(track.id, sample_rate))),
             peak: 0.0,
         };
-        c.apply(track, drums);
+        c.apply(track, drums, pool);
         c
     }
 
@@ -469,28 +498,37 @@ impl Channel {
     }
 
     /// Update params from the track. A changed synth patch is applied live (held notes keep
-    /// sounding); a changed kit re-renders only the pads whose patch changed; switching
-    /// between kinds builds a new instrument.
+    /// sounding); a changed kit re-renders only the pads whose patch changed; a sampler takes
+    /// its new chops and is bound to its source in `pool`; switching between kinds builds a new
+    /// instrument.
     ///
     /// A plugin is never swapped away here: it is installed by `EngineCommand::SetInstrument`
     /// from the app thread, because loading one is far too slow for the audio deadline, and a
     /// sequence rebuild must not silently replace it with the track's own sound.
-    pub fn apply(&mut self, track: &SequenceTrack, drums: Option<&DrumBank>) {
+    pub fn apply(&mut self, track: &SequenceTrack, drums: Option<&DrumBank>, pool: &AudioPool) {
         match &mut self.instrument {
             Instrument::Plugin(_) => {}
-            Instrument::Synth(s) if !track.is_drum && !track.is_audio => {
+            Instrument::Synth(s) if !track.is_drum && !track.is_audio && track.sampler.is_none() => {
                 if track.synth != self.synth {
                     s.set_patch(&track.synth);
                     self.synth = track.synth;
                 }
             }
-            Instrument::Drums(kit) if track.is_drum => kit.update(&track.drum_pads, drums),
+            Instrument::Drums(kit) if track.is_drum && track.sampler.is_none() => {
+                kit.update(&track.drum_pads, drums)
+            }
+            Instrument::Sampler(s) if !track.is_audio && track.sampler.is_some() => {
+                if let Some(sampler) = &track.sampler {
+                    s.update(sampler);
+                }
+            }
             Instrument::Silent if track.is_audio => {}
             _ => {
                 self.instrument = Instrument::for_track(track, self.sample_rate, drums);
                 self.synth = track.synth;
             }
         }
+        self.instrument.bind_pool(pool);
         self.is_drum = track.is_drum;
         self.is_audio = track.is_audio;
         match (track.is_audio, &mut self.audio) {

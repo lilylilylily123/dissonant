@@ -27,7 +27,9 @@
   gap: 6px;
   padding: 8px 8px 6px;
 }
-.sp-search {
+/* Scoped: the inline picker in the device panel shares `.sp-search` and sits flush in its card. */
+.sp-browser .sp-search {
+  width: auto;
   margin: 0 8px 6px;
 }
 .sp-blist {

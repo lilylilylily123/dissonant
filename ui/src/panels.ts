@@ -8,7 +8,7 @@
 import { useSyncExternalStore } from "react";
 import { onZoomChange, pageZoom } from "./uiScale";
 
-export type PanelId = "tree" | "inspector" | "bottom" | "songHead" | "rec" | "soundBrowser";
+export type PanelId = "tree" | "inspector" | "bottom" | "songHead" | "rec" | "soundBrowser" | "sampleStrip";
 
 interface Spec {
   /** The size in CSS px before anyone drags it: it scales with the UI, like the text in it. */
@@ -21,6 +21,13 @@ interface Spec {
   axis: "x" | "y";
   /** Screen px of the other panes that must survive at any window size. */
   keep: number;
+  /**
+   * A default that follows the window instead of `size`: `ratio` of what is left once `around`
+   * screen px go to everything else on the axis. Until the panel is dragged it keeps that share
+   * as the window changes, which a fixed size cannot do for a split; `size` stands in where
+   * there is no window.
+   */
+  share?: { ratio: number; around: number };
 }
 
 // `min` and `keep` are screen pixels rather than CSS pixels on purpose: the UI scale is a page
@@ -34,17 +41,25 @@ const SPECS: Record<PanelId, Spec> = {
   songHead: { size: 220, min: 120, max: 460, axis: "x", keep: 320 },
   rec: { size: 300, min: 200, max: 620, axis: "x", keep: 320 },
   soundBrowser: { size: 228, min: 160, max: 520, axis: "x", keep: 420 },
+  // SAMPLE's pattern strip under the waveform: about 40% of the column the waveform and the
+  // strip share (what the transport, the page's bars, the pads and the status bar leave).
+  // `keep` adds the waveform's floor to those, so the strip never squeezes it out.
+  sampleStrip: { size: 180, min: 80, max: 640, axis: "y", keep: 560, share: { ratio: 0.4, around: 460 } },
 };
 
 const KEY = "dissonant.panels";
 
 const IDS = Object.keys(SPECS) as PanelId[];
-const sizes = Object.fromEntries(IDS.map((id) => [id, SPECS[id].size])) as Record<PanelId, number>;
+/** What the user dragged each panel to; `null` while a panel with a `share` was never dragged. */
+const sizes = Object.fromEntries(IDS.map((id) => [id, SPECS[id].share ? null : SPECS[id].size])) as Record<PanelId, number | null>;
 const listeners = new Set<() => void>();
 
-/** The default size of a panel, for a splitter's double-click reset. */
+/** The default size of a panel: its fixed size, or its share of the window as it is now. */
 export function panelDefault(id: PanelId): number {
-  return SPECS[id].size;
+  const { size, share, axis } = SPECS[id];
+  if (!share || typeof window === "undefined") return size;
+  const extent = axis === "x" ? window.innerWidth : window.innerHeight;
+  return clampPanel(id, share.ratio * (extent - share.around / pageZoom()));
 }
 
 /**
@@ -64,13 +79,23 @@ export function clampPanel(id: PanelId, px: number): number {
 }
 
 export function panelSize(id: PanelId): number {
-  return clampPanel(id, sizes[id]);
+  return clampPanel(id, sizes[id] ?? panelDefault(id));
 }
 
 export function setPanelSize(id: PanelId, px: number) {
   const next = clampPanel(id, px);
   if (next === sizes[id]) return;
   sizes[id] = next;
+  changed();
+}
+
+/** Back to the default — for a panel with a `share`, following the window again. */
+export function resetPanel(id: PanelId) {
+  sizes[id] = SPECS[id].share ? null : SPECS[id].size;
+  changed();
+}
+
+function changed() {
   listeners.forEach((l) => l());
   try {
     localStorage.setItem(KEY, JSON.stringify(sizes));

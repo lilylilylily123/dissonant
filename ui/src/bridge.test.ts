@@ -8,10 +8,11 @@
 // over Tauri IPC an `EditError` comes back as a rejected promise carrying the plain error
 // string (`lib.rs::apply` does `.map_err(|e| e.to_string())`).
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bridge } from "./bridge";
-import type { AudioClip, AudioSource, AutoTarget, ChordEvent, Clip, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel } from "./types";
-import { automationLane, defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, SOUND_PRESETS, soundPresetOf, TICKS_PER_BEAT } from "./types";
+import type { AudioClip, AudioSource, AutoTarget, ChordEvent, Clip, Command, EqModel, InsertTarget, MasterSettings, MicModel, NoteEvent, ProjectModel, SampleFetchProgress, Sampler } from "./types";
+import { automationLane, defaultAmpRig, insertChain, layOutLoop, MAX_CLIP_GAIN, MAX_INSERTS, MAX_PEDALS, MIN_NOTE_TICKS, newPedal, PEDAL_KINDS, SOUND_PRESETS, soundPresetOf, TICKS_PER_BEAT, trackKind } from "./types";
+import { chopRegion, chopsAt, MAX_CHOPS, newChop, suggestedRegion } from "./sampler";
 import { DEFAULT_DRUM_PATCH, DEFAULT_SYNTH_PATCH, defaultKit, FACTORY_SOUNDS, type DrumPad, type Sound } from "./sound";
 
 const FAKE_ID = "00000000-0000-4000-8000-000000000000";
@@ -1735,6 +1736,219 @@ describe("audio tracks", () => {
       expect(lo).toBeGreaterThanOrEqual(-1);
       expect(hi).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+/** Mirrors the command section of crates/dissonant-core/tests/sampler.rs. */
+describe("sampler tracks", () => {
+  const SOURCE_ID = "11111111-2222-4333-8444-555555555555";
+  const MISSING_ID = "99999999-9999-4999-8999-999999999999";
+  /** Eight seconds of 44.1 kHz stereo, as a fetched link arrives. */
+  const source = (over: Partial<AudioSource> = {}): AudioSource => ({
+    id: SOURCE_ID,
+    name: "break",
+    frames: 8 * 44_100,
+    sampleRate: 44_100,
+    channels: 2,
+    originUrl: "https://www.youtube.com/watch?v=abc",
+    ...over,
+  });
+  const sampler = (chops = chopsAt([1, 2], 8), over: Partial<Sampler> = {}): Sampler => ({
+    sourceId: SOURCE_ID,
+    basePitch: 36,
+    chops,
+    voice: "mono",
+    ...over,
+  });
+  const bounds = (s: Sampler | undefined) => (s?.chops ?? []).map((c) => [c.startSeconds, c.endSeconds]);
+  const tooMany = () => Array.from({ length: MAX_CHOPS + 1 }, () => newChop(0, 1));
+
+  /** Add a sampler track and return its id. */
+  async function addSamplerTrack(): Promise<string> {
+    await b.apply({ type: "addSamplerTrack", name: "flip", source: source(), sampler: sampler() });
+    const m = await model();
+    return m.tracks[m.tracks.length - 1].id;
+  }
+
+  it("lands the source, the track and a pattern in one undo step", async () => {
+    const before = await model();
+    const id = await addSamplerTrack();
+    const s = await b.getState();
+    const t = s.model.tracks.find((x) => x.id === id)!;
+    expect(trackKind(t)).toBe("sampler");
+    expect(t).toMatchObject({ name: "flip", isDrum: false, isAudio: false, plugin: null, amp: null });
+    expect(bounds(t.sampler)).toEqual([[0, 1], [1, 2], [2, 8]]);
+    expect(s.model.audioSources).toEqual([source()]);
+    expect(s.model.patterns.filter((p) => p.trackId === id).map((p) => p.name)).toEqual(["flip 1"]);
+    expect(s.undoLabel).toBe("add sampler track");
+    expect((await b.undo()).model).toEqual(before);
+  });
+
+  it("calls a blank-named sampler track sample", async () => {
+    await b.apply({ type: "addSamplerTrack", name: "  ", source: source(), sampler: sampler([]) });
+    const m = await model();
+    expect(m.tracks[m.tracks.length - 1].name).toBe("sample");
+  });
+
+  it("refuses a mismatched or empty source and too many chops", async () => {
+    const add = (src: AudioSource, s: Sampler): Command => ({ type: "addSamplerTrack", name: "x", source: src, sampler: s });
+    await rejectsAndKeepsModel(add(source(), sampler(undefined, { sourceId: MISSING_ID })), "invalid value");
+    await rejectsAndKeepsModel(add(source({ frames: 0 }), sampler()), "invalid value");
+    await rejectsAndKeepsModel(add(source({ sampleRate: 0 }), sampler()), "invalid value");
+    await rejectsAndKeepsModel(add(source({ channels: 0 }), sampler()), "invalid value");
+    await rejectsAndKeepsModel(add(source(), sampler(tooMany())), "invalid value");
+  });
+
+  it("sanitizes the chops against the source", async () => {
+    await b.apply({ type: "addSamplerTrack", name: "x", source: source(), sampler: sampler([newChop(6, 30), newChop(9, 10)]) });
+    const m = await model();
+    expect(bounds(m.tracks[m.tracks.length - 1].sampler)).toEqual([[6, 8]]);
+  });
+
+  it("setSampler replaces the sampler, labelled edit sampler", async () => {
+    const id = await addSamplerTrack();
+    const s = await b.apply({ type: "setSampler", id, sampler: sampler([newChop(0.5, 99)], { basePitch: 60 }) });
+    const t = s.model.tracks.find((x) => x.id === id)!;
+    expect([t.sampler!.basePitch, bounds(t.sampler)]).toEqual([60, [[0.5, 8]]]);
+    expect(s.undoLabel).toBe("edit sampler");
+  });
+
+  it("setSampler keeps the voice, holds the region inside the source and the chopper count in range", async () => {
+    const id = await addSamplerTrack();
+    const s = await b.apply({
+      type: "setSampler",
+      id,
+      sampler: sampler(undefined, { voice: "poly", region: { startSeconds: -1, endSeconds: 99 }, chopper: { kind: "equal", count: 500 } }),
+    });
+    const t = s.model.tracks.find((x) => x.id === id)!;
+    expect(t.sampler).toMatchObject({ voice: "poly", region: { startSeconds: 0, endSeconds: 8 }, chopper: { kind: "equal", count: MAX_CHOPS } });
+    const tiny = await b.apply({ type: "setSampler", id, sampler: sampler(undefined, { region: { startSeconds: 7.995, endSeconds: 20 } }) });
+    expect("region" in tiny.model.tracks.find((x) => x.id === id)!.sampler!).toBe(false);
+  });
+
+  it("setSampler refuses what document.rs refuses, in the same order", async () => {
+    const id = await addSamplerTrack();
+    const { melody } = await ids();
+    await rejectsAndKeepsModel({ type: "setSampler", id: FAKE_ID, sampler: sampler() }, "no such track");
+    await rejectsAndKeepsModel({ type: "setSampler", id: melody, sampler: sampler() }, "not a sampler track");
+    await rejectsAndKeepsModel({ type: "setSampler", id, sampler: sampler(undefined, { sourceId: MISSING_ID }) }, "no such audio source");
+    await rejectsAndKeepsModel({ type: "setSampler", id, sampler: sampler(tooMany()) }, "invalid value");
+  });
+
+  it("survives a save and reopen, and a file's stray drum flag and plugin are dropped", async () => {
+    const id = await addSamplerTrack();
+    await b.saveProject("/tmp/flip.dissonant");
+    const saved = await model();
+    await b.newProject(false);
+    expect((await b.openProject("/tmp/flip.dissonant")).model.tracks).toEqual(saved.tracks);
+
+    const m = await model();
+    const t = m.tracks.find((x) => x.id === id)!;
+    t.isDrum = true;
+    t.plugin = { uid: "clap:/x.clap:x", name: "x", state: null };
+    t.sampler = sampler([newChop(7, 20), newChop(30, 31)]);
+    localStorage.setItem("dissonant.mock.project", JSON.stringify(m));
+    const back = (await b.openProject("/tmp/flip.dissonant")).model.tracks.find((x) => x.id === id)!;
+    expect([back.isDrum, back.plugin]).toEqual([false, null]);
+    expect(bounds(back.sampler)).toEqual([[7, 8]]);
+
+    // A file from before mono/poly opens mono, even with its source missing.
+    const old = await model();
+    for (const x of old.tracks) if (x.sampler) delete (x.sampler as Partial<Sampler>).voice;
+    old.audioSources = [];
+    localStorage.setItem("dissonant.mock.project", JSON.stringify(old));
+    const reopened = (await b.openProject("/tmp/flip.dissonant")).model.tracks.find((x) => x.id === id)!;
+    expect(reopened.sampler!.voice).toBe("mono");
+  });
+});
+
+/** The browser mock's stand-in for `fetch_sample` / `cancel_sample_fetch` (src-tauri/src/sample_fetch.rs). */
+describe("sample from link (mock fetch)", () => {
+  const URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  // The mock paces its phases with timers, as the real download is paced by the network.
+  beforeEach(() => void vi.useFakeTimers());
+  afterEach(() => void vi.useRealTimers());
+  /** Run one fetch to the end on the fake clock. */
+  const fetched = async (url = URL) => {
+    const p = b.fetchSample(url);
+    await vi.runAllTimersAsync();
+    return p;
+  };
+  const progress = () => {
+    const seen: SampleFetchProgress[] = [];
+    b.onSampleFetch((p) => seen.push(p));
+    return seen;
+  };
+
+  it("reports each phase, then adds an analysed sampler track in one undo step", async () => {
+    const before = await model();
+    const seen = progress();
+    const s = await fetched();
+    const phases = [...new Set(seen.map((p) => p.phase))];
+    expect(phases).toEqual(["locating", "downloading", "decoding", "analyzing", "done"]);
+    const downloads = seen.filter((p) => p.phase === "downloading").map((p) => p.fraction);
+    expect(downloads[0]).toBe(0);
+    expect(downloads.at(-1)).toBe(1);
+    expect(seen.at(-1)).toMatchObject({ phase: "done", fraction: 1, message: null });
+
+    const t = s.model.tracks[s.model.tracks.length - 1];
+    expect(trackKind(t)).toBe("sampler");
+    expect(t.name).toBe(seen.at(-1)!.title);
+    const source = s.model.audioSources!.find((x) => x.id === t.sampler!.sourceId)!;
+    expect(source).toMatchObject({ frames: 8 * 44_100, sampleRate: 44_100, channels: 2, originUrl: URL });
+    const analysis = t.sampler!.analysis!;
+    expect(analysis).toMatchObject({ bpm: 92, keyRoot: 9, keyScale: "minor" });
+    expect(analysis.onsets.length).toBeGreaterThanOrEqual(30);
+    expect(new Set(analysis.onsets.map((o) => o.strength)).size).toBeGreaterThan(5);
+    // The default chops: 16 at most, inside a region from the first strong hit, both stored.
+    const region = suggestedRegion(analysis, 8, 4);
+    expect(t.sampler).toMatchObject({ voice: "mono", region, chopper: { kind: "auto", count: 16 } });
+    expect(region.endSeconds).toBe(8);
+    const cuts = (cs: { startSeconds: number; endSeconds: number }[]) => cs.map((c) => [c.startSeconds, c.endSeconds]);
+    expect(cuts(t.sampler!.chops)).toEqual(cuts(chopRegion({ kind: "auto", count: 16 }, region, analysis, 4)));
+    expect(t.sampler!.chops.length).toBeGreaterThan(1);
+    expect(t.sampler!.chops.length).toBeLessThanOrEqual(16);
+    expect(t.sampler!.chops[0].startSeconds).toBe(region.startSeconds);
+    expect(s.model.patterns.filter((p) => p.trackId === t.id)).toHaveLength(1);
+    expect(s.undoLabel).toBe("sample from link");
+    expect((await b.undo()).model).toEqual(before);
+  });
+
+  it("has peaks for the fetched source", async () => {
+    const s = await fetched();
+    const id = s.model.tracks[s.model.tracks.length - 1].sampler!.sourceId;
+    const peaks = await b.audioPeaks(id, 2048);
+    expect(peaks).toHaveLength(2048);
+    expect(peaks.every(([lo, hi]) => lo <= 0 && hi >= 0 && hi <= 1)).toBe(true);
+    expect(Math.max(...peaks.map(([, hi]) => hi))).toBeGreaterThan(0.5);
+  });
+
+  it("cancels: rejects with cancelled, says so, and leaves the project alone", async () => {
+    const before = await model();
+    const seen: SampleFetchProgress[] = [];
+    // Cancel the moment the download starts, as a user pressing the button would.
+    b.onSampleFetch((p) => {
+      seen.push(p);
+      if (p.phase === "downloading" && p.fraction === 0) void b.cancelSampleFetch();
+    });
+    const p = expect(b.fetchSample(URL)).rejects.toBe("cancelled");
+    await vi.runAllTimersAsync();
+    await p;
+    expect(seen.at(-1)?.phase).toBe("cancelled");
+    expect(seen.filter((x) => x.phase === "cancelled")).toHaveLength(1);
+    expect(seen.some((x) => x.phase === "done")).toBe(false);
+    expect(await model()).toEqual(before);
+    // Cancelling with nothing running is a no-op, and the next fetch works.
+    await b.cancelSampleFetch();
+    expect(seen.filter((x) => x.phase === "cancelled")).toHaveLength(1);
+  });
+
+  it("refuses a non-link and a second fetch while one runs", async () => {
+    await expect(b.fetchSample("not a link")).rejects.toMatch(/http\(s\) link/);
+    await expect(b.fetchSample("file:///etc/passwd")).rejects.toMatch(/http\(s\) link/);
+    const first = fetched();
+    await expect(b.fetchSample(URL)).rejects.toMatch(/already being fetched/);
+    await first;
   });
 });
 

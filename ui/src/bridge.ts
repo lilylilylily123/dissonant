@@ -5,6 +5,7 @@
 import type {
   AmpRig,
   AudioClip,
+  AudioSource,
   AudioImportProgress,
   AudioStatus,
   AudioStatusEvent,
@@ -28,6 +29,7 @@ import type {
   MasterSettings,
   MidiStatus,
   NoteEvent,
+  Onset,
   Pedal,
   OutputDevice,
   ParamInfo,
@@ -38,6 +40,8 @@ import type {
   ProjectModel,
   RecoveryCandidate,
   Section,
+  SampleAnalysis,
+  SampleFetchProgress,
   Snapshot,
   Track,
   TrackPlugin,
@@ -86,6 +90,7 @@ import { defaultKit, filledSound, isFactory, lookupSound, validKit, type Sound }
 import { chordAt, normalize, progression } from "./theory";
 import { MAX_SLIDE_SECS, remapRopes, tidyRopes } from "./ropes";
 import { placeChord } from "./songSetup";
+import { chopRegion, DEFAULT_CHOP_COUNT, MAX_CHOPS, sanitizedSampler, sourceSeconds, suggestedRegion } from "./sampler";
 import vibesJson from "../../crates/dissonant-core/assets/vibes.json";
 
 export interface Bridge {
@@ -131,6 +136,8 @@ export interface Bridge {
     seconds?: number,
   ): Promise<void>;
   auditionOff(trackId: string, pitch: number): Promise<void>;
+  /** Cut everything sounding on a track, one-shot chops included. */
+  silenceTrack(trackId: string): Promise<void>;
   audioStatus(): Promise<AudioStatus>;
   restartAudio(): Promise<AudioStatus>;
   exportWav(request: ExportRequest): Promise<ExportResult>;
@@ -300,6 +307,15 @@ export interface Bridge {
   onAudioImport(cb: (p: AudioImportProgress) => void): () => void;
   /** An audio file was dropped onto the window. */
   onAudioDropped(cb: (path: string) => void): () => void;
+  /**
+   * Download a link's audio (yt-dlp), analyse it and add it as a new sampler track, named
+   * after the video, in one undo step ("sample from link"). One fetch at a time; progress
+   * arrives on `onSampleFetch`. Rejects with a plain message, `"cancelled"` when cancelled.
+   */
+  fetchSample(url: string): Promise<Snapshot>;
+  /** Stop the running fetch; it rejects with `"cancelled"`. Nothing happens when none runs. */
+  cancelSampleFetch(): Promise<void>;
+  onSampleFetch(cb: (p: SampleFetchProgress) => void): () => void;
   /** The global user sound library (`sound-library.json` in app data). */
   librarySounds(): Promise<Sound[]>;
   /** Insert or replace by id; returns the whole library. */
@@ -376,6 +392,7 @@ async function tauriBridge(): Promise<Bridge> {
     audition: (trackId, pitch, velocity = 100, seconds) =>
       invoke("audition", { trackId, pitch, velocity, seconds }),
     auditionOff: (trackId, pitch) => invoke("audition_off", { trackId, pitch }),
+    silenceTrack: (trackId) => invoke("silence_track", { trackId }),
     audioStatus: () => invoke<AudioStatus>("audio_status"),
     restartAudio: () => invoke<AudioStatus>("restart_audio"),
     exportWav: (request) => invoke<ExportResult>("export_wav", { request }),
@@ -516,6 +533,9 @@ async function tauriBridge(): Promise<Bridge> {
     tunerReading: () => invoke<TunerReading | null>("tuner_reading"),
     onAudioImport: (cb) => subscribe<AudioImportProgress>("audio-import", cb),
     onAudioDropped: (cb) => subscribe<string>("audio-dropped", cb),
+    fetchSample: (url) => invoke<Snapshot>("fetch_sample", { url }),
+    cancelSampleFetch: () => invoke("cancel_sample_fetch"),
+    onSampleFetch: (cb) => subscribe<SampleFetchProgress>("sample-fetch", cb),
   };
 }
 
@@ -551,6 +571,7 @@ const NO_SUCH_NOTE = "no such note";
 const ROPE_LOOP = "a note can't slide from itself, or from a note that slides from it";
 const NO_ROPE = "that note has no rope";
 const NO_SUCH_DETECTED_CHORD = "no such detected chord";
+const NOT_A_SAMPLER_TRACK = "not a sampler track";
 /** `ProjectModel` decoding refuses a schema it cannot migrate with this text. */
 export const OLD_SCHEMA = "This project was made with an older version of dissonant and can't be opened.";
 
@@ -1292,15 +1313,29 @@ function normalizedModel(m: ProjectModel): ProjectModel {
   // A pattern of a track that no longer exists is invisible and never played.
   m.patterns = (m.patterns ?? []).filter((p) => trackIds.has(p.trackId));
   for (const p of m.patterns) p.notes = tidyRopes((p.notes ?? []).map(sanitizeNote));
-  // An audio track is never also a drum track, and always carries a rig; a note track never
-  // does. Hand-edited files can carry either combination.
+  // An audio track is never also a drum or sampler track, and always carries a rig; a note
+  // track never does. A sampler track is no drum track and hosts no plugin. Hand-edited files
+  // can carry any combination.
   for (const t of m.tracks) {
     t.isAudio ??= false;
     if (t.isAudio) {
       t.isDrum = false;
+      delete t.sampler;
       t.amp = sanitizeRig(t.amp ?? defaultAmpRig()) ?? defaultAmpRig();
     } else {
       t.amp = null;
+    }
+    if (t.sampler) {
+      t.isDrum = false;
+      t.plugin = null;
+      // Rust's `#[serde(default)]`: a sampler from before mono/poly loads mono, source or not.
+      t.sampler.voice = t.sampler.voice === "poly" ? "poly" : "mono";
+      // A missing source keeps the sampler as written: it plays silence, and the chops survive.
+      const source = (m.audioSources ?? []).find((s) => s.id === t.sampler!.sourceId);
+      if (source) {
+        const capped = { ...t.sampler, chops: t.sampler.chops.slice(0, MAX_CHOPS) };
+        t.sampler = sanitizedSampler(capped, sourceSeconds(source)) ?? capped;
+      }
     }
   }
   // A hand-edited kit the commands would refuse (empty, too big, repeated pitches) falls back
@@ -2157,6 +2192,28 @@ function reduce(m: ProjectModel, c: Command): void {
       t.amp = rig;
       break;
     }
+    case "addSamplerTrack": {
+      // Same order of checks as `document.rs`, so both builds name the same first problem.
+      if (c.sampler.sourceId !== c.source.id) fail(INVALID_VALUE);
+      if (c.source.sampleRate === 0 || c.source.channels === 0 || c.source.frames === 0)
+        fail(INVALID_VALUE);
+      const sampler = sanitizedSampler(c.sampler, sourceSeconds(c.source)) ?? fail(INVALID_VALUE);
+      m.audioSources ??= [];
+      const at = m.audioSources.findIndex((s) => s.id === c.source.id);
+      if (at >= 0) m.audioSources[at] = { ...c.source };
+      else m.audioSources.push({ ...c.source });
+      const t: Track = { ...newTrack(false, c.name.trim() === "" ? "sample" : c.name), sampler };
+      m.tracks.push(t);
+      m.patterns.push(newPattern(t.id, nextPatternName(m, t)));
+      break;
+    }
+    case "setSampler": {
+      const t = track(c.id);
+      if (t.isAudio || !t.sampler) fail(NOT_A_SAMPLER_TRACK);
+      const source = (m.audioSources ?? []).find((s) => s.id === c.sampler.sourceId) ?? fail(NO_SUCH_AUDIO_SOURCE);
+      t.sampler = sanitizedSampler(c.sampler, sourceSeconds(source)) ?? fail(INVALID_VALUE);
+      break;
+    }
     case "addAudioTake": {
       // The clip must name the track and source it arrived with, or `normalized` would drop
       // it and the take would silently vanish.
@@ -2946,6 +3003,53 @@ function syntheticPeaks(sourceId: string, buckets: number): [number, number][] {
     return [-envelope * skew, envelope] as [number, number];
   });
 }
+
+/** `sample_fetch.rs`'s refusals, word for word, so the browser says what the app says. */
+const NOT_A_LINK = "paste an http(s) link, e.g. https://www.youtube.com/watch?v=…";
+const ALREADY_FETCHING = "a sample is already being fetched; wait for it or cancel it first";
+const FETCH_CANCELLED = "cancelled";
+/** What the mock's every link "downloads" as: 8 s of 44.1 kHz stereo. */
+const MOCK_SAMPLE_SECONDS = 8;
+const MOCK_SAMPLE_RATE = 44_100;
+const MOCK_SAMPLE_BPM = 92;
+
+/**
+ * The analysis the mock pretends to have heard: a 92 bpm groove in A minor. Hits sit on a
+ * sixteenth grid with a little human jitter — every bar's one loudest, the beats next, the
+ * eighths softer and only some of the sixteenths — so "auto" picks musically sensible cuts
+ * and the BPM grid lines up with them. Deterministic, like the real analysis.
+ */
+function mockSampleAnalysis(): SampleAnalysis {
+  const sixteenth = 60 / MOCK_SAMPLE_BPM / 4;
+  const onsets: Onset[] = [];
+  for (let slot = 0; slot * sixteenth < MOCK_SAMPLE_SECONDS - 0.05; slot++) {
+    const wobble = Math.sin(slot * 12.9898) * 0.5 + 0.5;
+    const strength =
+      slot % 16 === 0 ? 1 : slot % 4 === 0 ? 0.72 + wobble * 0.18 : slot % 2 === 0 ? 0.4 + wobble * 0.2 : (slot * 7) % 5 < 3 ? 0.12 + wobble * 0.2 : 0;
+    if (strength === 0) continue;
+    const jitter = (wobble - 0.5) * 0.016;
+    onsets.push({ seconds: +(0.05 + slot * sixteenth + jitter).toFixed(4), strength: +strength.toFixed(3) });
+  }
+  return { bpm: MOCK_SAMPLE_BPM, bpmConfidence: 0.82, keyRoot: 9, keyScale: "minor", keyConfidence: 0.67, onsets };
+}
+
+/** An envelope that follows a sampler's onsets: each hit decays into the next, over a noise floor. */
+function onsetPeaks(onsets: readonly Onset[], duration: number, buckets: number): [number, number][] {
+  let seed = 0x9e3779b9;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0xffffffff;
+  };
+  const n = Math.max(1, Math.min(8192, Math.floor(buckets)));
+  let at = -1;
+  return Array.from({ length: n }, (_, i) => {
+    const t = (i / n) * duration;
+    while (at + 1 < onsets.length && onsets[at + 1].seconds <= t) at++;
+    const hit = at >= 0 ? onsets[at].strength * Math.exp(-(t - onsets[at].seconds) * 7) : 0;
+    const env = Math.min(1, 0.05 + hit * 0.9) * (0.6 + rand() * 0.4);
+    return [-env * (0.85 + rand() * 0.3), env] as [number, number];
+  });
+}
 const LIVE_MODEL_KEY = "dissonant.mock.live";
 
 /**
@@ -3085,6 +3189,8 @@ function mockBridge(): Bridge {
       case "setInsertState":
       case "setInsertParam":
         return "insert settings";
+      case "setSampler":
+        return "edit sampler";
       case "updateAutomationPoint":
         return "move automation point";
       case "setRope":
@@ -3253,6 +3359,12 @@ function mockBridge(): Bridge {
   // unpacked this session. Scanning is therefore always instant and `rescan` has nothing to do.
   const installed: PluginDescriptor[] = MOCK_INSTALLED.map((d) => ({ ...d }));
   const installListeners = new Set<(p: InstallProgress) => void>();
+  const sampleListeners = new Set<(p: SampleFetchProgress) => void>();
+  /** The fetch in flight; `cancelled` is how `cancelSampleFetch` reaches into it. */
+  let sampleFetch: { cancelled: boolean } | null = null;
+  const emitSample = (phase: SampleFetchProgress["phase"], fraction: number, title: string | null) => {
+    for (const cb of sampleListeners) cb({ phase, fraction, title, message: null });
+  };
   /**
    * Live parameter values per track, the mock's stand-in for the values a `HostedPlugin` holds
    * on the app thread. Keyed by uid and by the blob they were last reconciled with, so swapping
@@ -3398,6 +3510,7 @@ function mockBridge(): Bridge {
     audition: async (_t, pitch, velocity = 100, seconds) =>
       blip(pitch, velocity, seconds),
     auditionOff: async () => {},
+    silenceTrack: async () => {},
     audioStatus: async () => ({
       running: false,
       sampleRate: null,
@@ -3818,7 +3931,13 @@ function mockBridge(): Bridge {
     detectAudioClip: async () => {
       throw new Error("detecting notes needs the desktop app");
     },
-    audioPeaks: async (sourceId, buckets) => syntheticPeaks(sourceId, buckets),
+    // A sampler's source "sounds like" its analysis, so the chops the screen draws land on
+    // visible hits; anything else gets the generic strummed take.
+    audioPeaks: async (sourceId, buckets) => {
+      const sampler = model.tracks.find((t) => t.sampler?.sourceId === sourceId && t.sampler.analysis)?.sampler;
+      const source = (model.audioSources ?? []).find((s) => s.id === sourceId);
+      return sampler?.analysis && source ? onsetPeaks(sampler.analysis.onsets, sourceSeconds(source), buckets) : syntheticPeaks(sourceId, buckets);
+    },
     clearInputPeak: async () => ({
       running: false,
       sampleRate: null,
@@ -3830,6 +3949,71 @@ function mockBridge(): Bridge {
     tunerReading: async () => null,
     onAudioImport: () => () => {},
     onAudioDropped: () => () => {},
+    fetchSample: async (url) => {
+      const link = url.trim();
+      if (!/^https?:\/\/\S+$/i.test(link)) fail(NOT_A_LINK);
+      if (sampleFetch) fail(ALREADY_FETCHING);
+      const run = { cancelled: false };
+      sampleFetch = run;
+      // The real fetch takes seconds; the mock keeps every phase and compresses the time, so
+      // the progress readout and the cancel button can be designed against something real.
+      // (`Promise.withResolvers` needs a newer lib than this project targets.)
+      const pause = async () => {
+        await new Promise((r) => setTimeout(r, 60));
+        if (run.cancelled) fail(FETCH_CANCELLED);
+      };
+      const title = "dusty soul break";
+      try {
+        await pause();
+        emitSample("locating", -1, null);
+        for (let i = 0; i <= 4; i++) {
+          await pause();
+          emitSample("downloading", i / 4, title);
+        }
+        await pause();
+        emitSample("decoding", -1, title);
+        await pause();
+        emitSample("analyzing", -1, title);
+        await pause();
+        const source: AudioSource = {
+          id: uuid(),
+          name: title,
+          frames: MOCK_SAMPLE_SECONDS * MOCK_SAMPLE_RATE,
+          sampleRate: MOCK_SAMPLE_RATE,
+          channels: 2,
+          originUrl: link,
+        };
+        // `add_sampler_track`: a suggested region, auto-chopped inside it, region and tool kept.
+        const analysis = mockSampleAnalysis();
+        const bpb = Math.max(1, Math.round(beatsPerBar(model.timeSignature)));
+        const region = suggestedRegion(analysis, MOCK_SAMPLE_SECONDS, bpb);
+        const chopper = { kind: "auto", count: DEFAULT_CHOP_COUNT } as const;
+        const chops = chopRegion(chopper, region, analysis, bpb);
+        const snap = await applyCommand(
+          {
+            type: "addSamplerTrack",
+            name: title,
+            source,
+            sampler: { sourceId: source.id, basePitch: 36, chops, analysis, voice: "mono", region, chopper },
+          },
+          false,
+          "sample from link",
+        );
+        emitSample("done", 1, title);
+        return snap;
+      } finally {
+        sampleFetch = null;
+      }
+    },
+    cancelSampleFetch: async () => {
+      if (!sampleFetch || sampleFetch.cancelled) return;
+      sampleFetch.cancelled = true;
+      emitSample("cancelled", -1, null);
+    },
+    onSampleFetch: (cb) => {
+      sampleListeners.add(cb);
+      return () => sampleListeners.delete(cb);
+    },
   };
 }
 

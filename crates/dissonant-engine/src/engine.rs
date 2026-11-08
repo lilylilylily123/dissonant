@@ -316,6 +316,12 @@ pub enum EngineCommand {
         track_id: Uuid,
         pitch: u8,
     },
+    /// Cut everything sounding on one track, one-shots included, and drop its pending
+    /// audition releases. A note-off can't stop a one-shot chop, so this is how a preview of
+    /// one gets out of the way of the next, or stops when asked.
+    SilenceTrack {
+        track_id: Uuid,
+    },
     /// A short sine on the master bus, for checking the output device from Settings.
     TestTone,
     /// Reset the latched over-the-ceiling flag in `Shared` — the user acknowledging the clip
@@ -1051,6 +1057,12 @@ impl Engine {
                 self.auditions
                     .retain(|a| !(a.track_id == track_id && a.pitch == pitch));
             }
+            EngineCommand::SilenceTrack { track_id } => {
+                if let Some(ch) = self.channel_mut(&track_id) {
+                    ch.instrument.all_notes_off();
+                }
+                self.auditions.retain(|a| a.track_id != track_id);
+            }
             EngineCommand::TestTone => self.test_tone = ((self.sample_rate * 0.6) as usize, 0.0),
             EngineCommand::ClearClip => self.shared.master_over.store(false, Ordering::Relaxed),
             EngineCommand::ClearInputPeak => {
@@ -1088,7 +1100,11 @@ impl Engine {
                     .find(|t| t.id == track_id)
                     // No bank here: a plugin being cleared is rare, and this renders the kit
                     // the track already describes.
-                    .map(|t| Instrument::for_track(t, self.sample_rate, None));
+                    .map(|t| {
+                        let mut instrument = Instrument::for_track(t, self.sample_rate, None);
+                        instrument.bind_pool(&self.audio_pool);
+                        instrument
+                    });
                 if let (Some(ch), Some(instrument)) = (self.channel_mut(&track_id), fallback) {
                     ch.instrument.all_notes_off();
                     ch.instrument = instrument;
@@ -1106,6 +1122,11 @@ impl Engine {
                 }
             }
             EngineCommand::SetAudioPool(pool) => {
+                // A sampler holds its source's buffer itself, so the audio thread never looks
+                // a source up while it plays; rebinding here is the one lookup per change.
+                for ch in &mut self.channels {
+                    ch.instrument.bind_pool(&pool);
+                }
                 self.audio_pool = pool;
             }
             EngineCommand::SetAudioArm { track_id, monitor } => {
@@ -1299,9 +1320,9 @@ impl Engine {
                 .and_then(|i| old[i].take());
             let mut ch = match existing {
                 Some(ch) => ch,
-                None => Channel::new(track, self.sample_rate, drums),
+                None => Channel::new(track, self.sample_rate, drums, &self.audio_pool),
             };
-            ch.apply(track, drums);
+            ch.apply(track, drums, &self.audio_pool);
             new_channels.push(ch);
             new_ids.push(track.id);
         }
@@ -1866,14 +1887,17 @@ impl Engine {
     /// but never past a note-on of its own pitch: a repeated note has to end before it starts
     /// again, or the old note's off would cut the new one short.
     ///
-    /// Only built-in synths in Legato are touched, so Poly, Mono, drums and plugins keep the
-    /// order they were scheduled in. In place and allocation-free: a run is a handful of
-    /// events, so shuffling it with rotations costs nothing.
+    /// Only built-in synths in Legato are touched, so Poly, Mono, drums, samplers and plugins
+    /// keep the order they were scheduled in. In place and allocation-free: a run is a handful
+    /// of events, so shuffling it with rotations costs nothing.
     fn connect_touching_notes(&mut self) {
         let tracks = &self.sequence.tracks;
         let legato = |track: usize| {
             tracks.get(track).is_some_and(|t| {
-                !t.is_drum && t.plugin.is_none() && t.synth.voice == VoiceMode::Legato
+                !t.is_drum
+                    && t.plugin.is_none()
+                    && t.sampler.is_none()
+                    && t.synth.voice == VoiceMode::Legato
             })
         };
         if !(0..tracks.len()).any(legato) {
@@ -1912,12 +1936,12 @@ impl Engine {
     /// no ropes when they don't apply.
     ///
     /// The built-in synth glides a voice from note to note. A plugin is addressed by pitch, so
-    /// it gets the overlap trick instead ([`RopePlay::Overlap`]). A drum hit has no voice to
-    /// hand on, so drums (and an audio track's silent instrument) ignore ropes. That is checked
-    /// against the channel's actual instrument rather than the track's settings, so a plugin
-    /// still being swapped in is never sent a slide it can't play, and the synth that stands in
-    /// for it never has a note-off held back that nothing will release. A table that no longer
-    /// matches the notes is ignored too (see [`SequenceTrack::ropes`]).
+    /// it gets the overlap trick instead ([`RopePlay::Overlap`]). A drum hit or a chop has no
+    /// pitch to glide, so drums, samplers (and an audio track's silent instrument) ignore
+    /// ropes. That is checked against the channel's actual instrument rather than the track's
+    /// settings, so a plugin still being swapped in is never sent a slide it can't play, and the
+    /// synth that stands in for it never has a note-off held back that nothing will release. A
+    /// table that no longer matches the notes is ignored too (see [`SequenceTrack::ropes`]).
     ///
     /// Liveness was decided on raw ticks when the sequence was built and is not re-checked on
     /// swung times. Swing is a strictly increasing warp of the tick line, so a source that

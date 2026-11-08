@@ -1,0 +1,500 @@
+/* ── sample ── */
+/* SAMPLE: the link bar, the source and its analysis, the chop tools, the big waveform over the
+   pattern strip, and underneath them the pads beside the selected chop's inspector. */
+.smp {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-editor);
+}
+.smp .seg.sm > div {
+  padding: 2px 7px;
+  font-size: 9px;
+}
+.smp-head,
+.smp-src,
+.smp-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  min-width: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line-1);
+}
+.smp-head {
+  height: 40px;
+  background: var(--bg-2);
+}
+.smp-src,
+.smp-tools {
+  height: 30px;
+  background: var(--bg-1);
+}
+.smp-tools .vdiv,
+.smp-src .vdiv {
+  margin: 7px 2px;
+}
+.smp-kind {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 2px 5px;
+  border: 1px solid var(--accent-border);
+  border-radius: 2px;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+input[type="text"].smp-link {
+  flex: 0 1 380px;
+  min-width: 140px;
+  height: 24px;
+  font-size: 11px;
+}
+.smp-head select {
+  max-width: 200px;
+}
+.smp-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text-2);
+}
+.smp-progress .mono {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.smp-bar {
+  flex: none;
+  width: 90px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+.smp-bar > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 150ms;
+}
+/* A phase that cannot say how far along it is: the bar breathes instead of filling. */
+.smp-bar.busy > div {
+  animation: smp-busy 1.2s ease-in-out infinite;
+}
+@keyframes smp-busy {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+.smp-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: center;
+}
+.smp-empty .hint {
+  max-width: 60ch;
+  color: var(--text-5);
+  line-height: 1.5;
+}
+.smp-picks {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* Source bar */
+.smp-title {
+  flex: 0 1 auto;
+  min-width: 60px;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.smp-dim {
+  flex: none;
+  font-size: 9.5px;
+  color: var(--text-5);
+  white-space: nowrap;
+}
+button.linkish.smp-origin {
+  flex: none;
+  font-size: 10px;
+}
+.smp-val {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+.smp-conf {
+  font-size: 9px;
+  color: var(--text-5);
+}
+.smp-src .chip,
+.smp-tools .chip {
+  flex: none;
+}
+
+/* Tools */
+.smp-tools .cap,
+.smp-tools .flabel,
+.smp-src .cap {
+  flex: none;
+}
+.smp-chips {
+  flex: none;
+  display: flex;
+  gap: 3px;
+}
+.smp-chips .chip {
+  min-width: 26px;
+}
+.smp-zoom {
+  width: 30px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+/* Waveform over the pattern strip, split by a seam the strip's height hangs off. */
+.smp-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.smp-wave {
+  flex: 1;
+  min-height: 120px;
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line-1);
+}
+.smp-wave canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  touch-action: none;
+}
+
+/* Pattern strip: the selected pattern in compact chop lanes. Its height is the dragged one, but
+   it gives way before the waveform's floor when the window is too short for both. */
+.smp-strip {
+  flex: 0 1 auto;
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-editor);
+}
+.smp-striphead {
+  flex: none;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line-1);
+}
+.smp-striphead .cap,
+.smp-striphead .chip {
+  flex: none;
+}
+.smp-striphead select {
+  flex: none;
+  max-width: 160px;
+}
+.smp-dim.smp-placed {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.smp-strip .choplanes {
+  position: relative;
+}
+.smp-strip .smp-empty {
+  padding: 10px;
+}
+
+/* Pads + inspector */
+.smp-bottom {
+  flex: none;
+  height: 222px;
+  display: flex;
+  min-height: 0;
+  background: var(--bg-1);
+}
+.smp-pads {
+  flex: none;
+  width: 330px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-right: 1px solid var(--line-1);
+}
+.smp-padhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+}
+.smp-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(4, 1fr);
+  gap: 4px;
+}
+.smp-pad {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 2px 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--hue, var(--line-strong));
+  border-radius: 3px;
+  text-transform: none;
+  letter-spacing: 0;
+  touch-action: none;
+}
+.smp-pad.empty {
+  background: var(--bg-0b);
+  border: 1px dashed var(--line-1);
+}
+.smp-pad .num {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.smp-pad .ltr {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--text-5);
+  text-transform: uppercase;
+}
+.smp-pad .nm {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.smp-pad .sub {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 400;
+  color: var(--text-5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.smp-pad.sel {
+  border-color: var(--accent);
+  border-left-color: var(--hue, var(--accent));
+  background: var(--bg-2-sel);
+}
+.smp-pad.on {
+  background: var(--accent-bg);
+}
+.smp-pad.on .nm {
+  color: var(--accent);
+}
+input[type="number"].smp-num {
+  width: 72px;
+  height: 20px;
+  font-size: 10px;
+  padding: 2px 4px;
+  color: var(--text-1);
+  background: var(--bg-0);
+  border: 1px solid var(--line-1);
+  border-radius: 2px;
+  outline: none;
+}
+input[type="number"].smp-num:focus {
+  border-color: var(--accent-border);
+}
+.smp-padhead input[type="number"].smp-num {
+  width: 52px;
+}
+
+.smp-insp {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  overflow: auto;
+}
+.smp-insp.smp-none {
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: var(--text-5);
+}
+.smp-ihead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.smp-chopno {
+  flex: none;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--on-accent);
+  background: var(--hue, var(--accent));
+  border-radius: 2px;
+}
+input[type="text"].smp-name {
+  flex: 0 1 200px;
+  min-width: 80px;
+  height: 22px;
+  font-size: 11px;
+}
+.smp-ibody {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 18px;
+}
+.smp-times,
+.smp-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.smp-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.smp-field .flabel {
+  width: 38px;
+}
+.smp-ibody .knobrow {
+  gap: 6px;
+}
+
+/* A short window: the pads and the inspector give up some height to the waveform and strip. */
+@media (max-height: 780px) {
+  .smp-bottom {
+    height: 184px;
+  }
+  .smp-pads {
+    gap: 4px;
+    padding: 6px 10px;
+  }
+  .smp-insp {
+    gap: 6px;
+    padding: 6px 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .smp-bar > div {
+    transition: none;
+  }
+  .smp-bar.busy > div {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+:root.reduced-motion .smp-bar.busy > div {
+  animation: none;
+  opacity: 0.6;
+}
+
+/* ── chop lanes ── */
+/* A sampler pattern's editor (PAT, and the SAMPLE page's strip). The row headers sit beside
+   the scroller rather than inside it, so they stay put while the lanes scroll sideways; their
+   canvas follows the scroller's vertical offset. */
+.choplanes .cl-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.choplanes .chopscroll {
+  min-width: 0;
+}
+.choplanes .cl-heads {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: #121215;
+}
+.choplanes .cl-corner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 8px;
+  border-right: 1px solid var(--line-1);
+  border-bottom: 1px solid var(--line-1);
+}
+.choplanes .cl-grid {
+  margin-right: auto;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-5);
+}
+.choplanes.compact .cl-grid {
+  display: none;
+}
+.choplanes .cl-headrows {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.choplanes .cl-headrows canvas {
+  display: block;
+  cursor: pointer;
+}

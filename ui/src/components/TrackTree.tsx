@@ -48,6 +48,7 @@ export function TrackTree() {
   const patternDrag = useStore((s) => s.patternDrag);
   const hasDropTarget = useStore((s) => s.patternDropHandler !== null);
   const setPatternDrag = useStore((s) => s.setPatternDrag);
+  const openSampler = useStore((s) => s.openSampler);
   const barTick = useStore(barTicks);
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [renaming, setRenaming] = useState<{ kind: "track" | "pattern"; id: string } | null>(null);
@@ -347,6 +348,7 @@ export function TrackTree() {
         <div className="row" style={{ gap: 4 }}>
           <button onClick={() => void addTrack(false)} title="new instrument track, with one empty pattern">+ inst</button>
           <button onClick={() => void addTrack(true)} title="new drum track, with one empty pattern">+ drum</button>
+          <button onClick={openSampler} title="new sampler track from a link: opens SAMPLE with the link field ready">+ sample</button>
           <span className="spacer" />
           <span className="tt-count">
             {model.tracks.length}t · {model.patterns.length}p
@@ -402,7 +404,7 @@ export function TrackTree() {
                   <span className={`tt-name${t.muted ? " muted" : ""}`}>{t.name}</span>
                 )}
                 <span className="tt-meta">
-                  {t.isDrum ? "drum" : (lookupSound(model.sounds ?? [], t.voice)?.name ?? t.voice)} · {patterns.length}
+                  {t.sampler ? `sampler · ${t.sampler.chops.length} chop${t.sampler.chops.length === 1 ? "" : "s"}` : t.isDrum ? "drum" : (lookupSound(model.sounds ?? [], t.voice)?.name ?? t.voice)} · {patterns.length}
                 </span>
                 <span className="tt-acts">
                   <button className="ico" title="move up" tabIndex={-1} disabled={ti === 0} onClick={(e) => (e.stopPropagation(), void moveTrack(t.id, true))}>

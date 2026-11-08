@@ -651,8 +651,9 @@ fn power_db(v: f32) -> f32 {
     10f32.powf(v / 10.0)
 }
 
-/// A radix-2 FFT with its own Hann window and scratch, for peak picking only.
-struct Fft {
+/// A radix-2 FFT with its own Hann window and scratch. Shared with
+/// [`crate::sample_analysis`], which reads whole power spectra rather than peaks.
+pub(crate) struct Fft {
     n: usize,
     window: Vec<f32>,
     cos: Vec<f32>,
@@ -663,7 +664,7 @@ struct Fft {
 }
 
 impl Fft {
-    fn new(n: usize) -> Fft {
+    pub(crate) fn new(n: usize) -> Fft {
         debug_assert!(n.is_power_of_two());
         let bits = n.trailing_zeros();
         let tau = 2.0 * std::f32::consts::PI;
@@ -682,11 +683,16 @@ impl Fft {
         }
     }
 
-    /// Local maxima of the power spectrum of `input` (exactly `n` samples at `rate`), no more
-    /// than [`PEAK_FLOOR_DB`] under the loudest, between 50 Hz and 4 kHz, sorted by frequency.
-    /// Frequencies are interpolated on the log spectrum, which is what lets 11.7 Hz bins
-    /// still name the low E.
-    fn peaks(&mut self, input: &[f32], rate: f32) -> Vec<Peak> {
+    /// Power of bins `0..=n/2` of the Hann-windowed `input` (exactly `n` samples) into `out`.
+    pub(crate) fn power_spectrum(&mut self, input: &[f32], out: &mut [f32]) {
+        self.transform(input);
+        for (k, slot) in out.iter_mut().enumerate().take(self.n / 2 + 1) {
+            *slot = self.re[k] * self.re[k] + self.im[k] * self.im[k];
+        }
+    }
+
+    /// Window `input` and transform it in place into `re`/`im`.
+    fn transform(&mut self, input: &[f32]) {
         let n = self.n;
         for (i, &x) in input.iter().enumerate().take(n) {
             self.re[self.rev[i]] = x * self.window[i];
@@ -710,6 +716,15 @@ impl Fft {
             }
             len <<= 1;
         }
+    }
+
+    /// Local maxima of the power spectrum of `input` (exactly `n` samples at `rate`), no more
+    /// than [`PEAK_FLOOR_DB`] under the loudest, between 50 Hz and 4 kHz, sorted by frequency.
+    /// Frequencies are interpolated on the log spectrum, which is what lets 11.7 Hz bins
+    /// still name the low E.
+    fn peaks(&mut self, input: &[f32], rate: f32) -> Vec<Peak> {
+        let n = self.n;
+        self.transform(input);
         let bin_hz = rate / n as f32;
         let lo = ((50.0 / bin_hz).floor() as usize).max(1);
         let hi = ((4_000.0f32.min(rate * 0.45) / bin_hz).ceil() as usize).min(n / 2 - 1);

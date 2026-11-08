@@ -7,6 +7,7 @@ use crate::automation::{AutoTarget, AutomationCurve, Breakpoint, Curve, MasterPa
 use crate::chord_track::ChordTrack;
 use crate::document::TrackParam;
 use crate::model::{rope_is_live, AmpRig, NoteEvent, ProjectModel, Track, TrackPlugin};
+use crate::sampler::Sampler;
 use crate::sound::{ResolvedPad, SynthPatch};
 use crate::tempo::TempoMap;
 use crate::ticks::{bar_ticks, TICKS_PER_BEAT};
@@ -39,6 +40,10 @@ pub struct SequenceTrack {
     pub synth: SynthPatch,
     /// The drum kit with each pad's sound looked up (empty on synth tracks).
     pub drum_pads: Vec<ResolvedPad>,
+    /// Set on a sampler track: the chops its notes play, in place of `synth`. A copy of the
+    /// track's with `analysis` dropped, since the engine has no use for it and the sequence is
+    /// cloned onto the audio thread on every edit.
+    pub sampler: Option<Sampler>,
     /// The lanes that move this track's strip, already on this timeline's ticks. Carried on
     /// the track rather than in one list on the [`Sequence`] so the engine can reach a
     /// channel's curves by the index it already has, with no lookup on the audio thread.
@@ -205,6 +210,17 @@ impl SequenceTrack {
             ropes: vec![],
             synth: model.resolve_synth(&track.voice),
             drum_pads,
+            // The engine needs the chops and how they layer; the analysis, region and chop
+            // tool are only for editing.
+            sampler: track.sampler.as_ref().map(|s| Sampler {
+                source_id: s.source_id,
+                base_pitch: s.base_pitch,
+                chops: s.chops.clone(),
+                analysis: None,
+                voice: s.voice,
+                region: None,
+                chopper: None,
+            }),
             automation: TrackAutomation::for_track(model, &track.id, offset_ticks),
         }
     }

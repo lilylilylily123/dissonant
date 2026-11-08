@@ -309,3 +309,99 @@ describe("the tuner", () => {
     expect(st().tunerClarity).toBe(0);
   });
 });
+
+describe("SAMPLE chop previews", () => {
+  const track = "t-sampler";
+  it("cut the track before each new chop, so previews never stack", async () => {
+    const calls: string[] = [];
+    vi.spyOn(b, "silenceTrack").mockImplementation(async () => void calls.push("silence"));
+    vi.spyOn(b, "audition").mockImplementation(async (_t, pitch) => void calls.push(`chop ${pitch}`));
+    st().previewChop(track, 52, 16, 134, false);
+    st().previewChop(track, 46, 10, 50, false);
+    await settle();
+    expect(calls).toEqual(["silence", "chop 52", "silence", "chop 46"]);
+    expect(st().samplePreview).toMatchObject({ trackId: track, index: 10 });
+  });
+
+  it("Space with the transport stopped stops the preview instead of starting the song", async () => {
+    const silence = vi.spyOn(b, "silenceTrack");
+    const play = vi.spyOn(b, "play");
+    st().previewChop(track, 52, 16, 134, false);
+    st().togglePlay();
+    await settle();
+    expect(play).not.toHaveBeenCalled();
+    expect(silence).toHaveBeenLastCalledWith(track);
+    expect(st().samplePreview).toBeNull();
+    st().togglePlay();
+    await settle();
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("end when the song starts, stops, or the page is left", async () => {
+    const silence = vi.spyOn(b, "silenceTrack");
+    st().previewChop(track, 52, 16, 134, false);
+    st().play();
+    expect(st().samplePreview).toBeNull();
+    st().previewChop(track, 52, 16, 134, false);
+    st().stop();
+    expect(st().samplePreview).toBeNull();
+    S.useStore.setState({ screen: "sample" });
+    st().previewChop(track, 52, 16, 134, false);
+    st().setScreen("song");
+    await settle();
+    expect(st().samplePreview).toBeNull();
+    expect(silence).toHaveBeenLastCalledWith(track);
+  });
+});
+
+describe("SAMPLE pads", () => {
+  it("preview one at a time unless the arm is on and the transport runs", async () => {
+    const track = model().tracks[0].id;
+    st().selectTrack(track);
+    const noteOn = vi.spyOn(b, "noteOn");
+    const silence = vi.spyOn(b, "silenceTrack");
+    expect(st().strikePad(track, 40, 4, 1, false)).toBe(false);
+    await settle();
+    expect(silence).toHaveBeenCalledWith(track);
+    expect(st().samplePreview).toMatchObject({ trackId: track, index: 4 });
+    // Armed but stopped: still a preview.
+    S.useStore.setState({ armed: true });
+    expect(st().strikePad(track, 40, 4, 1, false)).toBe(false);
+    expect(noteOn).not.toHaveBeenCalled();
+  });
+
+  it("armed and playing, are live notes on the selected track, through the record path", async () => {
+    const track = model().tracks[0].id;
+    st().selectTrack(track);
+    S.useStore.setState({ armed: true, playing: true, samplePreview: null });
+    const noteOn = vi.spyOn(b, "noteOn");
+    const silence = vi.spyOn(b, "silenceTrack");
+    expect(st().strikePad(track, 40, 4, 1, true)).toBe(true);
+    await settle();
+    expect(noteOn).toHaveBeenCalledWith(40, 100);
+    // Nothing cut: the song's own hits on the track keep sounding under the take.
+    expect(silence).not.toHaveBeenCalled();
+    expect(st().samplePreview).toBeNull();
+    // Another track's pad cannot be a live note (the live track is the selected one).
+    expect(st().strikePad(model().tracks[1].id, 40, 4, 1, false)).toBe(false);
+  });
+
+  it("record a hit into the selected pattern when armed and playing", async () => {
+    const pattern = model().patterns[0];
+    st().selectPattern(pattern.id);
+    st().setScreen("pattern");
+    st().toggleRecord();
+    await settle();
+    await b.play(0);
+    S.useStore.setState({ playing: true });
+    const before = pattern.notes.length;
+    expect(st().strikePad(pattern.trackId, 50, 0, 1, true)).toBe(true);
+    await settle();
+    st().noteOff(50);
+    await settle();
+    // The take lands through the bridge's document event, which this harness does not listen to.
+    const notes = (await b.getState()).model.patterns.find((p) => p.id === pattern.id)!.notes;
+    expect(notes.length).toBe(before + 1);
+    expect(notes.some((n) => n.pitch === 50)).toBe(true);
+  });
+});

@@ -31,3 +31,11 @@ tauri-plugin-window-state = "2.5.0"
 hound = "3.5"
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "aiff", "flac", "mp3", "pcm", "isomp4", "alac", "aac"] }
 rtrb = "0.4"
+# The sample fetcher's first-use yt-dlp install, the same HTTP client and hash the catalog uses.
+ureq = "3"
+sha2 = "0.11"
+parking_lot = "0.12"
+
+[target.'cfg(unix)'.dependencies]
+# Killing a cancelled fetch's whole process group, launcher and children alike.
+libc = "0.2"

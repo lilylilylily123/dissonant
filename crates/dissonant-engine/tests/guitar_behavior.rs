@@ -48,6 +48,7 @@ fn sine_source(hz: f64, seconds: f64, rate: u32, amplitude: f32) -> (AudioSource
         frames: frames as u64,
         sample_rate: rate,
         channels: 1,
+        origin_url: None,
     };
     (source, AudioBuffer::new(rate, 1, data))
 }
@@ -70,6 +71,7 @@ fn noise_source(seconds: f64, rate: u32, amplitude: f32) -> (AudioSource, AudioB
         frames: frames as u64,
         sample_rate: rate,
         channels: 1,
+        origin_url: None,
     };
     (source, AudioBuffer::new(rate, 1, data))
 }
@@ -85,6 +87,7 @@ fn impulse_source(seconds: f64, rate: u32) -> (AudioSource, AudioBuffer) {
         frames: frames as u64,
         sample_rate: rate,
         channels: 1,
+        origin_url: None,
     };
     (source, AudioBuffer::new(rate, 1, data))
 }

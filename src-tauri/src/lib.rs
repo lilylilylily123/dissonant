@@ -6,6 +6,7 @@ pub mod audio_files;
 pub mod library;
 pub mod plugins;
 pub mod recording;
+pub mod sample_fetch;
 pub mod settings;
 
 use dissonant_catalog::{install, CatalogEntry, InstallEvent, Platform};
@@ -146,6 +147,9 @@ pub struct AppState {
     importing: AtomicBool,
     /// A DI analysis is running: one at a time, since each one ends in a new track.
     detecting: AtomicBool,
+    /// The link fetch: one at a time, and cancellable from another command. `Arc` because the
+    /// fetch runs on a blocking worker that outlives the command's borrow of the state.
+    sample_fetch: Arc<sample_fetch::FetchControl>,
 }
 
 /// What every editing command returns to the UI.
@@ -319,6 +323,7 @@ impl AppState {
             tuner_open: AtomicBool::new(false),
             importing: AtomicBool::new(false),
             detecting: AtomicBool::new(false),
+            sample_fetch: Arc::new(sample_fetch::FetchControl::default()),
         }
     }
 
@@ -478,11 +483,12 @@ impl AppState {
         self.audio_status()
     }
 
-    /// Hand the engine every decoded source the model refers to.
+    /// Hand the engine every decoded source the model refers to — clips' and samplers' alike,
+    /// since both live in `audio_sources`.
     ///
     /// Modelled on `sync_plugins`: the cache is keyed by source id, a miss is filled from the
-    /// audio store, and a file that is gone is logged and skipped — the clip stays visible and
-    /// plays silence rather than taking the project down.
+    /// audio store, and a file that is gone is logged and skipped — the clip or sampler stays
+    /// visible and plays silence rather than taking the project down.
     fn sync_audio_pool(&self) {
         let wanted: Vec<Uuid> = self.doc.lock().unwrap().model().audio_sources.iter().map(|s| s.id).collect();
         if wanted.is_empty() {
@@ -1046,9 +1052,12 @@ fn get_state(state: State<'_, AppState>) -> Snapshot {
 
 #[tauri::command]
 fn apply(state: State<'_, AppState>, command: Command, transient: Option<bool>, label: Option<String>) -> Result<Snapshot, String> {
-    // Only `AddAudioTake` can introduce a source; everything else leaves the pool alone, and
-    // re-reading the store on every knob drag would be absurd.
-    let touches_audio = matches!(command, Command::AddAudioTake { .. });
+    // Only these can introduce a source or point a sampler at a different one; everything else
+    // leaves the pool alone, and re-reading the store on every knob drag would be absurd.
+    let touches_audio = matches!(
+        command,
+        Command::AddAudioTake { .. } | Command::AddSamplerTrack { .. } | Command::SetSampler { .. }
+    );
     // The dedicated insert commands below reconcile themselves, but an insert edit can also
     // arrive here, and deleting a track takes a whole chain with it.
     let touches_chains = matches!(
@@ -1152,6 +1161,8 @@ fn save_project(state: State<'_, AppState>, path: Option<String>) -> Result<Snap
 #[tauri::command]
 fn quit(app: AppHandle, state: State<'_, AppState>) {
     state.force_close.store(true, Ordering::SeqCst);
+    // A yt-dlp left running would keep downloading after the window is gone.
+    state.sample_fetch.cancel();
     state.clear_autosave();
     app.exit(0);
 }
@@ -1285,6 +1296,12 @@ fn audition(state: State<'_, AppState>, track_id: Uuid, pitch: u8, velocity: Opt
 #[tauri::command]
 fn audition_off(state: State<'_, AppState>, track_id: Uuid, pitch: u8) {
     state.send(EngineCommand::AuditionOff { track_id, pitch });
+}
+
+/// Cut everything sounding on a track, one-shot chops included (see `EngineCommand::SilenceTrack`).
+#[tauri::command]
+fn silence_track(state: State<'_, AppState>, track_id: Uuid) {
+    state.send(EngineCommand::SilenceTrack { track_id });
 }
 
 // ─── Sound preview (the SOUND page) ──────────────────────────────────────────────────────────
@@ -2359,6 +2376,7 @@ fn stop_audio_record(state: State<'_, AppState>) -> Result<Snapshot, String> {
         frames,
         sample_rate: rate,
         channels: 1,
+        origin_url: None,
     };
     let mut clip = dissonant_core::AudioClip::new(
         track_id,
@@ -2513,6 +2531,7 @@ async fn import_audio_inner(
         frames,
         sample_rate: audio.sample_rate,
         channels: audio.channels,
+        origin_url: None,
     };
     let clip = dissonant_core::AudioClip::new(track_id, source_id, start_tick.max(0), seconds);
     state
@@ -3297,6 +3316,7 @@ pub fn run() {
             set_hear_chords,
             audition,
             audition_off,
+            silence_track,
             preview_sound,
             preview_note,
             preview_scope,
@@ -3362,6 +3382,8 @@ pub fn run() {
             delete_library_sound,
             list_vibes,
             new_from_vibe,
+            sample_fetch::fetch_sample,
+            sample_fetch::cancel_sample_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dissonant");

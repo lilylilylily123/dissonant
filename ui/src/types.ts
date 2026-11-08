@@ -182,13 +182,125 @@ export interface Track {
   amp: AmpRig | null;
   /** A drum track's kit, top to bottom (1–16 pads, unique pitches). Ignored on synth tracks. */
   drumPads: DrumPad[];
+  /** Set on a sampler track: the source it cuts up and the chops its keys play. Absent on every
+   *  other track, like Rust's `skip_serializing_if = "Option::is_none"`. */
+  sampler?: Sampler;
 }
 
-export type TrackKind = "midi" | "drum" | "audio";
+export type TrackKind = "midi" | "drum" | "audio" | "sampler";
 
-/** Audio wins over drum; the model guarantees they are never both set. */
+/** Audio wins over sampler, sampler over drum; the model guarantees no two are ever set. */
 export function trackKind(t: Track): TrackKind {
-  return t.isAudio ? "audio" : t.isDrum ? "drum" : "midi";
+  return t.isAudio ? "audio" : t.sampler ? "sampler" : t.isDrum ? "drum" : "midi";
+}
+
+/** How a chop answers note-off: `oneShot` plays to its end, `gate` plays while held. */
+export type ChopMode = "oneShot" | "gate";
+
+/** One slice of a sampler's source, and how it plays. Mirrors `sampler.rs::Chop`. */
+export interface Chop {
+  id: string;
+  /** What the pad says. Absent (never `""`) when the pad shows its key name instead. */
+  name?: string;
+  startSeconds: number;
+  /** At least `MIN_CHOP_SECONDS` after `startSeconds`. */
+  endSeconds: number;
+  /** Linear, 0…`MAX_CHOP_GAIN`. */
+  gain: number;
+  reverse: boolean;
+  mode: ChopMode;
+  /** 0…`MAX_CHOP_ATTACK_SECONDS`. */
+  attackSeconds: number;
+  /** 0…`MAX_CHOP_RELEASE_SECONDS`. */
+  releaseSeconds: number;
+  /** 0 = none, 1…`MAX_CHOKE_GROUP`: a hit in the same group cuts this chop off. */
+  choke: number;
+}
+
+/** One detected hit in a source; `strength` is normalised 0…1. */
+export interface Onset {
+  seconds: number;
+  strength: number;
+}
+
+/** What analysis heard in a source. Mirrors `sampler.rs::SampleAnalysis`. */
+export interface SampleAnalysis {
+  bpm: number | null;
+  bpmConfidence: number;
+  /** Pitch class of the tonic, 0 = C … 11 = B. */
+  keyRoot: number | null;
+  keyScale: ScaleType;
+  keyConfidence: number;
+  /** Ascending by `seconds`, at most `MAX_ONSETS`. */
+  onsets: Onset[];
+}
+
+/**
+ * How many chops a sampler sounds at once. `mono`: any hit cuts everything the track is
+ * sounding over 4 ms, ignoring choke groups. `poly`: hits layer, cut only by the same chop or a
+ * shared choke group. Mirrors `sampler.rs::SamplerVoice`.
+ */
+export type SamplerVoice = "mono" | "poly";
+
+/** A stretch of the source, seconds. Mirrors `sampler.rs::SampleRegion`. */
+export interface SampleRegion {
+  startSeconds: number;
+  endSeconds: number;
+}
+
+/** How long one BPM-grid chop is: a bar, half a bar, or a beat. */
+export type GridStep = "bar" | "half" | "beat";
+
+/**
+ * A chop tool, applied inside a region by `chopRegion`. Mirrors `sampler.rs::Chopper`:
+ * `auto` makes at most `count` chops at the region's start and strongest hits, `equal` makes
+ * `count` equal chops, `grid` cuts every `step` of the detected tempo.
+ */
+export type Chopper =
+  | { kind: "auto"; count: number }
+  | { kind: "equal"; count: number }
+  | { kind: "grid"; step: GridStep };
+
+/**
+ * A sampler track's instrument: chop `i` plays on MIDI pitch `basePitch + i`. Mirrors
+ * `sampler.rs::Sampler`.
+ */
+export interface Sampler {
+  sourceId: string;
+  basePitch: number;
+  /** In key order: reordering chops remaps the keys, never the audio. */
+  chops: Chop[];
+  /** Absent until analysed. */
+  analysis?: SampleAnalysis;
+  /** Always on the wire; a file from before it loads as `mono`. */
+  voice: SamplerVoice;
+  /** Where the chop tools cut. Absent means the whole source. */
+  region?: SampleRegion;
+  /** The chop tool used last, so moving the region re-cuts the same way. Absent until one is. */
+  chopper?: Chopper;
+}
+
+/** Where a link fetch is (event `sample-fetch`). */
+export type SampleFetchPhase =
+  | "locating"
+  | "installing"
+  | "downloading"
+  | "converting"
+  | "decoding"
+  | "analyzing"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+/** One `sample-fetch` event. */
+export interface SampleFetchProgress {
+  phase: SampleFetchPhase;
+  /** 0…1, or -1 when the phase cannot tell how far along it is. */
+  fraction: number;
+  /** The video's title, once known. */
+  title: string | null;
+  /** What went wrong (`failed`), or a detail worth showing. */
+  message: string | null;
 }
 
 /**
@@ -202,6 +314,8 @@ export interface AudioSource {
   frames: number;
   sampleRate: number;
   channels: number;
+  /** The page it was fetched from, when it came from a link. Absent otherwise. */
+  originUrl?: string;
 }
 
 /**
@@ -1099,6 +1213,13 @@ export type Command =
   | { type: "clearAutomation"; target: AutoTarget }
   | { type: "addAudioTrack"; name: string }
   | { type: "setTrackAmp"; id: string; amp: AmpRig }
+  /**
+   * A new sampler track over `source` in one undo step: the source lands in the project and
+   * the track arrives with `sampler` and one empty pattern.
+   */
+  | { type: "addSamplerTrack"; name: string; source: AudioSource; sampler: Sampler }
+  /** Replace a sampler track's whole sampler (one chop edge drag is one of these). */
+  | { type: "setSampler"; id: string; sampler: Sampler }
   | {
       type: "addAudioTake";
       trackId: string;

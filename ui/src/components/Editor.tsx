@@ -4,6 +4,7 @@ import { songLength, TICKS_PER_BEAT, ticksToBeats, trackColor, type SongPattern 
 import { BASE_BEAT_W, GUTTER, ChordLane } from "./ChordLane";
 import { DrumGrid } from "./DrumGrid";
 import { PianoRoll } from "./PianoRoll";
+import { ChopLanes } from "./sample/ChopLanes";
 import { keys } from "../platform";
 
 /** "bar 9", or "bar 9.3" when the tick sits inside a bar (1-based, like the rulers). */
@@ -70,7 +71,8 @@ export function PatternBars({ pattern, barTick }: { pattern: SongPattern; barTic
 /**
  * PAT mode editor column. Two bars: what you're editing and what it's heard with
  * (track › pattern, where the chords come from, the chord bed, the ghost), then the
- * editing tools; under them the read-only chord lane and the roll (or drum grid).
+ * editing tools; under them the read-only chord lane and the roll (or drum grid). A sampler
+ * pattern gets the chop lanes instead, and none of the harmony tools.
  */
 export function Editor() {
   const s = useStore();
@@ -85,6 +87,7 @@ export function Editor() {
         <div className="row" style={{ gap: 6 }}>
           <button onClick={() => s.dispatch({ type: "addTrack", isDrum: false })}>+ instrument</button>
           <button onClick={() => s.dispatch({ type: "addTrack", isDrum: true })}>+ drums</button>
+          <button onClick={() => s.openSampler()}>+ sample</button>
         </div>
       </div>
     );
@@ -100,6 +103,8 @@ export function Editor() {
   }
   const color = trackColor(track, idx);
   const notes = pattern.notes;
+  // A sampler pattern plays chops, not pitches: none of the harmony tools mean anything to it.
+  const chops = !!track.sampler;
 
   return (
     <div className="editor">
@@ -110,20 +115,24 @@ export function Editor() {
           <span className="sep">›</span>
           <b className="pat">{pattern.name}</b>
           <span className="meta">
-            {track.isDrum ? "steps" : "roll"} · {+(pattern.lengthTicks / ticksPerBar).toFixed(2)} {pattern.lengthTicks === ticksPerBar ? "bar" : "bars"}
+            {track.isDrum ? "steps" : chops ? "chop lanes" : "roll"} · {+(pattern.lengthTicks / ticksPerBar).toFixed(2)} {pattern.lengthTicks === ticksPerBar ? "bar" : "bars"}
           </span>
         </div>
-        <div className="vdiv" />
-        <ChordsFrom pattern={pattern} />
-        <button
-          className={`chip bedtoggle${s.hearChords ? " on" : ""}`}
-          onClick={() => s.toggleHearChords()}
-          aria-pressed={s.hearChords}
-          aria-label="hear chord bed"
-          title="hear the chord bed under this pattern while you write (never exported)"
-        >
-          <span className="box" aria-hidden="true">{s.hearChords ? "■" : "□"}</span> hear chord bed
-        </button>
+        {!chops && (
+          <>
+            <div className="vdiv" />
+            <ChordsFrom pattern={pattern} />
+            <button
+              className={`chip bedtoggle${s.hearChords ? " on" : ""}`}
+              onClick={() => s.toggleHearChords()}
+              aria-pressed={s.hearChords}
+              aria-label="hear chord bed"
+              title="hear the chord bed under this pattern while you write (never exported)"
+            >
+              <span className="box" aria-hidden="true">{s.hearChords ? "■" : "□"}</span> hear chord bed
+            </button>
+          </>
+        )}
         <div className="vdiv" />
         <GhostPicker pattern={pattern} />
         <span className="spacer" />
@@ -150,17 +159,21 @@ export function Editor() {
         </div>
         {!track.isDrum && (
           <>
-            <button className={`chip${s.highlightRows ? " on" : ""}`} onClick={() => s.toggleHighlight()} title="tint rows by tier">tiers</button>
-            <button className={`chip${s.showLandscape ? " on" : ""}`} onClick={() => s.toggleLandscape()} title="harmonic map">map</button>
-            <div className="vdiv" />
+            {!chops && (
+              <>
+                <button className={`chip${s.highlightRows ? " on" : ""}`} onClick={() => s.toggleHighlight()} title="tint rows by tier">tiers</button>
+                <button className={`chip${s.showLandscape ? " on" : ""}`} onClick={() => s.toggleLandscape()} title="harmonic map">map</button>
+                <div className="vdiv" />
+              </>
+            )}
             <button className={`chip${s.brush ? " on" : ""}`} onClick={() => s.toggleBrush()} title={keys("brush: left-drag on empty space paints notes (⌥-drag does this too when ⌥ is set to paint in Settings)")}>brush</button>
             <button className={`chip${s.follow ? " on" : ""}`} onClick={() => s.toggleFollow()} title="follow: keep the playhead in view while playing">follow</button>
-            <button className={`chip${s.fold ? " on" : ""}`} onClick={() => s.toggleFold()} title="fold: show only rows that have notes, plus chord tones around them">fold</button>
+            {!chops && <button className={`chip${s.fold ? " on" : ""}`} onClick={() => s.toggleFold()} title="fold: show only rows that have notes, plus chord tones around them">fold</button>}
           </>
         )}
         <span className="spacer" />
         <span className="mono" style={{ fontSize: 9.5, color: "var(--text-4)" }}>
-          {notes.length} {track.isDrum ? "hits" : "notes"}
+          {notes.length} {track.isDrum || chops ? "hits" : "notes"}
           {s.selectedNoteIds.length ? ` · ${s.selectedNoteIds.length} sel` : ""}
         </span>
         <div className="zoom">
@@ -170,14 +183,26 @@ export function Editor() {
             className="chip tiny"
             title="zoom to fit the whole pattern"
             onClick={() => {
+              // The chop lanes' headers sit outside their scroller; the roll's keyboard is inside it.
               const w = document.querySelector<HTMLElement>(".rollscroll, .drumgrid")?.clientWidth ?? 1000;
-              s.setZoom((w - GUTTER - 16) / (ticksToBeats(pattern.lengthTicks) * BASE_BEAT_W));
+              s.setZoom((w - (chops ? 0 : GUTTER) - 16) / (ticksToBeats(pattern.lengthTicks) * BASE_BEAT_W));
             }}
           >
             fit
           </button>
         </div>
-        {!track.isDrum && (
+        {chops && (
+          <span
+            className="chip"
+            style={{ cursor: "help" }}
+            title={keys(
+              "click a chop's row: place a hit (keep dragging to move it) · ⌥: off the grid (or paint, per Settings)\ndrag a hit: move in time · up or down: hand it to another chop, heard as it lands (⇧ one axis) · ⌥-drag: duplicate\na one-shot's faded tail is how long the chop sounds; a hard edge is where a later hit cuts it. gate hits: drag an edge to resize\n⇧/⌘-drag: marquee · ⇧-click: toggle · right-click: erase · click a row's header: hear the chop, double-click: select its hits\n⌫ delete · ⌘A ⌘C ⌘X ⌘V ⌘D · ⇧⌘E split at playhead · ⌘J glue · ⌘B duplicate one loop later · 0: mute · Tab/⇧Tab: next/previous hit\n← → nudge (⇧ = bar, ⌥ = fine) · ↑ ↓ or ⌥-wheel: change chop · [ ] the lane's property\n⌘-wheel zoom at cursor · ⇧-wheel scroll · ruler: seek · lane: drag stems, ⌥-drag ramp",
+            )}
+          >
+            ?
+          </span>
+        )}
+        {!track.isDrum && !chops && (
           <span
             className="chip"
             style={{ cursor: "help" }}
@@ -189,8 +214,8 @@ export function Editor() {
           </span>
         )}
       </div>
-      <ChordLane offsetTicks={s.chordOffsetTicks} lengthTicks={pattern.lengthTicks} beatW={BASE_BEAT_W * s.zoom} readOnly onEditInSetup={() => s.setScreen("setup")} />
-      {track.isDrum ? <DrumGrid /> : <PianoRoll />}
+      {!chops && <ChordLane offsetTicks={s.chordOffsetTicks} lengthTicks={pattern.lengthTicks} beatW={BASE_BEAT_W * s.zoom} readOnly onEditInSetup={() => s.setScreen("setup")} />}
+      {track.isDrum ? <DrumGrid /> : chops ? <ChopLanes track={track} pattern={pattern} /> : <PianoRoll />}
     </div>
   );
 }

@@ -25,6 +25,7 @@ import type {
   ProjectModel,
   RecoveryCandidate,
   Settings,
+  SampleFetchProgress,
   Snapshot,
   SongPattern,
   SoundPreset,
@@ -47,6 +48,7 @@ import {
 } from "./types";
 import { applyUiScale } from "./uiScale";
 import { nativeEffect } from "./effects";
+import { addedId } from "./trackTree";
 import { FACTORY_SOUNDS, type Sound } from "./sound";
 import type { ArrSnap } from "./clipEditing";
 
@@ -77,11 +79,22 @@ export interface DialogSpec {
 export type BottomPanel = "devices" | "mixer";
 /**
  * Which top-level screen is showing. It is not what the engine sequences: `PlayMode` is a
- * Rust enum with two variants, and SETUP, SONG, SOUND and the rec page all play the song,
- * so `playModeOf` folds this down for the bridge.
+ * Rust enum with two variants, and SETUP, SONG, SOUND, SAMPLE and the rec page all play the
+ * song, so `playModeOf` folds this down for the bridge.
  */
-export type Screen = ViewMode | "rec";
+export type Screen = ViewMode | "rec" | "sample";
 export type LiveKeyboard = "off" | "tier" | "chromatic";
+/** A chop the SAMPLE screen is sounding: which, since when (performance.now ms), for how long. */
+export interface SamplePreview {
+  trackId: string;
+  index: number;
+  startedAt: number;
+  seconds: number;
+}
+
+/** Whether `p` is still sounding by its own clock (a gate chop let go early may already be quiet). */
+export const previewSounding = (p: SamplePreview | null, now = performance.now()) =>
+  !!p && now - p.startedAt < p.seconds * 1000;
 
 /** A pattern being dragged out of the tree, in client coordinates. */
 export interface PatternDrag {
@@ -189,6 +202,13 @@ interface State {
   selectedAudioClipId: string | null;
   /** Non-null while a file decodes. */
   importing: AudioImportProgress | null;
+  /** Non-null while a link is being fetched into a sampler track: the last progress heard. */
+  sampleFetch: SampleFetchProgress | null;
+  /** Bumped to ask the SAMPLE screen to put the cursor in its link field. */
+  sampleLinkFocus: number;
+  /** The chop the SAMPLE screen is previewing, for its playhead and so anything that starts or
+   *  stops playback can cut it. One at a time: a preview of a one-shot can't be released. */
+  samplePreview: SamplePreview | null;
   /** The audio clip whose DI is being transcribed, while that runs. One at a time. */
   detectingClipId: string | null;
   /** The tuner strip is open. The engine is silent while it is. */
@@ -246,6 +266,20 @@ interface State {
   tapTempo(): void;
   /** Preview a pitch. `lengthTicks` defaults to the current grid, so a preview never outlasts the note. */
   audition(pitch: number, velocity?: number, lengthTicks?: number): void;
+  /** Preview chop `index` of a sampler track on `pitch`, cutting whatever the SAMPLE screen was
+   *  previewing. `held` keeps the key down (a computer key) until `noteOff`; otherwise it is
+   *  held for `seconds`, which a gate chop needs and a one-shot ignores. */
+  previewChop(trackId: string, pitch: number, index: number, seconds: number, held: boolean): void;
+  /** Cut the SAMPLE screen's preview, if one is sounding. */
+  stopSamplePreview(): void;
+  /**
+   * A SAMPLE pad (or its computer key) went down. With the record arm on and the transport
+   * running it is a live note on the selected track — the path a played key takes — so it
+   * sounds through the track (a mono sampler cuts in the engine) and is recorded into the
+   * selected pattern on the recording grid. Otherwise it is `previewChop`. Returns whether it
+   * went live: a live pad must be let go with `noteOff`, as a held preview is.
+   */
+  strikePad(trackId: string, pitch: number, index: number, seconds: number, held: boolean): boolean;
   /** The roll's loop brace, in the selected pattern's own ticks. Dropped on a pattern switch. */
   setLoopRegion(region: [number, number] | null): void;
   /** The song's loop brace, in song ticks: an undoable edit, saved with the project. */
@@ -422,6 +456,14 @@ interface State {
   clearInputPeak(): Promise<void>;
   /** Set the manual latency trim, in ms, for one input device. */
   setInputTrim(device: string, ms: number): Promise<void>;
+
+  // ── Sampler ─────────────────────────────────────────────────────────────────────────────
+  /** Fetch a link into a new sampler track; on success it is selected and SAMPLE opens on it.
+   *  True when a track landed. */
+  fetchSample(url: string): Promise<boolean>;
+  cancelSampleFetch(): Promise<void>;
+  /** Open SAMPLE with the cursor in the link field: the "+ sample" buttons. */
+  openSampler(): void;
 }
 
 /** Push the appearance section into CSS variables, the live tier palette and the webview zoom. */
@@ -740,6 +782,9 @@ export const useStore = create<State>((set, get) => {
     monitor: false,
     selectedAudioClipId: null,
     importing: null,
+    sampleFetch: null,
+    sampleLinkFocus: 0,
+    samplePreview: null,
     detectingClipId: null,
     tunerOpen: false,
     tunerHz: null,
@@ -784,6 +829,12 @@ export const useStore = create<State>((set, get) => {
       b.onFileDropped((path) => void get().openPath(path));
       b.onAudioDropped((path) => void get().importAudioPath(path));
       b.onAudioImport((p) => set({ importing: p.fraction >= 1 ? null : p }));
+      // Only while a fetch is in flight: a late event must not bring a finished one back. The
+      // terminal phases end it; `fetchSample` reports how in a toast.
+      b.onSampleFetch((p) => {
+        if (!get().sampleFetch) return;
+        set({ sampleFetch: p.phase === "done" || p.phase === "failed" || p.phase === "cancelled" ? null : p });
+      });
       b.onAudioStatus((e) => {
         set({ audio: e.status });
         get().showToast(e.message, !e.status.running);
@@ -892,6 +943,9 @@ export const useStore = create<State>((set, get) => {
       // The tuner lives on REC and mutes the engine while it is open; leaving the page has to
       // give the sound back, or the app is silent for reasons the user can no longer see.
       if (get().tunerOpen && screen !== "rec") void get().toggleTuner();
+      // A chop previewed on SAMPLE belongs to that page: it shouldn't ring on, unstoppable from
+      // anywhere the page's pads aren't.
+      if (get().screen === "sample" && screen !== "sample") get().stopSamplePreview();
       set({ screen });
       if (playModeOf(screen) !== before) void syncPlayback();
     },
@@ -962,6 +1016,8 @@ export const useStore = create<State>((set, get) => {
       // An open tuner silences the engine, so pressing play with it open would look like a
       // dead transport. Tuning is a stopped activity; starting one ends the other.
       if (get().tunerOpen) void get().toggleTuner();
+      // The song starts on its own: a chop still ringing from the SAMPLE screen would play over it.
+      get().stopSamplePreview();
       void getBridge().then(async (b) => {
         if (armed && m.preRollBars > 0) {
           const bar = barTicksOf(snapshot?.model.timeSignature);
@@ -971,6 +1027,8 @@ export const useStore = create<State>((set, get) => {
       });
     },
     stop() {
+      // The engine's stop cuts every voice, previews included.
+      set({ samplePreview: null });
       void getBridge().then((b) => b.stop());
     },
     toggleMetronome() {
@@ -979,6 +1037,9 @@ export const useStore = create<State>((set, get) => {
     },
     togglePlay() {
       if (get().playing) get().stop();
+      // Stopped, with a chop preview sounding: Space stops what you hear rather than starting
+      // the song on top of it.
+      else if (previewSounding(get().samplePreview)) get().stopSamplePreview();
       else get().play();
     },
     rewind() {
@@ -1083,6 +1144,35 @@ export const useStore = create<State>((set, get) => {
     },
     noteOff(pitch) {
       void getBridge().then((b) => b.noteOff(pitch));
+    },
+    previewChop(trackId, pitch, index, seconds, held) {
+      set({ samplePreview: { trackId, index, startedAt: performance.now(), seconds } });
+      void getBridge().then((b) => {
+        // Every chop on the track, not just the last preview: pattern notes stacked one-shots
+        // there too, and the preview is meant to be heard alone. Sent back to back, not awaited
+        // one after the other: two quick pads would otherwise interleave as cut, cut, chop,
+        // chop and stack anyway.
+        void b.silenceTrack(trackId);
+        void (held ? b.noteOn(pitch, 100) : b.audition(trackId, pitch, 100, seconds));
+      });
+    },
+    strikePad(trackId, pitch, index, seconds, held) {
+      const { armed, playing, selectedTrackId } = get();
+      // Live notes play the live track, which is the selected one; a pad of any other track
+      // could only be heard, so it stays a preview. No `silenceTrack` here: that would cut the
+      // song's own hits on the track mid-take, and a mono sampler already cuts in the engine.
+      if (armed && playing && trackId === selectedTrackId) {
+        get().noteOn(pitch);
+        return true;
+      }
+      get().previewChop(trackId, pitch, index, seconds, held);
+      return false;
+    },
+    stopSamplePreview() {
+      const p = get().samplePreview;
+      if (!p) return;
+      set({ samplePreview: null });
+      void getBridge().then((b) => b.silenceTrack(p.trackId));
     },
     toggleMagnet() {
       set((s) => ({ magnet: !s.magnet }));
@@ -1755,6 +1845,46 @@ export const useStore = create<State>((set, get) => {
         set({ importing: null });
         get().showToast(String(e), true);
       }
+    },
+
+    async fetchSample(url) {
+      if (get().sampleFetch) return false;
+      const b = await getBridge();
+      const before = get().snapshot?.model.tracks ?? [];
+      // Shown at once: finding yt-dlp can take a moment before the first event arrives.
+      set({ sampleFetch: { phase: "locating", fraction: -1, title: null, message: null } });
+      try {
+        const snap = await b.fetchSample(url);
+        set({ sampleFetch: null });
+        applySnapshot(snap);
+        const id = addedId(before, snap.model.tracks);
+        if (id) get().selectTrack(id);
+        get().setScreen("sample");
+        await syncPlayback();
+        const track = snap.model.tracks.find((t) => t.id === id);
+        const chops = track?.sampler?.chops.length ?? 0;
+        get().showToast(`“${track?.name ?? "sample"}” · ${chops} chop${chops === 1 ? "" : "s"} on the keys`);
+        return true;
+      } catch (e) {
+        set({ sampleFetch: null });
+        // Cancelling is something the user did, not something that went wrong.
+        if (e === "cancelled") get().showToast("fetch cancelled");
+        else get().showToast(String(e), true);
+        return false;
+      }
+    },
+    async cancelSampleFetch() {
+      if (!get().sampleFetch) return;
+      const b = await getBridge();
+      try {
+        await b.cancelSampleFetch();
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    openSampler() {
+      set((s) => ({ sampleLinkFocus: s.sampleLinkFocus + 1 }));
+      get().setScreen("sample");
     },
 
     async detectNotes(clipId) {

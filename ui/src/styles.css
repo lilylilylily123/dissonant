@@ -256,9 +256,50 @@ select {
   padding-right: 16px;
   background-image: linear-gradient(45deg, transparent 50%, var(--text-4) 50%),
     linear-gradient(135deg, var(--text-4) 50%, transparent 50%);
-  background-position: calc(100% - 9px) 8px, calc(100% - 5px) 8px;
+  /* Vertically centred, so selects given a custom height (16px, 18px) keep the caret beside the
+     text rather than sinking under it. */
+  background-position: calc(100% - 9px) 50%, calc(100% - 5px) 50%;
   background-size: 4px 4px, 4px 4px;
   background-repeat: no-repeat;
+}
+/* Ranges are drawn here rather than left to `accent-color`: WebKit (the macOS webview) ignores it
+   and paints its native white pill thumb over a 4px track. `--range-color` tints the thumb. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-3);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -3px;
+  border: none;
+  border-radius: 50%;
+  background: var(--range-color, var(--accent));
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-3);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: none;
+  border-radius: 50%;
+  background: var(--range-color, var(--accent));
+}
+input[type="range"]:disabled {
+  cursor: default;
+  opacity: 0.4;
 }
 .field {
   display: flex;
@@ -402,22 +443,21 @@ select {
   box-shadow: 0 0 5px var(--rec);
 }
 
-/* Transport */
+/* Transport. It wraps onto a second row when it doesn't fit (a narrow window, or a large ui
+   scale, which narrows the page in CSS pixels): scrolling it sideways hid the right-hand controls
+   behind the window edge. Groups wrap whole; the spacer keeps the last row's tail on the right. */
 .transport {
-  height: 56px;
+  min-height: 56px;
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  padding: 0 10px;
-  overflow: hidden;
+  gap: 6px 10px;
+  padding: 6px 10px;
   background: var(--bg-transport);
   border-bottom: 1px solid var(--line-1);
 }
-/* The transport and the editor toolbar are one row each. When they don't fit (a narrow window, or
-   a large ui scale, which narrows the page in CSS pixels) they scroll sideways on a thin bar
-   rather than clipping or wrapping controls out of reach. */
-.transport,
+/* The editor toolbar stays one row and scrolls sideways on a thin bar when it doesn't fit. */
 .toolbar {
   overflow-x: auto;
   overflow-y: hidden;
@@ -426,7 +466,6 @@ select {
 .toolbar > * {
   flex-shrink: 0;
 }
-.transport::-webkit-scrollbar,
 .toolbar::-webkit-scrollbar {
   height: 4px;
 }
@@ -454,7 +493,7 @@ select {
 }
 .transport input[type="range"] {
   height: 4px;
-  accent-color: var(--accent);
+  --range-color: var(--accent);
   margin: 0;
 }
 .transport .tgroup {
@@ -635,6 +674,19 @@ select {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-4b);
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* One line, always: the context and the recording target give way (with an ellipsis) before
+   anything wraps and pushes the page taller than the window. */
+.statusbar > span:not(.spacer) {
+  flex: none;
+}
+.statusbar > span.sb-fit {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .toast {
   position: fixed;
@@ -1707,7 +1759,7 @@ select {
 .zoom input[type="range"] {
   width: 70px;
   height: 4px;
-  accent-color: var(--text-1);
+  --range-color: var(--text-1);
   margin: 0;
 }
 .rollwrap {
@@ -2926,6 +2978,15 @@ select {
   color: var(--text-5);
   white-space: nowrap;
 }
+/* A narrow tree gives the track's name the room: the sound name after it truncates first (the
+   name sizes from its text — `.tt-track .tt-name` below — and this far larger shrink factor
+   takes the squeeze). */
+.tt-track .tt-meta {
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* Row actions sit where the meta is and swap in on hover, so names keep their width. */
 .tt-acts {
   display: none;
@@ -2955,6 +3016,7 @@ select {
 .tt-track .tt-name {
   font-weight: 700;
   letter-spacing: 0.02em;
+  flex: 1 1 auto;
 }
 .tt-track .tt-name.muted {
   color: var(--text-5);
@@ -3478,7 +3540,7 @@ select {
   width: 64px;
   height: 4px;
   margin: 0;
-  accent-color: var(--accent);
+  --range-color: var(--accent);
 }
 .ctxbar .ghostlevel .pct {
   font-family: var(--font-mono);
@@ -3563,16 +3625,14 @@ select {
 }
 
 /* Fundamentals band */
+/* Wraps like the transport when the cells don't fit, rather than scrolling the last ones out of
+   view or squeezing the listen cell until its text clips. The shadow rules off wrapped rows. */
 .st-fund {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line-1);
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.st-fund::-webkit-scrollbar {
-  height: 4px;
 }
 .st-fund .cell {
   flex: none;
@@ -3582,9 +3642,10 @@ select {
   padding: 8px 14px 9px;
   border-right: 1px solid var(--line-1);
   min-width: 0;
+  box-shadow: 0 1px 0 var(--line-1);
 }
 .st-fund .cell.grow {
-  flex: 1;
+  flex: 1 0 auto;
   border-right: 0;
 }
 .st-fund .sub {
@@ -3609,14 +3670,13 @@ select {
   background-color: var(--bg-0);
 }
 .st-fund select.big {
-  background-position: calc(100% - 9px) 10px, calc(100% - 5px) 10px;
   min-width: 52px;
 }
 .st-fund input[type="range"] {
   width: 84px;
   height: 4px;
   margin: 0;
-  accent-color: var(--accent);
+  --range-color: var(--accent);
 }
 .st-fund .st-play {
   min-width: 64px;
@@ -4156,7 +4216,8 @@ button.linkish {
 }
 .sp-list {
   flex: 1;
-  min-height: 0;
+  /* A short bottom panel squeezes the inline picker; keep a few rows of it rather than a sliver. */
+  min-height: 66px;
   overflow-y: auto;
   background: var(--bg-0);
   border: 1px solid var(--line-1);
@@ -4274,6 +4335,20 @@ button.linkish {
 .synthdev .pad,
 .kitdev .pad {
   min-height: 0;
+}
+/* The inline sound list keeps its minimum rows; past that the card scrolls instead of the list
+   sliding under the plugin picker. */
+.synthdev .pad {
+  overflow-y: auto;
+}
+/* The picker takes what's free but never less than its few rows. Size containment keeps the
+   list's sounds out of the picker's intrinsic height (which the card's scroll area would
+   otherwise grow to fit all of them); its min-height is then the floor. */
+.synthdev .sp {
+  flex: 1 0 auto;
+}
+.synthdev .sp-list {
+  contain: size;
 }
 .kitdev .pad {
   gap: 5px;

@@ -4,8 +4,10 @@
 
 use dissonant_core::document::{Command, InsertTarget, TrackParam};
 use dissonant_core::{
-    AmpModel, AudioClip, AutoTarget, CabModel, Cabinet, Curve, DrumPad, EqModel, Insert,
-    MasterParam, MicModel, Pedal, PitchPoint, TrackPlugin,
+    AmpModel, AudioClip, AutoTarget, CabModel, Cabinet, Chop, ChopMode, Chopper, Curve, DrumPad,
+    EqModel, GridStep, Insert, MasterParam, MicModel, Onset, Pedal, PitchPoint, SampleAnalysis,
+    SampleRegion, Sampler, SamplerVoice, ScaleType, TrackPlugin, DEFAULT_CHOP_RELEASE_SECONDS,
+    DEFAULT_SAMPLER_BASE_PITCH,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -744,6 +746,137 @@ fn every_command_variant_round_trips_from_the_ui_payload() {
         }
         other => panic!("expected AddAudioTake, got {other:?}"),
     }
+
+    // ---- sampler tracks
+
+    let chop_id = Uuid::new_v4();
+    let sampler_json = json!({
+        "sourceId": source_id, "basePitch": 48,
+        "chops": [{
+            "id": chop_id, "name": "kick", "startSeconds": 0.25, "endSeconds": 0.75,
+            "gain": 0.5, "reverse": true, "mode": "gate", "attackSeconds": 0.125,
+            "releaseSeconds": 0.5, "choke": 3,
+        }],
+        "analysis": {
+            "bpm": 92.5, "bpmConfidence": 0.75, "keyRoot": 9, "keyScale": "minor",
+            "keyConfidence": 0.5, "onsets": [{"seconds": 0.25, "strength": 1.0}],
+        },
+        "voice": "poly",
+        "region": {"startSeconds": 0.25, "endSeconds": 4.0},
+        "chopper": {"kind": "grid", "step": "half"},
+    });
+    let expected_sampler = Sampler {
+        source_id,
+        base_pitch: 48,
+        chops: vec![Chop {
+            id: chop_id,
+            name: "kick".into(),
+            start_seconds: 0.25,
+            end_seconds: 0.75,
+            gain: 0.5,
+            reverse: true,
+            mode: ChopMode::Gate,
+            attack_seconds: 0.125,
+            release_seconds: 0.5,
+            choke: 3,
+        }],
+        analysis: Some(SampleAnalysis {
+            bpm: Some(92.5),
+            bpm_confidence: 0.75,
+            key_root: Some(9),
+            key_scale: ScaleType::Minor,
+            key_confidence: 0.5,
+            onsets: vec![Onset {
+                seconds: 0.25,
+                strength: 1.0,
+            }],
+        }),
+        voice: SamplerVoice::Poly,
+        region: Some(SampleRegion {
+            start_seconds: 0.25,
+            end_seconds: 4.0,
+        }),
+        chopper: Some(Chopper::Grid {
+            step: GridStep::Half,
+        }),
+    };
+    match parse(json!({
+        "type": "addSamplerTrack", "name": "amen",
+        "source": {"id": source_id, "name": "amen", "frames": 352800, "sampleRate": 44100, "channels": 2,
+                   "originUrl": "https://youtu.be/abc"},
+        "sampler": sampler_json,
+    })) {
+        Command::AddSamplerTrack {
+            name,
+            source,
+            sampler,
+        } => {
+            assert_eq!(name, "amen");
+            assert_eq!(
+                (source.id, source.frames, source.sample_rate, source.channels),
+                (source_id, 352_800, 44_100, 2)
+            );
+            assert_eq!(source.origin_url.as_deref(), Some("https://youtu.be/abc"));
+            assert_eq!(sampler, expected_sampler);
+        }
+        other => panic!("expected AddSamplerTrack, got {other:?}"),
+    }
+    assert_eq!(
+        parse(json!({"type": "setSampler", "id": track_id, "sampler": sampler_json})),
+        Command::SetSampler {
+            id: track_id,
+            sampler: expected_sampler.clone()
+        }
+    );
+    // The smallest sampler the UI can send: every chop field but the bounds defaults, and a
+    // missing base pitch is the default key.
+    match parse(json!({
+        "type": "setSampler", "id": track_id,
+        "sampler": {"sourceId": source_id, "chops": [{"startSeconds": 0.0, "endSeconds": 1.0}]},
+    })) {
+        Command::SetSampler { sampler, .. } => {
+            assert_eq!(sampler.base_pitch, DEFAULT_SAMPLER_BASE_PITCH);
+            assert_eq!(sampler.analysis, None);
+            // A file from before mono/poly plays mono; no region means the whole source.
+            assert_eq!(sampler.voice, SamplerVoice::Mono);
+            assert_eq!((sampler.region, sampler.chopper), (None, None));
+            let chop = &sampler.chops[0];
+            assert_eq!(
+                (chop.name.as_str(), chop.gain, chop.reverse, chop.mode),
+                ("", 1.0, false, ChopMode::OneShot)
+            );
+            assert_eq!(
+                (chop.attack_seconds, chop.release_seconds, chop.choke),
+                (0.0, DEFAULT_CHOP_RELEASE_SECONDS, 0)
+            );
+        }
+        other => panic!("expected SetSampler, got {other:?}"),
+    }
+    // What goes back to the UI: the optional pieces are absent rather than null, as
+    // `types.ts` declares them.
+    let mut bare = expected_sampler.clone();
+    bare.analysis = None;
+    bare.region = None;
+    bare.chopper = None;
+    bare.chops[0].name.clear();
+    let wire = serde_json::to_value(&bare).unwrap();
+    assert!(wire.get("analysis").is_none());
+    assert!(wire.get("region").is_none());
+    assert!(wire.get("chopper").is_none());
+    assert!(wire["chops"][0].get("name").is_none());
+    assert_eq!(wire["chops"][0]["mode"], "gate");
+    assert_eq!(wire["voice"], "poly");
+    let full = serde_json::to_value(&expected_sampler).unwrap();
+    assert_eq!(full["region"], json!({"startSeconds": 0.25, "endSeconds": 4.0}));
+    assert_eq!(full["chopper"], json!({"kind": "grid", "step": "half"}));
+    assert_eq!(
+        serde_json::to_value(Chopper::Auto { count: 16 }).unwrap(),
+        json!({"kind": "auto", "count": 16})
+    );
+    assert_eq!(
+        serde_json::to_value(Chopper::Equal { count: 8 }).unwrap(),
+        json!({"kind": "equal", "count": 8})
+    );
 
     match parse(json!({
         "type": "punchAudioTake", "trackId": track_id,

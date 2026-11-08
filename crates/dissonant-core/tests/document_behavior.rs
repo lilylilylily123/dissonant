@@ -17,10 +17,12 @@ const EQ_UID: &str = "clap:/Library/Audio/Plug-Ins/CLAP/FabFilter Pro-Q 3.clap:c
 
 // ---------------------------------------------------------------- fixtures
 
-/// Three tracks (melody + drums + guitar), one pattern on each note track (the melody's 16
-/// beats with three notes, the last roped to the second, the drums' 8 beats and empty), both placed in the starter's 128-beat
-/// song with its chords, one audio take on the guitar track, and effect chains on the melody
-/// track and the master. Rich enough that every `Command` variant has something to bite on.
+/// Four tracks (melody + drums + guitar + a sampler), one pattern on each of the first two
+/// (the melody's 16 beats with three notes, the last roped to the second, the drums' 8 beats
+/// and empty), both placed in the starter's 128-beat song with its chords, one audio take on
+/// the guitar track, a sampler cutting a second source into two chops, and effect chains on
+/// the melody track and the master. Rich enough that every `Command` variant has something to
+/// bite on.
 fn fixture() -> ProjectModel {
     let mut m = ProjectModel::starter();
     let second = NoteEvent::new(4 * BEAT, 2 * BEAT, 64).with_velocity(70);
@@ -45,6 +47,13 @@ fn fixture() -> ProjectModel {
     let source = take_source();
     m.audio_clips = vec![AudioClip::new(gid, source.id, 0, 2.0)];
     m.audio_sources = vec![source];
+    // A sampler track over its own source, so the sampler commands have something to bite on.
+    let sample = sample_source();
+    m.tracks.push(Track::sampler(
+        "flip",
+        Sampler::new(sample.id, chops_at(&[1.0], sample.duration_seconds())),
+    ));
+    m.audio_sources.push(sample);
     // Two chords waiting in the detected lane, so accepting and dismissing have something to
     // bite on.
     m.detections = vec![ClipDetection {
@@ -124,7 +133,28 @@ fn take_source() -> AudioSource {
         frames: 48_000,
         sample_rate: 48_000,
         channels: 1,
+        origin_url: None,
     }
+}
+
+/// An eight-second 44.1 kHz stereo source, as a fetched link would arrive.
+fn sample_source() -> AudioSource {
+    AudioSource {
+        id: Uuid::new_v4(),
+        name: "break".into(),
+        frames: 8 * 44_100,
+        sample_rate: 44_100,
+        channels: 2,
+        origin_url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+    }
+}
+
+/// The fixture's sampler track.
+fn sampler_track(m: &ProjectModel) -> &Track {
+    m.tracks
+        .iter()
+        .find(|t| t.kind() == TrackKind::Sampler)
+        .expect("fixture has a sampler track")
 }
 
 /// The fixture's guitar track.
@@ -206,6 +236,8 @@ fn every_variant_is_accounted_for(c: Command) -> &'static str {
         Command::ClearAutomation { .. } => "ClearAutomation",
         Command::AddAudioTrack { .. } => "AddAudioTrack",
         Command::SetTrackAmp { .. } => "SetTrackAmp",
+        Command::AddSamplerTrack { .. } => "AddSamplerTrack",
+        Command::SetSampler { .. } => "SetSampler",
         Command::AddAudioTake { .. } => "AddAudioTake",
         Command::PunchAudioTake { .. } => "PunchAudioTake",
         Command::UpdateAudioClip { .. } => "UpdateAudioClip",
@@ -231,6 +263,10 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
     let gid = audio_track(m);
     let take = take_source();
     let punch_take = take_source();
+    let fetched = sample_source();
+    let flip = sampler_track(m);
+    let mut reflipped = flip.sampler.clone().unwrap();
+    reflipped.chops.reverse();
     let existing = m.audio_clips[0].clone();
     let (chain, master) = (InsertTarget::Track(t0), InsertTarget::Master);
     let (first, second) = (m.tracks[0].inserts[0].id, m.tracks[0].inserts[1].id);
@@ -430,6 +466,15 @@ fn one_of_every_variant(m: &ProjectModel) -> Vec<Command> {
                 },
                 ..AmpRig::default()
             },
+        },
+        Command::AddSamplerTrack {
+            name: "never gonna".into(),
+            sampler: Sampler::new(fetched.id, chops_at(&[0.5, 2.0], 8.0)),
+            source: fetched,
+        },
+        Command::SetSampler {
+            id: flip.id,
+            sampler: reflipped,
         },
         Command::AddAudioTake {
             track_id: gid,

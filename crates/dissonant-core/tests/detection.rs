@@ -17,6 +17,7 @@ fn song() -> (Document, Uuid) {
         frames: 96_000,
         sample_rate: 48_000,
         channels: 1,
+        origin_url: None,
     };
     let clip = AudioClip::new(guitar.id, source.id, 4 * BEAT, 2.0);
     let clip_id = clip.id;

@@ -687,6 +687,7 @@ export function Arrangement() {
               </span>
               <button className="chip tiny" onClick={() => dispatch({ type: "addTrack", isDrum: false })}>+ inst</button>
               <button className="chip tiny" onClick={() => dispatch({ type: "addTrack", isDrum: true })}>+ drum</button>
+              <button className="chip tiny" onClick={() => s.openSampler()} title="new sampler track from a link">+ smp</button>
             </div>
             <div className="r">
               <span className="mono" style={{ color: "var(--text-5)" }} title="song length: change it in SETUP">

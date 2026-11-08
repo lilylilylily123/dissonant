@@ -8,6 +8,7 @@ import { FACTORY_SOUNDS, factorySound, filledPatch, isFactory, MAX_DRUM_PADS, us
 import { historyOf, record, redo, seal, throttle, undo, type History } from "../../soundDesign";
 import { midiName } from "../../theory";
 import { keys } from "../../platform";
+import { trackKind } from "../../types";
 import { DrumPadButton, DRUM_PITCH, Keyboard, useAudition } from "./AuditionKeys";
 import type { EditPatch } from "./Controls";
 import { DrumEditor } from "./DrumEditor";
@@ -213,7 +214,8 @@ export function SoundPage() {
   };
 
   // ─── Use on a track ───────────────────────────────────────────────────────────────────────
-  const targets = model.tracks.filter((t) => t.isDrum === (kind === "drum"));
+  // Only the tracks a sound can go on: a sampler plays its chops and an audio track its takes.
+  const targets = model.tracks.filter((t) => trackKind(t) === (kind === "drum" ? "drum" : "midi"));
   const [targetId, setTargetId] = useState<string | null>(null);
   const target = targets.find((t) => t.id === targetId) ?? targets.find((t) => t.id === selected?.id) ?? targets[0] ?? null;
   /** The pad the sound replaces, or NEW_PAD to add it to the kit. */

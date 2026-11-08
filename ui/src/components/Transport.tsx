@@ -84,6 +84,7 @@ export function Transport() {
           <div className={s.screen === "song" ? "on" : ""} onClick={() => s.setScreen("song")} title="song: the arrangement (Tab cycles)">song</div>
           <div className={s.screen === "rec" ? "on" : ""} onClick={() => s.setScreen("rec")} title="rec: input, tuner, takes and the rig">rec</div>
           <div className={s.screen === "sound" ? "on" : ""} onClick={() => s.setScreen("sound")} title="sound: design synth and drum sounds, saved for every project">sound</div>
+          <div className={s.screen === "sample" ? "on" : ""} onClick={() => s.setScreen("sample")} title="sample: chop a sampler track's source onto keys and pads">smp</div>
         </div>
       </div>
       <div className="tdiv" />
@@ -283,7 +284,7 @@ export function Transport() {
               onChange={(e) => void s.dispatch({ type: "setSwing", swing: Number(e.target.value), gridTicks: swingGridTicks }, true, "set swing")}
               onPointerUp={() => void s.commitGesture()}
             />
-            <select value={swingGridTicks} onChange={(e) => s.dispatch({ type: "setSwing", swing, gridTicks: Number(e.target.value) })} style={{ height: 16, padding: "0 12px 0 3px", fontSize: 9 }}>
+            <select value={swingGridTicks} onChange={(e) => s.dispatch({ type: "setSwing", swing, gridTicks: Number(e.target.value) })} style={{ height: 16, padding: "0 16px 0 3px", fontSize: 9 }}>
               <option value={480}>8th</option>
               <option value={240}>16th</option>
             </select>
@@ -300,7 +301,7 @@ export function Transport() {
               const [n, d] = e.target.value.split("/").map(Number);
               void s.dispatch({ type: "setTimeSignature", numerator: n, denominator: d });
             }}
-            style={{ height: 18, padding: "0 14px 0 4px" }}
+            style={{ height: 18, padding: "0 16px 0 4px" }}
           >
             {TIME_SIGNATURES.map((t) => (
               <option key={`${t.numerator}/${t.denominator}`} value={`${t.numerator}/${t.denominator}`}>

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { dbText, selectedPattern, selectedTrack, selectedTrackIndex, useStore } from "../store";
 import { kitSounds, matchingKit, movePad, padName, pitchProblem, removePad, replacePad } from "../drumKit";
 import { lookupSound, MAX_DRUM_PADS, type DrumPad, type Sound } from "../sound";
-import { midiName } from "../theory";
+import { midiName, noteName } from "../theory";
+import { sourceSeconds } from "../sampler";
 import { usePanelSize } from "../panels";
 import { Splitter } from "./Splitter";
 import {
@@ -58,7 +59,7 @@ export function BottomPanel() {
               {String(index + 1).padStart(2, "0")} {track.name}
             </span>
             <span className="mono" style={{ fontSize: 9.5, color: "var(--text-5)", marginLeft: 10 }}>
-              {track.plugin ? `plugin · ${track.plugin.name}` : track.isDrum ? `drum kit · ${track.drumPads.length} pads` : `synth · ${soundName}`} · {noteCount} notes in {pattern?.name ?? "—"}
+              {track.plugin ? `plugin · ${track.plugin.name}` : track.sampler ? `sampler · ${track.sampler.chops.length} chops` : track.isDrum ? `drum kit · ${track.drumPads.length} pads` : `synth · ${soundName}`} · {noteCount} notes in {pattern?.name ?? "—"}
             </span>
           </>
         )}
@@ -100,6 +101,8 @@ function Devices() {
             <InstrumentPicker columns={3} />
           </div>
         </div>
+      ) : track.sampler ? (
+        <SamplerDevice track={track} />
       ) : track.isDrum ? (
         <DrumKitDevice track={track} />
       ) : (
@@ -358,6 +361,43 @@ function SynthDevice({ track }: { track: Track }) {
         <SoundPicker inline kind="synth" value={track.voice} onPick={pick} />
         <span className="flabel">or a plugin</span>
         <InstrumentPicker columns={3} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The sampler track's instrument: which source it cuts up and how many keys that makes. The
+ * chopping itself happens on SAMPLE, which needs the room of a whole screen.
+ */
+function SamplerDevice({ track }: { track: Track }) {
+  const setScreen = useStore((s) => s.setScreen);
+  const source = useStore((s) => (s.snapshot?.model.audioSources ?? []).find((x) => x.id === track.sampler?.sourceId));
+  const sampler = track.sampler!;
+  const n = sampler.chops.length;
+  return (
+    <div className="device synthdev" style={{ width: 270 }}>
+      <div className="title">
+        <span className="led" />
+        <span>sampler</span>
+        <span className="meta">{source ? `${sourceSeconds(source).toFixed(1)}s` : "missing audio"}</span>
+      </div>
+      <div className="pad">
+        <div className="row">
+          <span className="devname" title={source?.originUrl ?? source?.name}>{source?.name ?? "missing audio"}</span>
+          <span className="spacer" />
+          <button className="chip tiny" onClick={() => setScreen("sample")} title="open the SAMPLE screen to chop and shape this source">edit ↗</button>
+        </div>
+        <span className="mono" style={{ fontSize: 10, color: "var(--text-3)" }}>
+          {n} chop{n === 1 ? "" : "s"}
+          {n > 0 ? ` · ${midiName(sampler.basePitch)}–${midiName(sampler.basePitch + n - 1)}` : ""}
+        </span>
+        {sampler.analysis && (
+          <span className="mono" style={{ fontSize: 9.5, color: "var(--text-5)" }}>
+            {sampler.analysis.bpm !== null ? `${sampler.analysis.bpm.toFixed(1)} bpm` : "no tempo"}
+            {sampler.analysis.keyRoot !== null ? ` · ${noteName(sampler.analysis.keyRoot)} ${sampler.analysis.keyScale}` : ""}
+          </span>
+        )}
       </div>
     </div>
   );

@@ -85,6 +85,9 @@ export function Inspector() {
   }
   const color = trackColor(track, trackIdx);
   const notes = pattern.notes;
+  // A sampler pattern's notes are hits on chops: rhythm tools only, nothing about pitch or harmony.
+  const chops = !!track.sampler;
+  const hitsWord = track.isDrum || chops ? "hits" : "notes";
   const selected = notes.filter((n) => s.selectedNoteIds.includes(n.id));
   const stats = selected.length ? selected : notes;
 
@@ -168,7 +171,7 @@ export function Inspector() {
             </div>
           </div>
           <div className="field">
-            <span className="flabel">{track.isDrum ? "hits" : "notes"}</span>
+            <span className="flabel">{hitsWord}</span>
             <span className="val">{notes.length}</span>
           </div>
           <div className="row" style={{ gap: 4 }}>
@@ -189,10 +192,10 @@ export function Inspector() {
         {/* NOTES */}
         <div className="section" style={{ gap: 6 }}>
           <div className="head">
-            <span className="cap">{track.isDrum ? "hits" : "notes"} · {notes.length}</span>
+            <span className="cap">{hitsWord} · {notes.length}</span>
             {selected.length > 0 && <span className="badge">{selected.length} selected</span>}
           </div>
-          <RangeRow label="pitch" lo={pitchR ? (pitchR[0] - 24) / 72 : 0} hi={pitchR ? (pitchR[1] - 24) / 72 : 0} color={color} text={pitchR ? (track.isDrum ? `${pitchR[0]} – ${pitchR[1]}` : `${midiName(pitchR[0])} – ${midiName(pitchR[1])}`) : "—"} />
+          {!chops && <RangeRow label="pitch" lo={pitchR ? (pitchR[0] - 24) / 72 : 0} hi={pitchR ? (pitchR[1] - 24) / 72 : 0} color={color} text={pitchR ? (track.isDrum ? `${pitchR[0]} – ${pitchR[1]}` : `${midiName(pitchR[0])} – ${midiName(pitchR[1])}`) : "—"} />}
           <RangeRow label="velocity" lo={velR ? velR[0] / 127 : 0} hi={velR ? velR[1] / 127 : 0} color={color} text={velR ? `${velR[0]} – ${velR[1]}` : "—"} />
           <RangeRow label="length" lo={lenR ? Math.min(1, lenR[0] / (4 * TICKS_PER_BEAT)) : 0} hi={lenR ? Math.min(1, lenR[1] / (4 * TICKS_PER_BEAT)) : 0} color="#9a9aa4" text={lenR ? `${gridLabel(lenR[0])} – ${gridLabel(lenR[1])}` : "—"} />
           {selected.length > 0 && !track.isDrum && (
@@ -207,7 +210,7 @@ export function Inspector() {
               </button>
             </div>
           )}
-          {selected.length === 1 && !track.isDrum && <ResolveKeep note={selected[0]} />}
+          {selected.length === 1 && !track.isDrum && !chops && <ResolveKeep note={selected[0]} />}
         </div>
 
         {/* TRANSFORM */}
@@ -218,15 +221,17 @@ export function Inspector() {
               <span className="mono" style={{ fontSize: 9, color: "var(--text-5)" }}>{selected.length ? `${selected.length} selected` : "all notes"}</span>
             </div>
             <TransformGrid />
-            <div className="chipsrow">
-              <button className={`chip${s.magnet ? " on" : ""}`} onClick={() => s.toggleMagnet()} title="pull placed and dragged notes to the nearest chord tone (then tension) — a magnet, not a wall">magnet</button>
-              <button className={`chip${s.stamp ? " on" : ""}`} onClick={() => s.toggleStamp()} title="click places the whole chord under the cursor, voiced upward">stamp chord</button>
-            </div>
+            {!chops && (
+              <div className="chipsrow">
+                <button className={`chip${s.magnet ? " on" : ""}`} onClick={() => s.toggleMagnet()} title="pull placed and dragged notes to the nearest chord tone (then tension) — a magnet, not a wall">magnet</button>
+                <button className={`chip${s.stamp ? " on" : ""}`} onClick={() => s.toggleStamp()} title="click places the whole chord under the cursor, voiced upward">stamp chord</button>
+              </div>
+            )}
           </div>
         )}
 
         {/* HARMONY (read-only: the progression, sections and keys live in SETUP) */}
-        {!track.isDrum && (
+        {!track.isDrum && !chops && (
           <div className="section">
             <div className="head">
               <span className="cap">harmony</span>
@@ -298,9 +303,11 @@ export function Inspector() {
                   : "bypassed"
                 : track.plugin
                   ? "clap plugin"
-                  : track.isDrum
-                    ? `${track.drumPads.length} pads`
-                    : "waveform synth"}
+                  : track.sampler
+                    ? `${track.sampler.chops.length} chops`
+                    : track.isDrum
+                      ? `${track.drumPads.length} pads`
+                      : "waveform synth"}
             </span>
           </div>
           {track.isAudio ? (
@@ -309,6 +316,15 @@ export function Inspector() {
               <span className="n">amp + cab</span>
               <span className="spacer" />
               <span className="meta">edit on the rec page →</span>
+            </div>
+          ) : track.sampler ? (
+            <div className="devchip" style={{ cursor: "pointer" }} onClick={() => s.setScreen("sample")} title="open the SAMPLE screen to chop and shape this source">
+              <span className="led on" />
+              <span className="n">sampler</span>
+              <span className="spacer" />
+              <span className="meta">
+                {(model.audioSources ?? []).find((x) => x.id === track.sampler!.sourceId)?.name ?? "missing audio"} · edit on SAMPLE →
+              </span>
             </div>
           ) : (
             <>
@@ -390,6 +406,9 @@ function InspectorHead({ onCollapse }: { onCollapse: () => void }) {
   );
 }
 
+/** The transforms a sampler pattern keeps: timing and order. The rest stack, spread or mirror pitches. */
+const SAMPLER_TOOLS: Record<string, true> = { quantize: true, humanize: true, legato: true, "×2 slower": true, "½ faster": true, reverse: true };
+
 function TransformGrid() {
   const s = useStore();
   const pattern = useStore(selectedPattern);
@@ -406,9 +425,11 @@ function TransformGrid() {
   const notes = pattern.notes;
   const ids = new Set(s.selectedNoteIds);
   const grid = s.noteLength;
-  const tierOf = (n: { pitch: number; startTick: number }) => tierMap(n.startTick, chords, key)[((n.pitch % 12) + 12) % 12];
+  // A chop has no chord tone to hold tighter, so a sampler's hits all loosen alike.
+  const chops = !!track.sampler;
+  const tierOf = (n: { pitch: number; startTick: number }) => (chops ? null : tierMap(n.startTick, chords, key)[((n.pitch % 12) + 12) % 12]);
   const apply = (next: typeof notes, label: string) => void s.dispatch({ type: "setNotes", patternId: pattern.id, notes: next }, false, label);
-  const tools: [string, string, () => void][] = [
+  const all: [string, string, () => void][] = [
     ["quantize", `pull starts and lengths toward the grid, ${Math.round(strength * 100)}% of the way`, () => apply(quantizeNotes(notes, ids, grid, strength), "quantize")],
     ["humanize", `loosen timing by up to ${Math.round(drift * 100)}% of the grid and velocity by ±${velDrift}; chord tones stay tighter`, () => apply(humanizeNotes(notes, ids, { timing: grid * drift, velocity: velDrift }, tierOf), "humanize")],
     ["legato", "extend each note to the next one", () => apply(legatoNotes(notes, ids), "legato")],
@@ -423,6 +444,7 @@ function TransformGrid() {
     ["reverse", "play the selection backwards in time", () => apply(reverseNotes(notes, ids), "reverse notes")],
     ["invert", "mirror pitches around the selection's middle", () => apply(invertNotes(notes, ids, { min: 24, max: 96 }), "invert notes")],
   ];
+  const tools = chops ? all.filter(([label]) => SAMPLER_TOOLS[label]) : all;
   return (
     <>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>

@@ -6,6 +6,7 @@ import { TrackTree } from "./components/TrackTree";
 import { Arrangement } from "./components/Arrangement";
 import { Setup } from "./components/Setup";
 import { SoundPage } from "./components/sound/SoundPage";
+import { SamplePage } from "./components/sample/SamplePage";
 import { BottomPanel } from "./components/BottomPanel";
 import { Inspector } from "./components/Inspector";
 import { Editor } from "./components/Editor";
@@ -62,8 +63,10 @@ export default function App() {
         return;
       }
       const k = e.key.toLowerCase();
-      // SOUND plays the draft from the keyboard and keeps its own undo for it.
+      // SOUND plays the draft from the keyboard and keeps its own undo for it. SAMPLE plays its
+      // pads from the letter keys but edits the song, so ⌘Z there is the song's undo.
       const soundPage = s.screen === "sound";
+      const lettersArePads = soundPage || s.screen === "sample";
       if (soundPage && mod && (k === "z" || k === "y")) return;
       if (e.code === "Space") {
         e.preventDefault();
@@ -101,7 +104,7 @@ export default function App() {
         // Tab cycles the working screens in the order the transport lists them; from SETUP it
         // goes to the pattern editor.
         s.setScreen(s.screen === "pattern" ? "song" : s.screen === "song" ? "rec" : "pattern");
-      } else if (soundPage) {
+      } else if (lettersArePads) {
         // Letters are notes here.
       } else if (!mod && s.liveKeyboard === "off" && k === "l") {
         s.toggleLooping();
@@ -137,6 +140,8 @@ export default function App() {
           <Setup />
         ) : screen === "sound" ? (
           <SoundPage />
+        ) : screen === "sample" ? (
+          <SamplePage />
         ) : screen === "rec" ? (
           <RecPage />
         ) : screen === "song" ? (

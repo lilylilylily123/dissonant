@@ -16,6 +16,7 @@ pub mod effects;
 pub mod midi_file;
 pub mod model;
 pub mod ripple;
+pub mod sampler;
 pub mod sequence;
 pub mod sound;
 pub mod tempo;
@@ -40,6 +41,14 @@ pub use model::{
     DEFAULT_PUNCH_CROSSFADE_SECONDS, DEFAULT_SONG_BARS, MAX_CLIP_GAIN, MAX_DETECTED_CHORDS,
     MAX_FADE_SECONDS, MAX_FINE_CENTS, MAX_INSERTS, MAX_PEDALS, MAX_PITCH_POINTS, MAX_SHIFT_TICKS,
     MAX_SLIDE_SECS, MIN_NOTE_TICKS, PITCH_DECIMATE_CENTS, ROPE_OVERLAP_SECS, SCHEMA_VERSION,
+};
+pub use sampler::{
+    chop_region, chops_at, rechop, strongest_onsets, suggested_region, Chop, ChopMode, Chopper,
+    GridStep, Onset, SampleAnalysis, SampleRegion, Sampler, SamplerVoice,
+    DEFAULT_CHOP_COUNT, DEFAULT_CHOP_RELEASE_SECONDS, DEFAULT_SAMPLER_BASE_PITCH,
+    MAX_CHOKE_GROUP, MAX_CHOP_ATTACK_SECONDS, MAX_CHOP_GAIN, MAX_CHOP_RELEASE_SECONDS, MAX_CHOPS,
+    MAX_ONSETS, MAX_SAMPLE_SECONDS, MIN_CHOP_SECONDS, STRONG_ONSET, SUGGESTED_REGION_BARS,
+    SUGGESTED_REGION_SECONDS,
 };
 pub use sequence::{
     MasterAutomation, NoteRope, Sequence, SequenceAudioClip, SequenceTrack, TrackAutomation,

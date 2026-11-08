@@ -31,6 +31,7 @@ fn dc_source(seconds: f64, level: f32) -> (AudioSource, AudioBuffer) {
         frames: frames as u64,
         sample_rate: SR as u32,
         channels: 1,
+        origin_url: None,
     };
     (source, AudioBuffer::new(SR as u32, 1, vec![level; frames]))
 }
@@ -54,6 +55,7 @@ fn noise_source(seconds: f64, level: f32, seed: u64) -> (AudioSource, AudioBuffe
         frames: frames as u64,
         sample_rate: SR as u32,
         channels: 1,
+        origin_url: None,
     };
     (source, AudioBuffer::new(SR as u32, 1, data))
 }

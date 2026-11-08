@@ -57,8 +57,8 @@ export function useLiveKeyboard() {
     let octave = 0;
     const onDown = (e: KeyboardEvent) => {
       const s = useStore.getState();
-      // SOUND routes the keyboard to its own preview channel.
-      if (s.liveKeyboard === "off" || s.screen === "sound" || e.metaKey || e.ctrlKey || e.altKey || isTyping(e.target) || e.repeat) return;
+      // SOUND routes the keyboard to its own preview channel; SAMPLE plays its pads from it.
+      if (s.liveKeyboard === "off" || s.screen === "sound" || s.screen === "sample" || e.metaKey || e.ctrlKey || e.altKey || isTyping(e.target) || e.repeat) return;
       if (e.key === "z" && s.liveKeyboard === "tier") return; // unused in tier mode
       if (e.key === "-" || e.key === "+" || e.key === "=") {
         octave = Math.max(-2, Math.min(2, octave + (e.key === "-" ? -1 : 1)));

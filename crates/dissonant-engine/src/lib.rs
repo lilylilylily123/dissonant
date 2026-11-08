@@ -23,6 +23,8 @@ pub mod engine;
 pub mod input;
 pub mod render;
 pub mod rig;
+pub mod sample_analysis;
+pub mod sampler;
 pub mod synth;
 pub mod tuner;
 
@@ -47,4 +49,6 @@ pub use render::{
     normalize, render_to_buffer, render_wav, write_wav, RenderError, RenderOptions, RenderPlugins,
 };
 pub use rig::Rig;
+pub use sample_analysis::{analyze, Analysis};
+pub use sampler::{SamplerInstrument, SAMPLER_POLYPHONY};
 pub use tuner::{Pitch, PitchTracker};

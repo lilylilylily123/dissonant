@@ -1,5 +1,5 @@
 import { useRef, type KeyboardEvent, type PointerEvent } from "react";
-import { clampPanel, panelDefault, panelSize, setPanelSize, usePanelSize, type PanelId } from "../panels";
+import { clampPanel, panelSize, resetPanel, setPanelSize, usePanelSize, type PanelId } from "../panels";
 
 /**
  * The draggable seam next to a panel. It is a real flex item between the two panes rather than
@@ -67,7 +67,7 @@ export function Splitter({
       tabIndex={0}
       title={`drag to resize ${label} · double-click to reset · arrows nudge (⇧ faster)`}
       onPointerDown={onPointerDown}
-      onDoubleClick={() => setPanelSize(panel, panelDefault(panel))}
+      onDoubleClick={() => resetPanel(panel)}
       onKeyDown={onKeyDown}
     />
   );

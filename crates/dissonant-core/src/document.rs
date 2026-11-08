@@ -9,9 +9,10 @@ use crate::automation::{AutoTarget, AutomationLane, Breakpoint, Curve};
 use crate::midi_file::ImportedTrack;
 use crate::model::{
     AmpRig, AudioClip, AudioSource, ChordEvent, Clip, ClipDetection, Insert, KeyState,
-    MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track, TrackPlugin,
+    MasterSettings, NoteEvent, ProjectModel, Section, SongPattern, Track, TrackKind, TrackPlugin,
     DEFAULT_PUNCH_CROSSFADE_SECONDS, MAX_FADE_SECONDS, MAX_INSERTS,
 };
+use crate::sampler::Sampler;
 use crate::sound::{is_factory, valid_kit, DrumPad, Sound};
 use crate::tempo::{TempoMap, TempoPoint};
 use crate::ticks::TICKS_PER_BEAT;
@@ -317,6 +318,19 @@ pub enum Command {
         id: Uuid,
         amp: AmpRig,
     },
+    /// A new sampler track over `source`, in one undo step: the source lands in the project
+    /// (replacing one with the same id) and the track arrives with `sampler` and one empty
+    /// pattern to write into, as [`Command::AddTrack`] does.
+    AddSamplerTrack {
+        name: String,
+        source: AudioSource,
+        sampler: Sampler,
+    },
+    /// Replace a sampler track's whole sampler (one chop edge drag is one of these).
+    SetSampler {
+        id: Uuid,
+        sampler: Sampler,
+    },
     /// One undo step for "a new recording appeared": the source and its first clip together,
     /// since a source with nothing pointing at it is invisible and a clip without its source
     /// is dropped on load.
@@ -438,6 +452,8 @@ pub enum EditError {
     NoRope,
     #[error("no such detected chord")]
     NoSuchDetectedChord,
+    #[error("not a sampler track")]
+    NotASamplerTrack,
 }
 
 /// One undo step: the model before the edit, and what the edit was ("move notes").
@@ -728,6 +744,8 @@ impl Command {
             ClearAutomation { .. } => "clear automation",
             AddAudioTrack { .. } => "add audio track",
             SetTrackAmp { .. } => "edit rig",
+            AddSamplerTrack { .. } => "add sampler track",
+            SetSampler { .. } => "edit sampler",
             AddAudioTake { .. } => "add audio",
             PunchAudioTake { .. } => "punch in",
             UpdateAudioClip { .. } => "edit audio clip",
@@ -1474,6 +1492,49 @@ fn apply_to(m: &mut ProjectModel, command: Command) -> Result<(), EditError> {
                 return Err(EditError::NotAnAudioTrack);
             }
             t.amp = Some(amp);
+        }
+        AddSamplerTrack {
+            name,
+            source,
+            sampler,
+        } => {
+            // A sampler over some other source would play nothing the moment it landed.
+            if sampler.source_id != source.id {
+                return Err(EditError::InvalidValue);
+            }
+            if source.sample_rate == 0 || source.channels == 0 || source.frames == 0 {
+                return Err(EditError::InvalidValue);
+            }
+            let sampler = sampler
+                .sanitized(source.duration_seconds())
+                .ok_or(EditError::InvalidValue)?;
+            let name = if name.trim().is_empty() {
+                "sample".to_string()
+            } else {
+                name
+            };
+            match m.audio_sources.iter_mut().find(|s| s.id == source.id) {
+                Some(slot) => *slot = source,
+                None => m.audio_sources.push(source),
+            }
+            let track = Track::sampler(name, sampler);
+            let pattern = SongPattern::new(track.id, next_pattern_name(m, &track));
+            m.tracks.push(track);
+            m.patterns.push(pattern);
+        }
+        SetSampler { id, sampler } => {
+            let t = m.track(&id).ok_or(EditError::NoSuchTrack)?;
+            if t.kind() != TrackKind::Sampler {
+                return Err(EditError::NotASamplerTrack);
+            }
+            let source = m
+                .audio_source(&sampler.source_id)
+                .ok_or(EditError::NoSuchAudioSource)?;
+            let sampler = sampler
+                .sanitized(source.duration_seconds())
+                .ok_or(EditError::InvalidValue)?;
+            let t = m.track_mut(&id).ok_or(EditError::NoSuchTrack)?;
+            t.sampler = Some(sampler);
         }
         AddAudioTake {
             track_id,

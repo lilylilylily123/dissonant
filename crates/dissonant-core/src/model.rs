@@ -811,15 +811,21 @@ pub struct Track {
     /// A drum track's kit, top to bottom (1–16 pads, unique pitches). Ignored on synth tracks.
     #[serde(default = "crate::sound::default_kit")]
     pub drum_pads: Vec<crate::sound::DrumPad>,
+    /// Set on a sampler track: the source it cuts up and the chops its keys play. A note track
+    /// otherwise (piano roll, patterns), with the chops in place of a synth voice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler: Option<crate::sampler::Sampler>,
 }
 
-/// What a track plays. Derived from the booleans rather than replacing them: `isDrum` is in
-/// every file ever written and pinned by the IPC contract.
+/// What a track plays. Derived from the booleans and the sampler rather than replacing them:
+/// `isDrum` is in every file ever written and pinned by the IPC contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackKind {
     Midi,
     Drum,
     Audio,
+    /// Notes that play chops of one audio source ([`Track::sampler`]).
+    Sampler,
 }
 
 impl Track {
@@ -841,6 +847,7 @@ impl Track {
             amp: None,
             inserts: vec![],
             drum_pads: crate::sound::default_kit(),
+            sampler: None,
         }
     }
 
@@ -858,10 +865,20 @@ impl Track {
         t
     }
 
-    /// Audio wins over drum; [`ProjectModel::normalized`] guarantees they are never both set.
+    /// A new sampler track playing `sampler`'s chops.
+    pub fn sampler(name: impl Into<String>, sampler: crate::sampler::Sampler) -> Self {
+        let mut t = Track::new(name);
+        t.sampler = Some(sampler);
+        t
+    }
+
+    /// Audio wins over sampler, sampler over drum; [`ProjectModel::normalized`] guarantees no
+    /// two of them are ever set together.
     pub fn kind(&self) -> TrackKind {
         if self.is_audio {
             TrackKind::Audio
+        } else if self.sampler.is_some() {
+            TrackKind::Sampler
         } else if self.is_drum {
             TrackKind::Drum
         } else {
@@ -883,6 +900,10 @@ pub struct AudioSource {
     pub frames: u64,
     pub sample_rate: u32,
     pub channels: u8,
+    /// The page it was fetched from, when it came from a link: shown on the SAMPLE screen so a
+    /// flip can be traced back to what it flipped. `None` for recordings and imported files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
 }
 
 impl AudioSource {
@@ -2451,16 +2472,29 @@ impl ProjectModel {
         }
         self.fit_clips_to_song();
         self.clips.sort_by_key(|c| c.start_tick);
-        // An audio track is never also a drum track, and always carries a rig; a note track
-        // never does. The combinations the UI cannot produce are still reachable by hand-editing
-        // a file, so they are resolved here rather than guarded at every read.
+        // An audio track is never also a drum or sampler track, and always carries a rig; a
+        // note track never does. A sampler track is no drum track and hosts no plugin: its
+        // chops are its voice. The combinations the UI cannot produce are still reachable by
+        // hand-editing a file, so they are resolved here rather than guarded at every read.
         for t in &mut self.tracks {
             if t.is_audio {
                 t.is_drum = false;
+                t.sampler = None;
                 let rig = t.amp.take().unwrap_or_default();
                 t.amp = Some(rig.sanitized().unwrap_or_default());
             } else {
                 t.amp = None;
+            }
+            if let Some(mut sampler) = t.sampler.take() {
+                t.is_drum = false;
+                t.plugin = None;
+                // A missing source keeps the sampler as written: it plays silence and the UI
+                // says the audio is missing, but the chops survive for when it comes back.
+                if let Some(source) = self.audio_sources.iter().find(|s| s.id == sampler.source_id) {
+                    sampler.chops.truncate(crate::sampler::MAX_CHOPS);
+                    sampler = sampler.sanitized(source.duration_seconds()).unwrap_or(sampler);
+                }
+                t.sampler = Some(sampler);
             }
             sanitize_inserts(&mut t.inserts);
         }

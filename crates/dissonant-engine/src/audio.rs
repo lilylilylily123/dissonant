@@ -37,7 +37,7 @@ impl AudioBuffer {
     /// One frame's left and right samples. Mono sources feed both sides; anything past stereo
     /// is folded down to its first two channels.
     #[inline]
-    fn frame(&self, i: isize) -> (f32, f32) {
+    pub(crate) fn frame(&self, i: isize) -> (f32, f32) {
         if i < 0 || i as usize >= self.frames {
             return (0.0, 0.0);
         }
@@ -287,7 +287,7 @@ fn equal_power(t: f64) -> f64 {
 
 /// Catmull-Rom through `p1`/`p2`, using `p0`/`p3` for the slopes.
 #[inline]
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+pub(crate) fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
     let a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
     let b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
     let c = -0.5 * p0 + 0.5 * p2;

@@ -7,6 +7,8 @@ import {
   useStore,
 } from "../store";
 import { barLabel } from "./Editor";
+import { midiName } from "../theory";
+import { sourceSeconds } from "../sampler";
 
 export function StatusBar() {
   const snapshot = useStore((s) => s.snapshot!);
@@ -35,8 +37,27 @@ export function StatusBar() {
   const takes = (snapshot.model.audioClips ?? []).filter(
     (c) => c.trackId === audioTrack?.id,
   ).length;
+  const sampler = track?.sampler;
+  const sampleSource = sampler ? (m.audioSources ?? []).find((x) => x.id === sampler.sourceId) : undefined;
+  // What a sampler pattern is played with: its chops, its voice and the region they came from.
+  // It stands in for the chord facts, which mean nothing to chops.
+  const samplerFacts = sampler
+    ? [
+        `${sampler.chops.length} chop${sampler.chops.length === 1 ? "" : "s"} from ${midiName(sampler.basePitch)}`,
+        sampler.voice,
+        !sampleSource
+          ? "missing audio"
+          : sampler.region
+            ? `region ${(sampler.region.endSeconds - sampler.region.startSeconds).toFixed(2)}s of ${sourceSeconds(sampleSource).toFixed(1)}s`
+            : `${sourceSeconds(sampleSource).toFixed(1)}s`,
+      ].join(" · ")
+    : null;
   const context =
-    screen === "rec"
+    screen === "sample"
+      ? track && samplerFacts
+        ? `sample · ${track.name} · ${samplerFacts}`
+        : "sample · no sampler track selected"
+      : screen === "rec"
       ? `rec · ${audioTrack?.name ?? "no audio track"} · ${takes} clip${takes === 1 ? "" : "s"}${
           audioTrack?.amp
             ? ` · ${audioTrack.amp.enabled ? audioTrack.amp.amp.model : "rig off"}`
@@ -47,10 +68,10 @@ export function StatusBar() {
         : screen === "pattern"
           ? [
               target,
-              `${noteCount} ${track?.isDrum ? "hits" : "notes"}${selectedNoteIds.length ? ` · ${selectedNoteIds.length} selected` : ""}`,
+              `${noteCount} ${track?.isDrum || sampler ? "hits" : "notes"}${selectedNoteIds.length ? ` · ${selectedNoteIds.length} selected` : ""}`,
               `snap ${gridLabel(noteLength)}`,
-              `chords from ${barLabel(chordOffsetTicks, barTick)}`,
-              hearChords ? "chord bed on" : null,
+              samplerFacts ?? `chords from ${barLabel(chordOffsetTicks, barTick)}`,
+              !sampler && hearChords ? "chord bed on" : null,
               ghost ? `ghost ${ghostTrack?.name ?? "?"} › ${ghost.name}` : null,
             ]
               .filter(Boolean)
@@ -62,8 +83,14 @@ export function StatusBar() {
       <span style={{ color: audio?.running ? "var(--ok)" : "var(--rec-text)" }}>
         ● {audio?.running ? "READY" : "NO AUDIO"}
       </span>
-      <span>{context}</span>
-      {(armed || recordingAudio) && <span style={{ color: "var(--rec-text)" }}>● REC → {target ?? "no pattern"}</span>}
+      <span className="sb-fit" title={context}>
+        {context}
+      </span>
+      {(armed || recordingAudio) && (
+        <span className="sb-fit" style={{ color: "var(--rec-text)" }}>
+          ● REC → {target ?? "no pattern"}
+        </span>
+      )}
       {liveKeyboard !== "off" && (
         <span style={{ color: "var(--accent)" }}>
           keys: {liveKeyboard} → {track?.name ?? "—"}
