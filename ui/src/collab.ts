@@ -15,6 +15,16 @@ export interface PeerInfo {
   isHost: boolean;
 }
 
+/** Someone at the door, waiting for the host to let them in. */
+export interface JoinRequest {
+  /** Their peer id. */
+  id: string;
+  name: string;
+  color: string;
+  /** The 3 verification words: the person sees the same ones on their screen. */
+  words: string[];
+}
+
 export interface SessionState {
   role: "solo" | "host" | "guest";
   /** A guest who has the project and can hear the host. A host always is. */
@@ -22,13 +32,68 @@ export interface SessionState {
   /** A guest who lost the host and is trying to get back. */
   reconnecting: boolean;
   you: string | null;
-  /** The invite to pass around, for a host. */
+  /** Host: the current join code, "ABC-DEF". Null when closed to new people, or while the first one is being made. */
   code: string | null;
+  /** Host: when `code` stops working, unix ms. Null with no code. */
+  codeExpiresAt: number | null;
+  /** Host: letting new people knock. Always true for guests and solo. */
+  open: boolean;
+  /** Host: people waiting to be let in, oldest first. Empty otherwise. */
+  requests: JoinRequest[];
+  /** Guest: connected and waiting for the host to let them in. */
+  waiting: boolean;
+  /** Guest: the 3 verification words for this connection to the host, once connected. */
+  words: string[] | null;
   peers: PeerInfo[];
   path: "direct" | "relayed" | null;
 }
 
-export const SOLO: SessionState = { role: "solo", live: false, reconnecting: false, you: null, code: null, peers: [], path: null };
+export const SOLO: SessionState = {
+  role: "solo",
+  live: false,
+  reconnecting: false,
+  you: null,
+  code: null,
+  codeExpiresAt: null,
+  open: true,
+  requests: [],
+  waiting: false,
+  words: null,
+  peers: [],
+  path: null,
+};
+
+// ─── Join codes ──────────────────────────────────────────────────────────────────────────────
+
+/** The characters a join code is made of: no 0/O, 1/I or L, which read alike. */
+export const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+export const CODE_LENGTH = 6;
+
+/** What someone typed or pasted, uppercased, without spaces or dashes, at most a code long. */
+export function cleanCode(typed: string): string {
+  return typed
+    .toUpperCase()
+    .replace(/[\s-]/g, "")
+    .slice(0, CODE_LENGTH);
+}
+
+/** A cleaned code shown the way hosts see it: "ABC-DEF", the dash once there is a fourth character. */
+export function formatCode(clean: string): string {
+  return clean.length > 3 ? `${clean.slice(0, 3)}-${clean.slice(3)}` : clean;
+}
+
+/** Why a cleaned code can't be right, for the person typing it, or null if nothing is wrong yet. */
+export function codeProblem(clean: string): string | null {
+  const bad = [...clean].filter((c) => !CODE_ALPHABET.includes(c));
+  if (bad.length === 0) return null;
+  if (bad.every((c) => "0O1IL".includes(c))) return "codes never use 0, o, 1, i or l, so they can't be misread. check that character again.";
+  return "codes are only letters and numbers.";
+}
+
+/** A cleaned code that is ready to send. */
+export function codeComplete(clean: string): boolean {
+  return clean.length === CODE_LENGTH && codeProblem(clean) === null;
+}
 
 /** A cursor in a pattern: `frac` is how far down the pitch's row it sits, 0–1. */
 export interface PatternCursor {

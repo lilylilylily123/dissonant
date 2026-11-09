@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 /// Bumped on any change to these messages or to [`Command`]. Everyone in a session has to match,
 /// because a command that one side can't read would quietly lose someone's edit.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Who somebody is, for the presence bar and their cursor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,10 +31,11 @@ pub enum OpBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ToHost {
+    /// Who is knocking. Getting this far took a code; getting further takes the host saying yes,
+    /// and coming back takes the same device.
     Hello {
         protocol: u32,
         schema: u32,
-        secret: String,
         /// Stays the same across reconnects, which is how the host knows who is back.
         client: Uuid,
         name: String,
@@ -62,6 +63,8 @@ pub enum ToGuest {
     },
     /// Not let in, and why, in words for the person.
     Refused { reason: String },
+    /// The host has been asked to let this person in, and hasn't answered yet.
+    Waiting,
     /// One edit, in order. `origin` and `seq` let a guest recognise its own edit coming back.
     Applied {
         revision: u64,

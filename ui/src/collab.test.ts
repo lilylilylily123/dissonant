@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nearestPitch, sameView, whereLabel, type PeerLocation } from "./collab";
+import { cleanCode, codeComplete, codeProblem, formatCode, nearestPitch, sameView, whereLabel, type PeerLocation } from "./collab";
 import type { ProjectModel } from "./types";
 
 describe("sameView", () => {
@@ -50,5 +50,31 @@ describe("nearestPitch", () => {
 
   it("has nothing to offer an empty roll", () => {
     expect(nearestPitch(60, [])).toBeNull();
+  });
+});
+
+describe("join codes", () => {
+  it("takes lowercase, spaces and dashes the way people type and paste them", () => {
+    expect(cleanCode("k7q-4mx")).toBe("K7Q4MX");
+    expect(cleanCode(" K7Q 4MX ")).toBe("K7Q4MX");
+    expect(cleanCode("K7Q4MXZZ")).toBe("K7Q4MX");
+  });
+
+  it("puts the dash in once there is something after it", () => {
+    expect(formatCode("K7Q")).toBe("K7Q");
+    expect(formatCode("K7Q4")).toBe("K7Q-4");
+    expect(formatCode("K7Q4MX")).toBe("K7Q-4MX");
+  });
+
+  it("points at the characters codes never use", () => {
+    for (const c of ["0", "O", "1", "I", "L"]) expect(codeProblem(`K7Q4M${c}`)).toContain("never use");
+    expect(codeProblem("K7Q4M?")).toContain("letters and numbers");
+    expect(codeProblem("K7Q")).toBeNull();
+  });
+
+  it("is ready to send at exactly six good characters", () => {
+    expect(codeComplete("K7Q4MX")).toBe(true);
+    expect(codeComplete("K7Q4M")).toBe(false);
+    expect(codeComplete("K7Q4MO")).toBe(false);
   });
 });

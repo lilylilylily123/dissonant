@@ -4638,18 +4638,84 @@ button.linkish {
   height: 24px;
   font-size: 11px;
 }
-.sharedlg textarea {
-  width: 100%;
-  resize: none;
-  padding: 5px 6px;
-  font-size: 10px;
-  line-height: 1.35;
-  color: var(--text-1);
+/* A join code is read out loud and typed on another machine: big, spaced, tabular. */
+.sharefield input.sharecodein {
+  height: 34px;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.sharehint {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--rec-text);
+}
+.sharecode {
+  margin-top: 6px;
+  padding: 10px 0;
+  font-family: var(--font-mono);
+  font-size: 30px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.14em;
+  text-align: center;
+  color: var(--text-0);
   background: var(--bg-0b);
   border: 1px solid var(--line-2);
   border-radius: 2px;
-  word-break: break-all;
-  box-sizing: border-box;
+  user-select: all;
+}
+.sharerow .countdown {
+  margin-left: auto;
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-4);
+}
+.sharetoggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.sharewords {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 16px;
+  margin-top: 6px;
+  padding: 12px 8px;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-0);
+  background: var(--bg-0b);
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+}
+.modal.joinask {
+  width: 360px;
+  outline: none;
+}
+.joinask .mtitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.joinask .mtitle i {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.joinask .joinask-more {
+  color: var(--text-4);
 }
 .sharedlg .mbody {
   margin-top: 8px;

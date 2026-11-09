@@ -21,6 +21,8 @@ section is right and the rest of the document is the original plan.
 - **Sharing doesn't need a saved project.** Host autosave covers an untitled one.
 - **Removing someone also rotates the invite,** because they still hold it. People already in a session
   stay in through a new invite, even across a dropped connection.
+- **Since 2026-11-09 the invite is a six-character code and the host approves each person;** see
+  `docs/decisions/2026-11-09-join-codes.md`. Removal now bars the device instead of rotating anything.
 - **`dissonant-net` is its own crate** rather than living in `src-tauri`, so it runs in `cargo test`.
 
 **Not built yet:** selection outlines in other people's colors, `dissonant://` deep links (the invite is

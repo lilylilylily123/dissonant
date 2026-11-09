@@ -3,7 +3,7 @@
 //! stop everyone has to be looking at the same project.
 
 use dissonant_core::{ChordEvent, Command, Document, NoteEvent, ProjectModel, StepOutcome, TrackParam};
-use dissonant_session::{narrow, Bases, ConnId, GuestSession, HostEvents, HostSession, ToGuest, ToHost};
+use dissonant_session::{narrow, Bases, ConnId, DeviceKey, GuestSession, HostEvents, HostSession, ToGuest, ToHost, PROTOCOL_VERSION};
 use std::collections::VecDeque;
 
 /// Small and seeded, so a failure comes back from its seed.
@@ -25,6 +25,7 @@ impl Rng {
 
 struct Client {
     conn: ConnId,
+    key: DeviceKey,
     session: GuestSession,
     doc: Document,
     bases: Bases,
@@ -63,19 +64,22 @@ fn shared(m: &ProjectModel) -> ProjectModel {
 impl Sim {
     fn new(guests: usize) -> Sim {
         let mut sim = Sim {
-            host: HostSession::new("host".into(), "#fff".into(), "secret".into()),
+            host: HostSession::new("host".into(), "#fff".into()),
             doc: Document::new(starter()),
             bases: Bases::default(),
             guests: vec![],
             next_conn: 1,
         };
-        for _ in 0..guests {
-            let session = GuestSession::new("secret".into(), "guest".into(), "#000".into());
+        for i in 0..guests {
+            let session = GuestSession::new("guest".into(), "#000".into());
             let hello = session.hello();
             let conn = sim.next_conn;
             sim.next_conn += 1;
+            let key = [i as u8 + 1; 32];
+            sim.host.on_connect(conn, key);
             sim.guests.push(Client {
                 conn,
+                key,
                 session,
                 doc: Document::new(ProjectModel::empty()),
                 bases: Bases::default(),
@@ -83,6 +87,13 @@ impl Sim {
                 from_host: VecDeque::new(),
                 online: true,
             });
+        }
+        sim.drain();
+        // Everyone is waiting to be let in; the host says yes to all of them.
+        let waiting: Vec<_> = sim.host.requests().iter().map(|r| r.info.id).collect();
+        for id in waiting {
+            let out = sim.host.answer(&sim.doc, id, true);
+            sim.route(out);
         }
         sim.drain();
         sim
@@ -152,6 +163,7 @@ impl Sim {
         g.online = true;
         let hello = g.session.hello();
         g.to_host.push_back(hello);
+        self.host.on_connect(conn, g.key);
     }
 }
 
@@ -408,16 +420,6 @@ fn listening_state_stays_with_each_person() {
 }
 
 #[test]
-fn a_wrong_secret_is_turned_away() {
-    let mut host = HostSession::new("h".into(), "#fff".into(), "right".into());
-    let mut doc = Document::new(starter());
-    let guest = GuestSession::new("wrong".into(), "g".into(), "#000".into());
-    let out = host.on_message(&mut doc, 1, guest.hello());
-    assert!(matches!(out.send[0].1, ToGuest::Refused { .. }));
-    assert_eq!(out.close, Some(1));
-}
-
-#[test]
 fn a_guest_cant_bring_in_audio_the_host_will_never_have() {
     assert!(Command::AddAudioTake {
         track_id: uuid::Uuid::new_v4(),
@@ -453,10 +455,100 @@ fn every_message_survives_the_wire() {
     assert_eq!(serde_json::from_slice::<ToGuest>(&wire).unwrap(), welcome);
 }
 
+/// A hello from a device, claiming to be `client`.
+fn hello_as(client: uuid::Uuid) -> ToHost {
+    ToHost::Hello {
+        protocol: PROTOCOL_VERSION,
+        schema: dissonant_core::SCHEMA_VERSION,
+        client,
+        name: "someone".into(),
+        color: "#000".into(),
+    }
+}
+
+fn welcomed(out: &HostEvents, conn: ConnId) -> bool {
+    out.send.iter().any(|(c, m)| *c == conn && matches!(m, ToGuest::Welcome { .. }))
+}
+
+fn refused(out: &HostEvents, conn: ConnId) -> bool {
+    out.close == Some(conn) && out.send.iter().any(|(c, m)| *c == conn && matches!(m, ToGuest::Refused { .. }))
+}
+
 #[test]
-fn a_new_invite_leaves_people_already_here_in_through_a_dropped_connection() {
+fn nobody_new_sees_the_project_until_the_host_says_yes() {
+    let mut host = HostSession::new("h".into(), "#fff".into());
+    let mut doc = Document::new(starter());
+    let guest = GuestSession::new("g".into(), "#000".into());
+    host.on_connect(1, [7; 32]);
+    let out = host.on_message(&mut doc, 1, guest.hello());
+    assert!(out.asked && !welcomed(&out, 1));
+    assert_eq!(out.send, vec![(1, ToGuest::Waiting)]);
+    assert_eq!(host.requests().len(), 1);
+    // Edits made meanwhile don't reach them, and nor does anyone's cursor.
+    let out = host.edit(&mut doc, Command::SetTempo { bpm: 99.0 }, false, None).unwrap();
+    assert!(out.send.is_empty());
+    assert!(host.others(None).is_empty());
+
+    let out = host.answer(&doc, guest.id(), true);
+    assert!(welcomed(&out, 1));
+    assert_eq!(out.admit, Some([7; 32]));
+    assert!(host.requests().is_empty());
+    assert!(host.peers().iter().any(|p| p.id == guest.id()));
+}
+
+#[test]
+fn someone_the_host_turns_down_is_sent_away_and_their_device_forgotten() {
+    let mut host = HostSession::new("h".into(), "#fff".into());
+    let mut doc = Document::new(starter());
+    let guest = GuestSession::new("g".into(), "#000".into());
+    host.on_connect(1, [7; 32]);
+    host.on_message(&mut doc, 1, guest.hello());
+    let out = host.answer(&doc, guest.id(), false);
+    assert!(refused(&out, 1));
+    assert_eq!(out.revoke, Some([7; 32]));
+    assert!(host.requests().is_empty());
+    assert_eq!(host.peers().len(), 1);
+}
+
+#[test]
+fn someone_who_stops_waiting_drops_off_the_list() {
+    let mut host = HostSession::new("h".into(), "#fff".into());
+    let mut doc = Document::new(starter());
+    let guest = GuestSession::new("g".into(), "#000".into());
+    host.on_connect(1, [7; 32]);
+    host.on_message(&mut doc, 1, guest.hello());
+    let out = host.on_disconnect(1);
+    assert!(out.requests_changed);
+    assert!(host.requests().is_empty());
+    // An answer that comes too late lets nobody in.
+    let out = host.answer(&doc, guest.id(), true);
+    assert!(out.send.is_empty() && out.admit.is_none());
+}
+
+#[test]
+fn nobody_can_take_another_guests_place() {
     let mut sim = one_guest();
-    sim.host.set_secret("new".into());
+    let victim = sim.guests[0].session.id();
+    sim.drop_connection(0);
+    // Everyone in a session can see everyone's id, so a stranger can claim it.
+    sim.host.on_connect(99, [200; 32]);
+    let out = sim.host.on_message(&mut sim.doc, 99, hello_as(victim));
+    assert!(refused(&out, 99));
+    assert_eq!(out.revoke, Some([200; 32]));
+    assert!(!sim.host.peers().iter().any(|p| p.id == victim));
+    // The real one still gets back in.
+    sim.reconnect(0);
+    sim.drain();
+    let out = sim.host.edit(&mut sim.doc, Command::SetTempo { bpm: 77.0 }, false, None).unwrap();
+    sim.route(out);
+    sim.drain();
+    assert_eq!(sim.guests[0].doc.model().tempo, 77.0);
+}
+
+#[test]
+fn closing_the_session_keeps_new_people_out_but_lets_people_already_in_back() {
+    let mut sim = one_guest();
+    sim.host.set_open(false);
     sim.drop_connection(0);
     sim.reconnect(0);
     sim.drain();
@@ -464,8 +556,24 @@ fn a_new_invite_leaves_people_already_here_in_through_a_dropped_connection() {
     sim.route(out);
     sim.drain();
     assert_eq!(sim.guests[0].doc.model().tempo, 77.0);
-    // Someone new with the old invite gets nowhere.
-    let stranger = GuestSession::new("secret".into(), "s".into(), "#000".into());
+
+    let stranger = GuestSession::new("s".into(), "#000".into());
+    sim.host.on_connect(99, [200; 32]);
     let out = sim.host.on_message(&mut sim.doc, 99, stranger.hello());
-    assert!(matches!(out.send[0].1, ToGuest::Refused { .. }));
+    assert!(refused(&out, 99));
+    assert!(sim.host.requests().is_empty());
+}
+
+#[test]
+fn someone_removed_cant_ask_again_from_the_same_device() {
+    let mut sim = one_guest();
+    let (id, key) = (sim.guests[0].session.id(), sim.guests[0].key);
+    let out = sim.host.remove(id);
+    assert_eq!(out.revoke, Some(key));
+    // A fresh session on the same device is still the same device.
+    let again = GuestSession::new("guest".into(), "#000".into());
+    sim.host.on_connect(99, key);
+    let out = sim.host.on_message(&mut sim.doc, 99, again.hello());
+    assert!(refused(&out, 99));
+    assert!(sim.host.requests().is_empty());
 }

@@ -2,7 +2,7 @@
 // browser (`pnpm --dir ui dev`) it runs an in-memory mock so the interface can be designed and
 // exercised without audio. Keep the mock's command semantics aligned with dissonant-core.
 
-import { SOLO, type PeerLocation, type PeerPresence, type SessionState } from "./collab";
+import { CODE_ALPHABET, CODE_LENGTH, codeProblem, formatCode, SOLO, type PeerLocation, type PeerPresence, type SessionState } from "./collab";
 import type {
   AmpRig,
   AudioClip,
@@ -101,7 +101,12 @@ export interface Bridge {
   ): Promise<Snapshot>;
   shareStart(name: string, color: string): Promise<SessionState>;
   shareStop(): Promise<SessionState>;
-  shareResetLink(): Promise<SessionState>;
+  /** A new join code now; the old one stops working. People already in stay. */
+  shareNewCode(): Promise<SessionState>;
+  /** Let new people knock (`true`), or close the session to them. */
+  shareSetOpen(open: boolean): Promise<SessionState>;
+  /** Let someone waiting in, or turn them away. A `session` event follows. */
+  answerJoin(peer: string, allow: boolean): Promise<void>;
   removePeer(peer: string): Promise<void>;
   joinSession(code: string, name: string, color: string): Promise<SessionState>;
   leaveSession(): Promise<Snapshot>;
@@ -360,7 +365,9 @@ async function tauriBridge(): Promise<Bridge> {
       invoke<Snapshot>("apply", { command, transient, label: label ?? null, baseRevision: baseRevision ?? null }),
     shareStart: (name, color) => invoke<SessionState>("share_start", { name, color }),
     shareStop: () => invoke<SessionState>("share_stop"),
-    shareResetLink: () => invoke<SessionState>("share_reset_link"),
+    shareNewCode: () => invoke<SessionState>("share_new_code"),
+    shareSetOpen: (open) => invoke<SessionState>("share_set_open", { open }),
+    answerJoin: (peer, allow) => invoke<void>("answer_join", { peer, allow }),
     removePeer: (peer) => invoke<void>("remove_peer", { peer }),
     joinSession: (code, name, color) => invoke<SessionState>("join_session", { code, name, color }),
     leaveSession: () => invoke<Snapshot>("leave_session"),
@@ -3338,14 +3345,46 @@ function mockBridge(): Bridge {
     return fresh;
   };
 
-  // A pretend session for working on the UI in a browser: one person who wanders around whatever
-  // you are looking at and now and then writes a note. Nothing like it runs in the real app.
+  // A pretend session for working on the UI in a browser: one person who knocks, waits to be let
+  // in, then wanders around whatever you are looking at and now and then writes a note. Nothing
+  // like it runs in the real app.
   const sessionListeners = new Set<(s: SessionState) => void>();
   const presenceListeners = new Set<(p: PeerPresence) => void>();
   const endedListeners = new Set<(reason: string) => void>();
   let session: SessionState = SOLO;
   let fakePeer: ReturnType<typeof setInterval> | null = null;
   let youAre: PeerLocation = { screen: "setup" };
+  const FAKE_CODE_MS = 5 * 60_000;
+  const ROBIN = { id: "fake-peer", name: "robin", color: "#f0a6ca" };
+  const ROBIN_WORDS = ["amber", "static", "orbit"];
+  /** The code's own expiry, and everything else the pretend session has planned. */
+  let codeTimer: ReturnType<typeof setTimeout> | undefined;
+  let planned: ReturnType<typeof setTimeout>[] = [];
+  const later = (ms: number, fn: () => void) => {
+    planned.push(setTimeout(fn, ms));
+  };
+  const cancelPlans = () => {
+    for (const t of planned) clearTimeout(t);
+    planned = [];
+    clearTimeout(codeTimer);
+  };
+  /** A new code, good for five minutes, after which another replaces it. */
+  const freshCode = (): Pick<SessionState, "code" | "codeExpiresAt"> => {
+    clearTimeout(codeTimer);
+    codeTimer = setTimeout(() => {
+      if (session.role === "host" && session.open) setSession({ ...session, ...freshCode() });
+    }, FAKE_CODE_MS);
+    const chars = Array.from({ length: CODE_LENGTH }, () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]);
+    return { code: formatCode(chars.join("")), codeExpiresAt: Date.now() + FAKE_CODE_MS };
+  };
+  /** Robin knocks after a while, if the door is open and they aren't already in or waiting. The
+   *  knock uses the code up, as a real one does. */
+  const knockLater = (ms: number) =>
+    later(ms, () => {
+      const here = session.peers.some((p) => p.id === ROBIN.id) || session.requests.some((r) => r.id === ROBIN.id);
+      if (session.role !== "host" || !session.open || here) return;
+      setSession({ ...session, ...freshCode(), requests: [...session.requests, { ...ROBIN, words: ROBIN_WORDS }] });
+    });
   const setSession = (next: SessionState) => {
     session = next;
     for (const cb of sessionListeners) cb(next);
@@ -3387,28 +3426,58 @@ function mockBridge(): Bridge {
     getState: async () => snapshot(),
     apply: applyCommand,
     shareStart: async (name, color) => {
+      cancelPlans();
       const you = { id: "you", name, color, isHost: true };
-      setSession({ ...SOLO, role: "host", live: true, you: you.id, code: "dissonant-pretendinvitecode", peers: [you] });
-      setTimeout(() => setSession({ ...session, peers: [you, startFakePeer(true)] }), 600);
+      setSession({ ...SOLO, role: "host", live: true, you: you.id, ...freshCode(), peers: [you] });
+      knockLater(1500);
       return session;
     },
     shareStop: async () => {
+      cancelPlans();
       endFakePeer();
       return setSession(SOLO);
     },
-    shareResetLink: async () => setSession({ ...session, code: `dissonant-pretendinvitecode${Date.now()}` }),
+    shareNewCode: async () => (session.role === "host" && session.open ? setSession({ ...session, ...freshCode() }) : session),
+    shareSetOpen: async (open) => {
+      if (session.role !== "host") throw new Error("only the host can open or close the session.");
+      if (open === session.open) return session;
+      if (!open) {
+        clearTimeout(codeTimer);
+        return setSession({ ...session, open: false, code: null, codeExpiresAt: null });
+      }
+      setSession({ ...session, open: true, ...freshCode() });
+      knockLater(3000);
+      return session;
+    },
+    answerJoin: async (peer, allow) => {
+      if (!session.requests.some((r) => r.id === peer)) throw new Error("nobody by that id is waiting to get in.");
+      const requests = session.requests.filter((r) => r.id !== peer);
+      if (!allow) {
+        setSession({ ...session, requests });
+        knockLater(8000);
+        return;
+      }
+      endFakePeer();
+      setSession({ ...session, requests, peers: [...session.peers, startFakePeer(true)] });
+    },
     removePeer: async () => {
       endFakePeer();
-      setSession({ ...session, peers: session.peers.filter((p) => p.id !== "fake-peer") });
+      setSession({ ...session, peers: session.peers.filter((p) => p.id !== ROBIN.id) });
+      knockLater(8000);
     },
     joinSession: async (code, name, color) => {
-      if (!code.startsWith("dissonant-")) throw new Error("that doesn't look like a dissonant invite.");
+      const typed = code.toUpperCase().replace(/[\s-]/g, "");
+      if (typed.length !== CODE_LENGTH || codeProblem(typed)) throw new Error("that isn't a join code: it's 6 letters and numbers, like K7Q-4MX.");
+      cancelPlans();
       const you = { id: "you", name, color, isHost: false };
-      setSession({ ...SOLO, role: "guest", you: you.id, peers: [] });
-      setTimeout(() => setSession({ ...session, live: true, path: "direct", peers: [startFakePeer(false), you] }), 600);
+      setSession({ ...SOLO, role: "guest", you: you.id });
+      // Connected: both screens show the words, and the pretend host takes a moment to check them.
+      later(700, () => setSession({ ...session, waiting: true, words: ROBIN_WORDS }));
+      later(4500, () => setSession({ ...session, waiting: false, live: true, path: "direct", peers: [startFakePeer(false), you] }));
       return session;
     },
     leaveSession: async () => {
+      cancelPlans();
       endFakePeer();
       setSession(SOLO);
       return snapshot();

@@ -24,13 +24,14 @@ pub struct GuestEvents {
     pub peers: Option<Vec<PeerInfo>>,
     /// Something to tell the person.
     pub notice: Option<String>,
+    /// Connected, and waiting for the host to let this person in.
+    pub waiting: bool,
     /// The session is over for this guest, and why.
     pub ended: Option<String>,
 }
 
 pub struct GuestSession {
     client: Uuid,
-    secret: String,
     name: String,
     color: String,
     /// The project as the host has confirmed it. What the person sees is this plus `pending`.
@@ -45,10 +46,9 @@ pub struct GuestSession {
 }
 
 impl GuestSession {
-    pub fn new(secret: String, name: String, color: String) -> Self {
+    pub fn new(name: String, color: String) -> Self {
         GuestSession {
             client: Uuid::new_v4(),
-            secret,
             name,
             color,
             confirmed: ProjectModel::empty(),
@@ -72,7 +72,6 @@ impl GuestSession {
         ToHost::Hello {
             protocol: PROTOCOL_VERSION,
             schema: SCHEMA_VERSION,
-            secret: self.secret.clone(),
             client: self.client,
             name: self.name.clone(),
             color: self.color.clone(),
@@ -172,6 +171,7 @@ impl GuestSession {
                 }
             }
             ToGuest::Refused { reason } | ToGuest::Ended { reason } => out.ended = Some(reason),
+            ToGuest::Waiting => out.waiting = true,
             ToGuest::Applied { origin, seq, patch, time_edit, .. } => {
                 match patch.apply(&self.confirmed) {
                     Ok(next) => self.confirmed = next,

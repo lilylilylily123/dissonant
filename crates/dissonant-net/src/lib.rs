@@ -3,31 +3,52 @@
 //! Each guest holds one iroh connection to the host. On it there is one ordered, reliable stream
 //! for edits, and unreliable datagrams for cursors, where a late update is worth nothing. iroh
 //! dials by public key, connects directly where it can and falls back to a relay where it can't,
-//! so nobody has to forward a port, and everything is end-to-end encrypted either way.
+//! so nobody has to forward a port, and everything is end-to-end encrypted either way. Machines
+//! on one network also find each other by mDNS, so a room with no internet still works.
+//!
+//! Getting in takes a six-character code. The code stretches into the key of a lobby that lives
+//! only as long as the code: a guest dials the lobby, proves it knows the code, and is told where
+//! the host really is. The host's own endpoint turns away every device that hasn't come through
+//! the lobby or been let in, before it reads a byte. Each code lets one device through, once.
 //!
 //! This crate knows nothing about what the bytes mean. Everything arrives as a [`NetEvent`] on a
 //! plain channel, so the caller needs no async of its own.
 
-use data_encoding::BASE64URL_NOPAD;
+mod code;
+
+pub use code::{format_code, new_code, parse_code, CODE_LEN};
+
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr};
-use serde::{Deserialize, Serialize};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
+use tokio::task::JoinSet;
 
-const ALPN: &[u8] = b"dissonant/session/1";
+const ALPN: &[u8] = b"dissonant/session/2";
+const LOBBY_ALPN: &[u8] = b"dissonant/lobby/1";
+/// What this app calls itself on the local network, so it only finds its own kind.
+const MDNS_SERVICE: &str = "dissonant";
 /// A whole project with plugin state can be large. Past this, something has gone wrong.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
-/// The prefix on an invite, so a pasted scrap of something else can be told from a bad invite.
-const INVITE_PREFIX: &str = "dissonant-";
+/// The host's address, as the lobby hands it over.
+const MAX_LOBBY_FRAME: usize = 64 * 1024;
 /// How long to wait for a relay before going on with what we have. Without one only people on
 /// the same network can connect, which is still worth offering.
 const ONLINE_WAIT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a guest keeps looking for the lobby. A code only just made may not be findable for
+/// a few seconds, and a wrong one never will be.
+const KNOCK_WINDOW: Duration = Duration::from_secs(30);
+/// How long a lobby waits for a guest to prove the code once connected.
+const PROOF_WAIT: Duration = Duration::from_secs(10);
+/// How long a device that came through the lobby may take to reach the host.
+const KNOCK_VALID: Duration = Duration::from_secs(10 * 60);
 /// How long a guest keeps trying after losing the host.
 const RECONNECT_WINDOW: Duration = Duration::from_secs(60);
 const RECONNECT_PAUSE: Duration = Duration::from_secs(2);
@@ -36,12 +57,28 @@ const RECONNECT_PAUSE: Duration = Duration::from_secs(2);
 pub type ConnId = u64;
 pub const HOST: ConnId = 0;
 
+/// A device's public key: who is on the other end of a connection, as the handshake proved it.
+pub type DeviceKey = [u8; 32];
+
+/// The far end of a new connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peer {
+    pub key: DeviceKey,
+    /// The same three words on both ends, and different with anyone in between: for two people
+    /// to read to each other.
+    pub words: [&'static str; 3],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetEvent {
-    Connected(ConnId),
+    Connected(ConnId, Peer),
     Message(ConnId, Vec<u8>),
     Datagram(ConnId, Vec<u8>),
     Disconnected(ConnId),
+    /// A host: a device proved the code and was told where to find us. The code is spent.
+    Knocked(DeviceKey),
+    /// A host: something found the lobby and couldn't prove the code. The code is spent.
+    BadKnock,
     /// A guest stopped trying to reach the host.
     GaveUp(String),
 }
@@ -49,51 +86,40 @@ pub enum NetEvent {
 /// Which networks to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reach {
-    /// The internet, through n0's public relays.
+    /// The internet, through n0's public relays and address lookup, and the local network.
     Public,
-    /// Addresses in the invite only, no relay. For tests.
-    Direct,
+    /// This network only, found by mDNS: no relay, nothing leaves the building.
+    Local,
     /// Through a relay and never directly: what two people behind hostile routers end up with.
     /// For tests.
     RelayOnly,
 }
 
-/// What a guest needs to find the host and be let in.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Invite {
-    pub addr: EndpointAddr,
-    pub secret: String,
+/// Which devices may open a connection to the host.
+#[derive(Default)]
+struct Gate {
+    /// `None` for someone let in; a deadline for someone the lobby just sent over.
+    allowed: HashMap<EndpointId, Option<Instant>>,
 }
 
-impl Invite {
-    /// The invite as one line of text to paste into a chat.
-    pub fn to_code(&self) -> String {
-        let json = serde_json::to_vec(self).unwrap_or_default();
-        format!("{INVITE_PREFIX}{}", BASE64URL_NOPAD.encode(&json))
+impl Gate {
+    fn knocked(&mut self, id: EndpointId) {
+        self.allowed.entry(id).or_insert(Some(Instant::now() + KNOCK_VALID));
     }
 
-    pub fn parse(code: &str) -> Result<Invite, String> {
-        let bad = || "that doesn't look like a dissonant invite.".to_string();
-        let body = code.trim().strip_prefix(INVITE_PREFIX).ok_or_else(bad)?;
-        let json = BASE64URL_NOPAD.decode(body.as_bytes()).map_err(|_| bad())?;
-        serde_json::from_slice(&json).map_err(|_| bad())
+    fn lets_in(&mut self, id: &EndpointId) -> bool {
+        let now = Instant::now();
+        self.allowed.retain(|_, until| until.is_none_or(|t| t > now));
+        self.allowed.contains_key(id)
     }
 }
 
-/// A random secret for an invite.
-pub fn new_secret() -> String {
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&rand_u64().to_le_bytes());
-    bytes[8..].copy_from_slice(&rand_u64().to_le_bytes());
-    BASE64URL_NOPAD.encode(&bytes)
-}
-
-fn rand_u64() -> u64 {
-    // iroh's own secret key generation is a CSPRNG; borrowing its output keeps a second random
-    // number crate out of the build.
-    let key = iroh::SecretKey::generate();
-    let bytes = key.to_bytes();
-    u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
+/// The lobby for the current code, if there is one.
+#[derive(Default)]
+struct LobbySlot {
+    /// Bumped by every new code, so a lobby still starting up can tell it has been overtaken.
+    generation: u64,
+    endpoint: Option<Endpoint>,
 }
 
 /// What the writer task for a connection is told to do.
@@ -113,8 +139,12 @@ struct Link {
 pub struct Net {
     runtime: Runtime,
     endpoint: Endpoint,
+    reach: Reach,
     links: Arc<Mutex<HashMap<ConnId, Link>>>,
     stopping: Arc<AtomicBool>,
+    gate: Arc<Mutex<Gate>>,
+    lobby: Arc<Mutex<LobbySlot>>,
+    events: mpsc::Sender<NetEvent>,
 }
 
 fn runtime() -> Result<Runtime, String> {
@@ -126,14 +156,20 @@ fn runtime() -> Result<Runtime, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn bind(reach: Reach, alpns: Vec<Vec<u8>>) -> Result<Endpoint, String> {
-    let endpoint = match reach {
-        Reach::Public => Endpoint::builder(presets::N0).alpns(alpns).bind().await,
-        Reach::Direct => Endpoint::builder(presets::N0DisableRelay).alpns(alpns).bind().await,
-        Reach::RelayOnly => Endpoint::builder(presets::N0).clear_ip_transports().alpns(alpns).bind().await,
+/// Open an endpoint. `key` is for a lobby, whose key comes from its code; `advertise` is whether
+/// to answer when the local network asks who is there.
+async fn bind(reach: Reach, alpns: Vec<Vec<u8>>, key: Option<SecretKey>, advertise: bool) -> Result<Endpoint, String> {
+    let mdns = MdnsAddressLookup::builder().service_name(MDNS_SERVICE).advertise(advertise);
+    let mut builder = match reach {
+        Reach::Public => Endpoint::builder(presets::N0).address_lookup(mdns),
+        Reach::Local => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).address_lookup(mdns),
+        Reach::RelayOnly => Endpoint::builder(presets::N0).clear_ip_transports(),
     };
-    let endpoint = endpoint.map_err(|e| format!("could not open the network: {e}"))?;
-    if reach != Reach::Direct && tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await.is_err() {
+    if let Some(key) = key {
+        builder = builder.secret_key(key);
+    }
+    let endpoint = builder.alpns(alpns).bind().await.map_err(|e| format!("could not open the network: {e}"))?;
+    if reach != Reach::Local && tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await.is_err() {
         log::warn!("no relay reached: only people on this network will be able to connect");
     }
     Ok(endpoint)
@@ -146,17 +182,29 @@ fn frame(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-async fn read_frame(recv: &mut RecvStream) -> Option<Vec<u8>> {
+async fn read_frame(recv: &mut RecvStream, max: usize) -> Option<Vec<u8>> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await.ok()?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         log::warn!("dropping a connection over a {len}-byte message");
         return None;
     }
     let mut buf = vec![0u8; len];
     recv.read_exact(&mut buf).await.ok()?;
     Some(buf)
+}
+
+/// Who is on the far end of `conn`, and the words for it. `own` is this end's key, and
+/// `hosting` says which of the two is the host.
+async fn peer(own: EndpointId, conn: &Connection, hosting: bool) -> Peer {
+    let key = *conn.remote_id().as_bytes();
+    let own = *own.as_bytes();
+    let (host, guest) = if hosting { (own, key) } else { (key, own) };
+    let words = tokio::task::spawn_blocking(move || code::verification_words(&host, &guest))
+        .await
+        .unwrap_or(["?", "?", "?"]);
+    Peer { key, words }
 }
 
 /// Run one connection until it ends: read frames and datagrams into `events`, write what arrives
@@ -193,7 +241,7 @@ async fn serve(
     let reader = {
         let events = events.clone();
         async move {
-            while let Some(bytes) = read_frame(&mut recv).await {
+            while let Some(bytes) = read_frame(&mut recv, MAX_FRAME).await {
                 if events.send(NetEvent::Message(id, bytes)).is_err() {
                     break;
                 }
@@ -219,51 +267,141 @@ async fn serve(
 }
 
 impl Net {
-    /// Start hosting. Returns the running end and the address to put in an invite.
-    pub fn host(reach: Reach, events: mpsc::Sender<NetEvent>) -> Result<(Net, EndpointAddr), String> {
-        let runtime = runtime()?;
-        let endpoint = runtime.block_on(bind(reach, vec![ALPN.to_vec()]))?;
-        let addr = endpoint.addr();
-        let links: Arc<Mutex<HashMap<ConnId, Link>>> = Arc::default();
-        let stopping = Arc::new(AtomicBool::new(false));
-        runtime.spawn(accept_loop(endpoint.clone(), links.clone(), events));
-        Ok((Net { runtime, endpoint, links, stopping }, addr))
+    fn new(runtime: Runtime, endpoint: Endpoint, reach: Reach, events: mpsc::Sender<NetEvent>) -> Net {
+        Net {
+            runtime,
+            endpoint,
+            reach,
+            links: Arc::default(),
+            stopping: Arc::new(AtomicBool::new(false)),
+            gate: Arc::default(),
+            lobby: Arc::default(),
+            events,
+        }
     }
 
-    /// Connect to a host, and keep reconnecting for a while if the connection drops.
-    pub fn join(reach: Reach, addr: EndpointAddr, events: mpsc::Sender<NetEvent>) -> Result<Net, String> {
+    /// Start hosting. Nobody can get in until there is a lobby: see [`Net::open_lobby`].
+    pub fn host(reach: Reach, events: mpsc::Sender<NetEvent>) -> Result<Net, String> {
         let runtime = runtime()?;
-        let endpoint = runtime.block_on(bind(reach, vec![]))?;
-        let links: Arc<Mutex<HashMap<ConnId, Link>>> = Arc::default();
-        let stopping = Arc::new(AtomicBool::new(false));
-        runtime.spawn(dial_loop(endpoint.clone(), addr, links.clone(), stopping.clone(), events));
-        Ok(Net { runtime, endpoint, links, stopping })
+        let endpoint = runtime.block_on(bind(reach, vec![ALPN.to_vec()], None, true))?;
+        let net = Net::new(runtime, endpoint, reach, events);
+        net.runtime.spawn(accept_loop(net.endpoint.clone(), net.links.clone(), net.gate.clone(), net.events.clone()));
+        Ok(net)
+    }
+
+    /// Find a host by its code, and keep reconnecting for a while if the connection drops.
+    /// Fails at once on something that isn't a code; a code nobody answers to arrives later as
+    /// [`NetEvent::GaveUp`].
+    pub fn join(reach: Reach, code: &str, events: mpsc::Sender<NetEvent>) -> Result<Net, String> {
+        let code = parse_code(code)?;
+        let runtime = runtime()?;
+        // Nobody needs to find a guest: it does the dialling.
+        let endpoint = runtime.block_on(bind(reach, vec![], None, false))?;
+        let net = Net::new(runtime, endpoint, reach, events);
+        let (endpoint, links, stopping, events) =
+            (net.endpoint.clone(), net.links.clone(), net.stopping.clone(), net.events.clone());
+        net.runtime.spawn(async move {
+            match knock(&endpoint, &code).await {
+                Some(addr) => dial_loop(endpoint, addr, links, stopping, events).await,
+                None => {
+                    let why = "no session answered to that code. codes change every 5 minutes and after each use: ask for the current one.";
+                    let _ = events.send(NetEvent::GaveUp(why.to_string()));
+                }
+            }
+        });
+        Ok(net)
+    }
+
+    /// This device's key.
+    pub fn key(&self) -> DeviceKey {
+        *self.endpoint.id().as_bytes()
+    }
+
+    /// A host: let people in with `code`, and stop letting them in with any code before it.
+    /// Returns at once; the lobby takes a moment to be findable.
+    pub fn open_lobby(&self, code: &str) {
+        let generation = self.retire_lobby();
+        let code = parse_code(code).unwrap_or_default();
+        let (reach, slot, host, gate, events) =
+            (self.reach, self.lobby.clone(), self.endpoint.clone(), self.gate.clone(), self.events.clone());
+        self.runtime.spawn(async move {
+            let (day, _) = code::today();
+            let Ok(derived) = tokio::task::spawn_blocking(move || code::derive(&code, day)).await else { return };
+            let lobby = match bind(reach, vec![LOBBY_ALPN.to_vec()], Some(derived.lobby), true).await {
+                Ok(lobby) => lobby,
+                Err(e) => {
+                    log::warn!("could not open a lobby: {e}");
+                    return;
+                }
+            };
+            let overtaken = {
+                let mut slot = slot.lock();
+                let overtaken = slot.generation != generation;
+                if !overtaken {
+                    slot.endpoint = Some(lobby.clone());
+                }
+                overtaken
+            };
+            if overtaken {
+                lobby.close().await;
+                return;
+            }
+            lobby_loop(lobby, derived.proof, host, gate, events).await;
+        });
+    }
+
+    /// A host: stop letting anyone new in. People already in stay in.
+    pub fn close_lobby(&self) {
+        self.retire_lobby();
+    }
+
+    fn retire_lobby(&self) -> u64 {
+        let mut slot = self.lobby.lock();
+        slot.generation += 1;
+        if let Some(old) = slot.endpoint.take() {
+            self.runtime.spawn(async move { old.close().await });
+        }
+        slot.generation
+    }
+
+    /// A host: this device is in, and may come back whenever its connection drops.
+    pub fn admit(&self, key: &DeviceKey) {
+        if let Ok(id) = EndpointId::from_bytes(key) {
+            self.gate.lock().allowed.insert(id, None);
+        }
+    }
+
+    /// A host: this device may not connect again without a new code.
+    pub fn revoke(&self, key: &DeviceKey) {
+        if let Ok(id) = EndpointId::from_bytes(key) {
+            self.gate.lock().allowed.remove(&id);
+        }
     }
 
     /// Send a message on a connection, in order, reliably.
     pub fn send(&self, conn: ConnId, bytes: &[u8]) {
-        if let Some(link) = self.links.lock().unwrap().get(&conn) {
+        if let Some(link) = self.links.lock().get(&conn) {
             let _ = link.out.send(Out::Frame(frame(bytes)));
         }
     }
 
     /// Send a datagram: it may arrive late, out of order, or not at all.
     pub fn datagram(&self, conn: ConnId, bytes: &[u8]) {
-        if let Some(link) = self.links.lock().unwrap().get(&conn) {
+        if let Some(link) = self.links.lock().get(&conn) {
             let _ = link.conn.send_datagram(bytes.to_vec().into());
         }
     }
 
     /// Close a connection once what is queued for it has gone out.
     pub fn close(&self, conn: ConnId) {
-        if let Some(link) = self.links.lock().unwrap().remove(&conn) {
+        if let Some(link) = self.links.lock().remove(&conn) {
             let _ = link.out.send(Out::Close);
         }
     }
 
     /// How this machine is reaching the host right now, for the person: "direct" or "relayed".
     pub fn path(&self, conn: ConnId) -> Option<&'static str> {
-        let links = self.links.lock().unwrap();
+        let links = self.links.lock();
         let link = links.get(&conn)?;
         let paths = link.conn.paths();
         let selected = paths.iter().find(|p| p.is_selected())?;
@@ -274,7 +412,8 @@ impl Net {
     /// off any thread somebody is waiting on.
     pub fn shutdown(self) {
         self.stopping.store(true, Ordering::SeqCst);
-        for (_, link) in self.links.lock().unwrap().drain() {
+        self.retire_lobby();
+        for (_, link) in self.links.lock().drain() {
             let _ = link.out.send(Out::Close);
         }
         let endpoint = self.endpoint.clone();
@@ -286,25 +425,118 @@ impl Net {
     }
 }
 
-async fn accept_loop(endpoint: Endpoint, links: Arc<Mutex<HashMap<ConnId, Link>>>, events: mpsc::Sender<NetEvent>) {
-    let next = Arc::new(AtomicU64::new(HOST + 1));
-    while let Some(incoming) = endpoint.accept().await {
-        let links = links.clone();
-        let events = events.clone();
-        let next = next.clone();
+/// Answer at a lobby until one device has tried it, rightly or wrongly. Whoever proves the code
+/// is told where the host is and let through the gate; anyone else spends the code for nothing.
+async fn lobby_loop(lobby: Endpoint, proof: [u8; 32], host: Endpoint, gate: Arc<Mutex<Gate>>, events: mpsc::Sender<NetEvent>) {
+    let spent = Arc::new(AtomicBool::new(false));
+    while let Some(incoming) = lobby.accept().await {
+        let (lobby, host, gate, events, spent) = (lobby.clone(), host.clone(), gate.clone(), events.clone(), spent.clone());
         tokio::spawn(async move {
             let Ok(accepting) = incoming.accept() else { return };
             let Ok(conn) = accepting.await else { return };
+            let offered = tokio::time::timeout(PROOF_WAIT, async {
+                let (send, mut recv) = conn.accept_bi().await.ok()?;
+                Some((send, read_frame(&mut recv, proof.len()).await?))
+            })
+            .await
+            .ok()
+            .flatten();
+            if spent.swap(true, Ordering::SeqCst) {
+                conn.close(1u32.into(), b"spent");
+                return;
+            }
+            let Some((mut send, _)) = offered.filter(|(_, offered)| code::same(offered, &proof)) else {
+                log::warn!("someone reached the lobby without the code");
+                conn.close(2u32.into(), b"wrong code");
+                let _ = events.send(NetEvent::BadKnock);
+                lobby.close().await;
+                return;
+            };
+            let guest = conn.remote_id();
+            gate.lock().knocked(guest);
+            if let Ok(addr) = serde_json::to_vec(&host.addr()) {
+                let _ = send.write_all(&frame(&addr)).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+            }
+            let _ = events.send(NetEvent::Knocked(*guest.as_bytes()));
+            conn.close(0u32.into(), b"see you there");
+            lobby.close().await;
+        });
+    }
+}
+
+async fn accept_loop(
+    endpoint: Endpoint,
+    links: Arc<Mutex<HashMap<ConnId, Link>>>,
+    gate: Arc<Mutex<Gate>>,
+    events: mpsc::Sender<NetEvent>,
+) {
+    let next = Arc::new(AtomicU64::new(HOST + 1));
+    while let Some(incoming) = endpoint.accept().await {
+        let (links, gate, events, next, own) = (links.clone(), gate.clone(), events.clone(), next.clone(), endpoint.id());
+        tokio::spawn(async move {
+            let Ok(accepting) = incoming.accept() else { return };
+            let Ok(conn) = accepting.await else { return };
+            if !gate.lock().lets_in(&conn.remote_id()) {
+                log::warn!("turned away a device that didn't come in with a code");
+                conn.close(3u32.into(), b"not invited");
+                return;
+            }
             let Ok((send, recv)) = conn.accept_bi().await else { return };
+            let peer = peer(own, &conn, true).await;
             let id = next.fetch_add(1, Ordering::SeqCst);
             let (out, rx) = tokio_mpsc::unbounded_channel();
-            links.lock().unwrap().insert(id, Link { out, conn: conn.clone() });
-            let _ = events.send(NetEvent::Connected(id));
+            links.lock().insert(id, Link { out, conn: conn.clone() });
+            let _ = events.send(NetEvent::Connected(id, peer));
             serve(id, conn, send, recv, rx, events.clone()).await;
-            links.lock().unwrap().remove(&id);
+            links.lock().remove(&id);
             let _ = events.send(NetEvent::Disconnected(id));
         });
     }
+}
+
+/// Prove the code at its lobby and learn where the host is. Tries every day the code could have
+/// been made on at once, and keeps trying for a while: a new lobby takes a moment to be findable.
+async fn knock(endpoint: &Endpoint, code: &str) -> Option<EndpointAddr> {
+    let mut tries = JoinSet::new();
+    for day in code::candidate_days() {
+        let (endpoint, code) = (endpoint.clone(), code.to_string());
+        tries.spawn(async move {
+            let derived = tokio::task::spawn_blocking(move || code::derive(&code, day)).await.ok()?;
+            let lobby = EndpointAddr::from(derived.lobby.public());
+            let started = Instant::now();
+            loop {
+                match knock_once(&endpoint, &lobby, &derived.proof).await {
+                    Ok(addr) => return Some(addr),
+                    Err(e) => log::info!("no lobby yet: {e}"),
+                }
+                if started.elapsed() >= KNOCK_WINDOW {
+                    return None;
+                }
+                tokio::time::sleep(RECONNECT_PAUSE).await;
+            }
+        });
+    }
+    while let Some(done) = tries.join_next().await {
+        if let Ok(Some(addr)) = done {
+            return Some(addr);
+        }
+    }
+    None
+}
+
+async fn knock_once(endpoint: &Endpoint, lobby: &EndpointAddr, proof: &[u8; 32]) -> Result<EndpointAddr, String> {
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(lobby.clone(), LOBBY_ALPN))
+        .await
+        .map_err(|_| "timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    send.write_all(&frame(proof)).await.map_err(|e| e.to_string())?;
+    let _ = send.finish();
+    let bytes = read_frame(&mut recv, MAX_LOBBY_FRAME).await.ok_or("the lobby said nothing")?;
+    conn.close(0u32.into(), b"thanks");
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
 async fn dial(endpoint: &Endpoint, addr: &EndpointAddr) -> Result<(Connection, SendStream, RecvStream), String> {
@@ -325,15 +557,22 @@ async fn dial_loop(
 ) {
     let mut trying_since = Instant::now();
     let mut ever_connected = false;
+    // The same two keys every time, so the same words.
+    let mut known: Option<Peer> = None;
     while !stopping.load(Ordering::SeqCst) {
         match dial(&endpoint, &addr).await {
             Ok((conn, send, recv)) => {
                 ever_connected = true;
+                let peer = match known.clone() {
+                    Some(peer) => peer,
+                    None => peer(endpoint.id(), &conn, false).await,
+                };
+                known = Some(peer.clone());
                 let (out, rx) = tokio_mpsc::unbounded_channel();
-                links.lock().unwrap().insert(HOST, Link { out, conn: conn.clone() });
-                let _ = events.send(NetEvent::Connected(HOST));
+                links.lock().insert(HOST, Link { out, conn: conn.clone() });
+                let _ = events.send(NetEvent::Connected(HOST, peer));
                 serve(HOST, conn, send, recv, rx, events.clone()).await;
-                links.lock().unwrap().remove(&HOST);
+                links.lock().remove(&HOST);
                 if stopping.load(Ordering::SeqCst) {
                     return;
                 }
@@ -347,7 +586,7 @@ async fn dial_loop(
                     let why = if ever_connected {
                         "lost the connection to the host."
                     } else {
-                        "couldn't reach the host. check they're still sharing, and that the invite is current."
+                        "couldn't reach the host. check they're still sharing."
                     };
                     let _ = events.send(NetEvent::GaveUp(why.to_string()));
                     return;
@@ -355,5 +594,38 @@ async fn dial_loop(
             }
         }
         tokio::time::sleep(RECONNECT_PAUSE).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Someone who spotted the lobby on the network, but never saw the code.
+    #[test]
+    fn a_wrong_proof_spends_the_code_and_tells_the_host() {
+        let (tx, rx) = mpsc::channel();
+        let host = Net::host(Reach::Local, tx).unwrap();
+        let code = new_code();
+        host.open_lobby(&code);
+        let lobby = EndpointAddr::from(code::derive(&code, code::today().0).lobby.public());
+        let runtime = runtime().unwrap();
+        let answer = runtime.block_on(async {
+            let snoop = bind(Reach::Local, vec![], None, false).await.unwrap();
+            let mut answer = Err(String::new());
+            for _ in 0..15 {
+                answer = knock_once(&snoop, &lobby, &[0; 32]).await;
+                // Reached it, and was sent away: that is the one try that counts.
+                if answer.as_ref().is_err_and(|e| e == "the lobby said nothing") {
+                    break;
+                }
+                tokio::time::sleep(RECONNECT_PAUSE).await;
+            }
+            snoop.close().await;
+            answer
+        });
+        assert!(answer.is_err(), "the lobby gave the host away");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), NetEvent::BadKnock);
+        host.shutdown();
     }
 }

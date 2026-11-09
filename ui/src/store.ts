@@ -102,7 +102,12 @@ interface State {
   openShare(open: boolean): void;
   startSharing(name: string, color: string): Promise<void>;
   stopSharing(): Promise<void>;
-  resetInvite(): Promise<void>;
+  /** A new join code now; the old one stops working. */
+  newCode(): Promise<void>;
+  /** Let new people knock, or close the session to them. */
+  setOpen(open: boolean): Promise<void>;
+  /** Let someone waiting in, or turn them away. Whether the answer went through. */
+  answerJoin(peer: string, allow: boolean): Promise<boolean>;
   removePeer(peer: string): Promise<void>;
   joinSession(code: string, name: string, color: string): Promise<void>;
   leaveSession(): Promise<void>;
@@ -624,6 +629,17 @@ export const useStore = create<State>((set, get) => {
       set({ shareOpen: false });
       get().showToast("you're in. edits go to everyone, and playing is just for you.");
     }
+    // Who came and went while the session was steady: not the people already there when it
+    // started or you got in, and not everyone at once when it ends or the connection drops.
+    const steady = session.role !== "solo" && was.role === session.role && was.live && session.live && !was.reconnecting && !session.reconnecting;
+    if (steady) {
+      const before = new Set(was.peers.map((p) => p.id));
+      const after = new Set(session.peers.map((p) => p.id));
+      const joined = session.peers.filter((p) => p.id !== session.you && !before.has(p.id)).map((p) => p.name);
+      const left = was.peers.filter((p) => p.id !== session.you && !after.has(p.id)).map((p) => p.name);
+      const said = [joined.length ? `${joined.join(", ")} joined` : "", left.length ? `${left.join(", ")} left` : ""].filter(Boolean).join(" · ");
+      if (said) get().showToast(said);
+    }
   };
 
   const inSession = () => {
@@ -748,9 +764,31 @@ export const useStore = create<State>((set, get) => {
       applySession(await b.shareStop());
       set({ shareOpen: false });
     },
-    async resetInvite() {
+    async newCode() {
       const b = await getBridge();
-      applySession(await b.shareResetLink());
+      try {
+        applySession(await b.shareNewCode());
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async setOpen(open) {
+      const b = await getBridge();
+      try {
+        applySession(await b.shareSetOpen(open));
+      } catch (e) {
+        get().showToast(String(e), true);
+      }
+    },
+    async answerJoin(peer, allow) {
+      const b = await getBridge();
+      try {
+        await b.answerJoin(peer, allow);
+        return true;
+      } catch (e) {
+        get().showToast(String(e), true);
+        return false;
+      }
     },
     async removePeer(peer) {
       const b = await getBridge();
@@ -769,10 +807,12 @@ export const useStore = create<State>((set, get) => {
     },
     async leaveSession() {
       const b = await getBridge();
+      // Leaving before getting in is just not joining: the project here was never replaced.
+      const hadProject = sessionHadProject;
       applySnapshot(await b.leaveSession());
       applySession(await b.getSession());
       set({ shareOpen: false });
-      get().showToast("left the session. what you were looking at is still open here: save it to keep it.");
+      get().showToast(hadProject ? "left the session. what you were looking at is still open here: save it to keep it." : "stopped joining. nothing here changed.");
     },
     library: [],
     selectedTrackId: null,

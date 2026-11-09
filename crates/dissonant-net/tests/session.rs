@@ -1,8 +1,8 @@
 //! A real session over real connections: the session logic and the network together.
 
 use dissonant_core::{Command, Document, NoteEvent, ProjectModel};
-use dissonant_net::{new_secret, Invite, Net, NetEvent, Reach, HOST};
-use dissonant_session::{GuestSession, HostSession, ToGuest, ToHost};
+use dissonant_net::{new_code, Net, NetEvent, Reach, HOST};
+use dissonant_session::{GuestSession, HostEvents, HostSession, ToGuest, ToHost};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
@@ -24,13 +24,30 @@ impl Host {
     fn pump(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             let (conn, message) = match event {
+                NetEvent::Connected(conn, peer) => {
+                    self.session.on_connect(conn, peer.key);
+                    continue;
+                }
                 NetEvent::Message(conn, bytes) => (conn, serde_json::from_slice::<ToHost>(&bytes).unwrap()),
                 _ => continue,
             };
-            let out = self.session.on_message(&mut self.doc, conn, message);
-            for (conn, message) in out.send {
-                self.net.send(conn, &serde_json::to_vec(&message).unwrap());
+            let mut out = self.session.on_message(&mut self.doc, conn, message);
+            if out.asked {
+                // The host says yes.
+                self.send(out);
+                let id = self.session.requests()[0].info.id;
+                out = self.session.answer(&self.doc, id, true);
             }
+            self.send(out);
+        }
+    }
+
+    fn send(&self, out: HostEvents) {
+        if let Some(key) = out.admit {
+            self.net.admit(&key);
+        }
+        for (conn, message) in out.send {
+            self.net.send(conn, &serde_json::to_vec(&message).unwrap());
         }
     }
 }
@@ -39,7 +56,7 @@ impl Guest {
     fn pump(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                NetEvent::Connected(_) => {
+                NetEvent::Connected(..) => {
                     self.net.send(HOST, &serde_json::to_vec(&self.session.hello()).unwrap());
                 }
                 NetEvent::Message(_, bytes) => {
@@ -69,22 +86,22 @@ fn wait(host: &mut Host, guest: &mut Guest, what: &str, done: impl Fn(&Host, &Gu
 
 fn session(reach: Reach) {
     let (tx, rx) = channel();
-    let (net, addr) = Net::host(reach, tx).unwrap();
-    let secret = new_secret();
-    let invite = Invite::parse(&Invite { addr, secret: secret.clone() }.to_code()).unwrap();
+    let net = Net::host(reach, tx).unwrap();
+    let code = new_code();
+    net.open_lobby(&code);
     let mut model = ProjectModel::empty();
     model.tempo = 133.0;
     let mut host = Host {
         net,
         rx,
-        session: HostSession::new("host".into(), "#fff".into(), secret),
+        session: HostSession::new("host".into(), "#fff".into()),
         doc: Document::new(model),
     };
     let (tx, rx) = channel();
     let mut guest = Guest {
-        net: Net::join(reach, invite.addr, tx).unwrap(),
+        net: Net::join(reach, &code, tx).unwrap(),
         rx,
-        session: GuestSession::new(invite.secret, "guest".into(), "#000".into()),
+        session: GuestSession::new("guest".into(), "#000".into()),
         doc: Document::new(ProjectModel::empty()),
     };
 
@@ -118,7 +135,7 @@ fn session(reach: Reach) {
 
 #[test]
 fn a_session_works_over_real_connections() {
-    session(Reach::Direct);
+    session(Reach::Local);
 }
 
 /// Goes out through the public relays, so it needs the internet. Run it with

@@ -1,4 +1,10 @@
 //! The host's side of a session.
+//!
+//! Nobody new gets in on their own say-so. The network only brings a device this far if it came
+//! through the lobby with the current code; after that the host is asked, and until they say yes
+//! the device sees nothing of the project. Who someone is afterwards is their device key, which
+//! the connection's handshake proves: the client id a guest sends is visible to everyone in the
+//! session, so it can name a place but never claim one.
 
 use crate::protocol::{OpBody, PeerInfo, ToGuest, ToHost, PROTOCOL_VERSION};
 use dissonant_core::{ids, Command, Document, EditError, Patch, StepOutcome, TimeEdit, SCHEMA_VERSION};
@@ -8,14 +14,26 @@ use uuid::Uuid;
 /// A connection, as the network layer numbers them.
 pub type ConnId = u64;
 
+/// A device's public key, as the connection's handshake proved it.
+pub type DeviceKey = [u8; 32];
+
 /// A session holds this many people, host included.
 const MAX_PEOPLE: usize = 8;
 
 struct Guest {
     info: PeerInfo,
+    key: DeviceKey,
     /// The last op seen from this guest. Survives a dropped connection.
     last_seq: u64,
     conn: Option<ConnId>,
+}
+
+/// Someone waiting for the host to let them in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinRequest {
+    pub info: PeerInfo,
+    pub key: DeviceKey,
+    pub conn: ConnId,
 }
 
 /// What came of handling something: messages to send, and what the app has to do about it.
@@ -25,6 +43,14 @@ pub struct HostEvents {
     /// The project changed by this. The app's engine has to catch up.
     pub changed: Option<Patch>,
     pub peers_changed: bool,
+    /// Who is waiting to be let in changed.
+    pub requests_changed: bool,
+    /// Someone new is asking to be let in: worth getting the host's attention.
+    pub asked: bool,
+    /// A device that is in now, and may reconnect whenever it likes.
+    pub admit: Option<DeviceKey>,
+    /// A device that may not connect again without a new code.
+    pub revoke: Option<DeviceKey>,
     /// A connection to close once `send` has gone out.
     pub close: Option<ConnId>,
 }
@@ -33,23 +59,30 @@ pub struct HostSession {
     id: Uuid,
     name: String,
     color: String,
-    secret: String,
     revision: u64,
     guests: HashMap<Uuid, Guest>,
-    /// Removed by the host, so they don't simply come back through the link they still have.
-    removed: HashSet<Uuid>,
+    /// Oldest first.
+    requests: Vec<JoinRequest>,
+    /// Who is on each open connection.
+    keys: HashMap<ConnId, DeviceKey>,
+    /// Removed by the host. Coming back takes a new code and the host saying yes again.
+    removed: HashSet<DeviceKey>,
+    /// Letting new people ask to come in.
+    open: bool,
 }
 
 impl HostSession {
-    pub fn new(name: String, color: String, secret: String) -> Self {
+    pub fn new(name: String, color: String) -> Self {
         HostSession {
             id: Uuid::new_v4(),
             name,
             color,
-            secret,
             revision: 0,
             guests: HashMap::new(),
+            requests: Vec::new(),
+            keys: HashMap::new(),
             removed: HashSet::new(),
+            open: true,
         }
     }
 
@@ -57,13 +90,18 @@ impl HostSession {
         self.id
     }
 
-    pub fn secret(&self) -> &str {
-        &self.secret
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 
-    /// Rotate the invite. People already in stay in.
-    pub fn set_secret(&mut self, secret: String) {
-        self.secret = secret;
+    /// Whether new people may ask to come in. People already in stay in, and can come back.
+    pub fn set_open(&mut self, open: bool) {
+        self.open = open;
+    }
+
+    /// People waiting to be let in, oldest first.
+    pub fn requests(&self) -> &[JoinRequest] {
+        &self.requests
     }
 
     /// Everyone connected, host first.
@@ -82,14 +120,19 @@ impl HostSession {
         self.guests.iter().find(|(_, g)| g.conn == Some(conn)).map(|(id, _)| *id)
     }
 
-    /// Whoever is on `conn`, for stamping their cursor.
+    /// Whoever is on `conn`, for stamping their cursor. Nobody, until they are let in.
     pub fn client_on(&self, conn: ConnId) -> Option<Uuid> {
         self.guest_on(conn)
     }
 
-    /// Every open connection except `conn`.
+    /// Every open connection of someone let in, except `conn`.
     pub fn others(&self, conn: Option<ConnId>) -> Vec<ConnId> {
         self.conns().filter(|c| Some(*c) != conn).collect()
+    }
+
+    /// A connection opened, from the device with this key.
+    pub fn on_connect(&mut self, conn: ConnId, key: DeviceKey) {
+        self.keys.insert(conn, key);
     }
 
     fn tell_peers(&self, out: &mut HostEvents) {
@@ -144,8 +187,9 @@ impl HostSession {
     pub fn on_message(&mut self, doc: &mut Document, conn: ConnId, message: ToHost) -> HostEvents {
         let mut out = HostEvents::default();
         match message {
-            ToHost::Hello { protocol, schema, secret, client, name, color } => {
-                self.on_hello(doc, conn, protocol, schema, &secret, client, name, color, &mut out);
+            ToHost::Hello { protocol, schema, client, name, color } => {
+                let info = PeerInfo { id: client, name, color, is_host: false };
+                self.on_hello(doc, conn, protocol, schema, info, &mut out);
             }
             ToHost::Op { seq, op_id, body } => {
                 if let Some(client) = self.guest_on(conn) {
@@ -157,45 +201,84 @@ impl HostSession {
                     self.guests.remove(&client);
                     self.tell_peers(&mut out);
                 }
+                self.drop_request(conn, &mut out);
                 out.close = Some(conn);
             }
         }
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn on_hello(
-        &mut self,
-        doc: &Document,
-        conn: ConnId,
-        protocol: u32,
-        schema: u32,
-        secret: &str,
-        client: Uuid,
-        name: String,
-        color: String,
-        out: &mut HostEvents,
-    ) {
-        let refuse = if protocol != PROTOCOL_VERSION || schema != SCHEMA_VERSION {
-            Some("you and the host are on different versions of dissonant. use the same build.".to_string())
-        } else if secret != self.secret && !self.guests.contains_key(&client) {
-            // Someone already in the session stays in when the invite changes, and that has to
-            // hold through a dropped connection too.
-            Some("this invite isn't valid any more. ask the host for a new one.".to_string())
-        } else if self.removed.contains(&client) {
-            Some("the host removed you from this session.".to_string())
-        } else if !self.guests.contains_key(&client) && self.peers().len() >= MAX_PEOPLE {
-            Some(format!("this session is full ({MAX_PEOPLE} people)."))
-        } else {
-            None
+    fn refuse(conn: ConnId, reason: &str, out: &mut HostEvents) {
+        out.send.push((conn, ToGuest::Refused { reason: reason.to_string() }));
+        out.close = Some(conn);
+    }
+
+    fn full(&self) -> bool {
+        1 + self.guests.len() >= MAX_PEOPLE
+    }
+
+    fn on_hello(&mut self, doc: &Document, conn: ConnId, protocol: u32, schema: u32, info: PeerInfo, out: &mut HostEvents) {
+        let Some(&key) = self.keys.get(&conn) else {
+            return Self::refuse(conn, "couldn't tell which device this is. try joining again.", out);
         };
-        if let Some(reason) = refuse {
-            out.send.push((conn, ToGuest::Refused { reason }));
-            out.close = Some(conn);
+        if protocol != PROTOCOL_VERSION || schema != SCHEMA_VERSION {
+            return Self::refuse(conn, "you and the host are on different versions of dissonant. use the same build.", out);
+        }
+        if self.removed.contains(&key) {
+            return Self::refuse(conn, "the host removed you from this session.", out);
+        }
+        // Back after a dropped connection: the same place, if it is the same device.
+        if let Some(guest) = self.guests.get(&info.id) {
+            if guest.key != key {
+                out.revoke = Some(key);
+                return Self::refuse(conn, "that place in the session belongs to someone else.", out);
+            }
+            return self.welcome(doc, conn, info, out);
+        }
+        // Still waiting, on a new connection.
+        if let Some(request) = self.requests.iter_mut().find(|r| r.key == key) {
+            request.conn = conn;
+            request.info = info;
+            out.send.push((conn, ToGuest::Waiting));
+            out.requests_changed = true;
             return;
         }
-        let info = PeerInfo { id: client, name, color, is_host: false };
-        let guest = self.guests.entry(client).or_insert(Guest { info: info.clone(), last_seq: 0, conn: None });
+        if !self.open {
+            return Self::refuse(conn, "the host isn't letting anyone new in right now.", out);
+        }
+        if self.full() {
+            return Self::refuse(conn, &format!("this session is full ({MAX_PEOPLE} people)."), out);
+        }
+        self.requests.push(JoinRequest { info, key, conn });
+        out.send.push((conn, ToGuest::Waiting));
+        out.requests_changed = true;
+        out.asked = true;
+    }
+
+    /// Let someone in, or not.
+    pub fn answer(&mut self, doc: &Document, client: Uuid, allow: bool) -> HostEvents {
+        let mut out = HostEvents::default();
+        let Some(at) = self.requests.iter().position(|r| r.info.id == client) else { return out };
+        let request = self.requests.remove(at);
+        out.requests_changed = true;
+        if !allow {
+            out.revoke = Some(request.key);
+            Self::refuse(request.conn, "the host didn't let you in.", &mut out);
+        } else if self.full() {
+            out.revoke = Some(request.key);
+            Self::refuse(request.conn, &format!("this session is full ({MAX_PEOPLE} people)."), &mut out);
+        } else {
+            out.admit = Some(request.key);
+            let guest = Guest { info: request.info.clone(), key: request.key, last_seq: 0, conn: None };
+            self.guests.insert(request.info.id, guest);
+            self.welcome(doc, request.conn, request.info, &mut out);
+        }
+        out
+    }
+
+    /// Someone let in gets the project on `conn`.
+    fn welcome(&mut self, doc: &Document, conn: ConnId, info: PeerInfo, out: &mut HostEvents) {
+        let Some(guest) = self.guests.get_mut(&info.id) else { return };
         guest.info = info;
         guest.conn = Some(conn);
         let last_seq = guest.last_seq;
@@ -210,6 +293,12 @@ impl HostSession {
             ToGuest::Welcome { revision: self.revision, last_seq, model: Box::new(model), peers: self.peers() },
         ));
         self.tell_peers(out);
+    }
+
+    fn drop_request(&mut self, conn: ConnId, out: &mut HostEvents) {
+        let before = self.requests.len();
+        self.requests.retain(|r| r.conn != conn);
+        out.requests_changed |= self.requests.len() != before;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -248,9 +337,12 @@ impl HostSession {
         }
     }
 
-    /// A connection dropped. The guest's place is kept, in case it comes back.
+    /// A connection dropped. A guest's place is kept, in case it comes back; someone still
+    /// waiting stops waiting.
     pub fn on_disconnect(&mut self, conn: ConnId) -> HostEvents {
         let mut out = HostEvents::default();
+        self.keys.remove(&conn);
+        self.drop_request(conn, &mut out);
         if let Some(client) = self.guest_on(conn) {
             if let Some(guest) = self.guests.get_mut(&client) {
                 guest.conn = None;
@@ -263,8 +355,9 @@ impl HostSession {
     /// Put someone out of the session for good.
     pub fn remove(&mut self, client: Uuid) -> HostEvents {
         let mut out = HostEvents::default();
-        self.removed.insert(client);
         if let Some(guest) = self.guests.remove(&client) {
+            self.removed.insert(guest.key);
+            out.revoke = Some(guest.key);
             if let Some(conn) = guest.conn {
                 let reason = "the host removed you from this session.".to_string();
                 out.send.push((conn, ToGuest::Ended { reason }));
@@ -275,11 +368,12 @@ impl HostSession {
         out
     }
 
-    /// End the session for everyone.
+    /// End the session for everyone, waiting or in.
     pub fn end(&mut self) -> HostEvents {
         let mut out = HostEvents::default();
         let reason = "the host ended the session.".to_string();
-        out.send.extend(self.conns().map(|c| (c, ToGuest::Ended { reason: reason.clone() })));
+        let waiting = self.requests.iter().map(|r| r.conn);
+        out.send.extend(self.conns().chain(waiting).map(|c| (c, ToGuest::Ended { reason: reason.clone() })));
         out
     }
 }

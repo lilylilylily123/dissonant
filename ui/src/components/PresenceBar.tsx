@@ -35,7 +35,7 @@ export function PresenceBar() {
   return (
     <div className="presence">
       {session.reconnecting && <span className="reconnecting">reconnecting…</span>}
-      {session.role === "guest" && !session.live && !session.reconnecting && <span className="reconnecting">joining…</span>}
+      {session.role === "guest" && !session.live && !session.reconnecting && <span className="reconnecting">{session.waiting ? "waiting to be let in…" : "joining…"}</span>}
       {others.map((p) => (
         <Person key={p.id} {...p} />
       ))}

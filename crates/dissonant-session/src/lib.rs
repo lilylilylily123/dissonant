@@ -16,5 +16,5 @@ pub mod protocol;
 
 pub use base::{narrow, Bases};
 pub use guest::{GuestEvents, GuestSession};
-pub use host::{ConnId, HostEvents, HostSession};
+pub use host::{ConnId, DeviceKey, HostEvents, HostSession, JoinRequest};
 pub use protocol::{OpBody, PeerInfo, ToGuest, ToHost, PROTOCOL_VERSION};

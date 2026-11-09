@@ -31,3 +31,10 @@ opt-level = 3
 # Audio DSP in debug builds is painfully slow; keep the engine optimized even in dev.
 [profile.dev.package.dissonant-engine]
 opt-level = 2
+
+# Join codes are stretched with Argon2 on purpose; unoptimized, that takes seconds instead of a blink.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
